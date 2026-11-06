@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"strings"
-	"syscall"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
@@ -26,6 +25,7 @@ type BusinessContext struct {
 type BusinessOptions struct {
 	Profile, File, Space string
 	ProfileSet, FileSet  bool
+	BotIDSet             bool
 }
 
 // ResolveBusiness reads the profile and bearer once. A nil result leaves
@@ -42,17 +42,12 @@ func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessCon
 		return nil, output.ErrValidation(selector+" is empty", "select an existing profile name")
 	}
 	newSelector := opts.FileSet || tokenFileSet || profileEnvSet
-	unified := newSelector || TokenKind(strings.TrimSpace(token)) == "unknown"
 	if tokenSet && tokenFileSet {
 		return nil, output.ErrValidation("OCTO_TOKEN and OCTO_TOKEN_FILE are both set", "set only one of these environment variables")
 	}
-
-	profiles, err := loadBusinessProfiles(unified, selector != "")
-	if err != nil {
+	profiles, unified, err := businessProfiles(token, selector, newSelector, opts.BotIDSet)
+	if err != nil || !unified {
 		return nil, err
-	}
-	if profiles == nil && !unified {
-		return nil, nil
 	}
 	name, p, err := profiles.SelectProfile(profileName, selector != "")
 	if err != nil {
@@ -94,16 +89,29 @@ func resolveBusinessToken(opts BusinessOptions, envToken string, tokenSet bool, 
 	return source, token, nil
 }
 
-func loadBusinessProfiles(unified, explicitProfile bool) (*config.ProfileConfig, error) {
+// businessProfiles keeps unambiguous legacy environment invocations away
+// from the profile file. Explicit new selectors always validate the config.
+func businessProfiles(token, selector string, newSelector, botIDSet bool) (*config.ProfileConfig, bool, error) {
+	kind := TokenKind(strings.TrimSpace(token))
+	if !newSelector && selector == "" && !botIDSet && usesLegacyEnvironment(kind) {
+		return nil, false, nil
+	}
 	profiles, err := config.LoadProfileConfig()
-	if err == nil {
-		return profiles, nil
+	if err != nil {
+		return nil, false, ProfileConfigError(err)
 	}
-	// Legacy environment credentials can run without a local profile directory.
-	if !unified && !explicitProfile && errors.Is(err, syscall.ENOTDIR) && config.ResolveEnvToken().Token != "" {
-		return nil, nil
+	unified := newSelector || profiles != nil || (!botIDSet && kind == "unknown")
+	if unified && botIDSet {
+		return nil, false, output.ErrValidation("--bot-id cannot be used with unified credentials", "select a Profile or remove --bot-id")
 	}
-	return nil, ProfileConfigError(err)
+	return profiles, unified, nil
+}
+
+func usesLegacyEnvironment(kind string) bool {
+	if kind == "" {
+		return strings.TrimSpace(os.Getenv(config.EnvBotToken)) != ""
+	}
+	return kind != "unknown"
 }
 
 // ProfileConfigError reports a metadata error without echoing file contents.

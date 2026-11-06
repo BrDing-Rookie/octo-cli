@@ -45,6 +45,7 @@ type GlobalOptions struct {
 	CredentialFile    string
 	CredentialFileSet bool
 	BotID             string
+	BotIDSet          bool
 }
 
 // Factory is the DI container. All accessors are lazy + cached so a command
@@ -99,7 +100,7 @@ func NewDefaultFactory() *Factory {
 		cred, err := credential.ResolveBusiness(config.LoadRuntime(), credential.BusinessOptions{
 			Profile: f.Globals.Profile, ProfileSet: f.Globals.ProfileSet,
 			File: f.Globals.CredentialFile, FileSet: f.Globals.CredentialFileSet || f.Globals.CredentialFile != "",
-			Space: f.Globals.Space,
+			Space: f.Globals.Space, BotIDSet: f.Globals.BotIDSet || f.Globals.BotID != "",
 		})
 		f.business = cred
 		return cred, err
@@ -133,16 +134,26 @@ func NewDefaultFactory() *Factory {
 		if f.cli != nil {
 			return f.cli, nil
 		}
-		cli, err := f.RequestClient(client.Options{
+		opts := client.Options{
 			Verbose: f.Globals.Verbose,
 			DryRun:  f.Globals.DryRun,
 			NoRetry: f.Globals.NoRetry,
 			Timeout: f.Globals.Timeout,
 			ErrOut:  f.IOStreams.ErrOut,
-		})
+		}
+		if f.business != nil {
+			f.cli = client.NewBusiness(f.business, opts)
+			return f.cli, nil
+		}
+		cfg, err := f.ConfigFunc()
 		if err != nil {
 			return nil, err
 		}
+		cred, err := f.CredentialFunc()
+		if err != nil {
+			return nil, err
+		}
+		cli := client.New(cfg, cred, opts)
 		f.cli = cli
 		return cli, nil
 	}
@@ -243,18 +254,9 @@ func configureMailProviders(f *Factory) {
 // (ambiguous / missing profile) AND real IO errors (home dir, salt read) both
 // surface rather than masquerading as a missing token.
 func (f *Factory) buildConfig() (*config.Config, error) {
-	business, err := f.BusinessCredential()
-	if err != nil {
-		return nil, err
-	}
-	cfg := config.LoadRuntime()
+	cfg := config.Load()
 	if f.Globals.Format != "" {
 		cfg.Format = f.Globals.Format
-	}
-	if business != nil {
-		cfg.APIBaseURL, cfg.APIBaseURLSource = business.APIBaseURL, business.APIBaseURLSource
-		cfg.SpaceID = business.SpaceID
-		return cfg, nil
 	}
 	cred, err := f.CredentialFunc()
 	if err != nil {
@@ -270,7 +272,7 @@ func (f *Factory) buildConfig() (*config.Config, error) {
 		if cred.SpaceID != "" {
 			cfg.SpaceID = cred.SpaceID
 		}
-		if err := overlayProfileBaseURL(cfg, cred.Profile, cred.APIBaseURL); err != nil {
+		if err := f.overlayProfileBaseURL(cfg, cred.Profile); err != nil {
 			return nil, err
 		}
 	}
@@ -394,19 +396,29 @@ func (f *Factory) AuthStore() (*authstore.Store, error) {
 // overlayProfileBaseURL applies the active profile's stored API base URL.
 // Precedence is profile > OCTO_API_BASE_URL > default: a profile that records
 // an origin routes there even when the environment variable names another one.
-func overlayProfileBaseURL(cfg *config.Config, profile, baseURL string) error {
-	if baseURL == "" {
+func (f *Factory) overlayProfileBaseURL(cfg *config.Config, profile string) error {
+	if profile == "" {
 		return nil
 	}
-	normalized, err := config.NormalizeAPIBaseURL(baseURL)
+	store, err := f.AuthStore()
 	if err != nil {
-		return output.ErrValidation(
-			fmt.Sprintf("profile %q has an invalid API base URL: %v", profile, err),
-			fmt.Sprintf("repair it with `octo-cli --profile %s auth update --api-base-url <origin>` or remove it with `octo-cli --profile %s auth update --clear-api-base-url`", profile, profile),
-		)
+		return err
 	}
-	cfg.APIBaseURL = normalized
-	cfg.APIBaseURLSource = "profile"
+	profiles, err := store.LoadProfiles()
+	if err != nil {
+		return err
+	}
+	if m, ok := profiles[profile]; ok && m.APIBaseURL != "" {
+		normalized, err := config.NormalizeAPIBaseURL(m.APIBaseURL)
+		if err != nil {
+			return output.ErrValidation(
+				fmt.Sprintf("profile %q has an invalid API base URL: %v", profile, err),
+				fmt.Sprintf("repair it with `octo-cli --profile %s auth update --api-base-url <origin>` or remove it with `octo-cli --profile %s auth update --clear-api-base-url`", profile, profile),
+			)
+		}
+		cfg.APIBaseURL = normalized
+		cfg.APIBaseURLSource = "profile"
+	}
 	return nil
 }
 
@@ -416,27 +428,6 @@ func (f *Factory) BusinessCredential() (*credential.BusinessContext, error) {
 		return nil, nil
 	}
 	return f.businessFunc()
-}
-
-// RequestClient assembles a transport with the command's resolved credential.
-// Callers may supply different transport options for a preliminary read.
-func (f *Factory) RequestClient(opts client.Options) (*client.Client, error) {
-	cfg, err := f.Config()
-	if err != nil {
-		return nil, err
-	}
-	business, err := f.BusinessCredential()
-	if err != nil {
-		return nil, err
-	}
-	if business != nil {
-		return client.NewBusiness(business, opts), nil
-	}
-	cred, err := f.Credential()
-	if err != nil {
-		return nil, err
-	}
-	return client.New(cfg, cred, opts), nil
 }
 
 // Config returns the resolved config (cached).

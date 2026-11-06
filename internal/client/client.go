@@ -58,11 +58,9 @@ type Request struct {
 	// Empty means the active business credential; "mail" means the Agent Mail token
 	// bound to that same Bot identity. The transport itself never resolves
 	// secrets.
-	Credential string
-	Method     string
-	Path       string
-	// ExactPath preserves the caller-supplied path for unified API passthrough.
-	ExactPath   bool
+	Credential  string
+	Method      string
+	Path        string
 	Query       url.Values
 	Body        any
 	Headers     map[string]string
@@ -815,22 +813,10 @@ func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 		copyReq := *req
 		copyReq.SecretValues = append([]string{c.business.Token}, req.SecretValues...)
 		req = &copyReq
-		for name, value := range req.Headers {
-			if strings.EqualFold(name, "Authorization") ||
-				(strings.EqualFold(name, "X-Space-Id") && (req.SuppressSpaceHeader || value != c.business.SpaceID)) {
-				return nil, output.ErrValidation("request headers conflict with the resolved credential", "use the unified Token and Space selectors")
-			}
-		}
 	}
 	body, err := c.do(ctx, req)
 	if err != nil {
 		return nil, redactError(err, req.SecretValues)
-	}
-	if c.business != nil {
-		secrets := []string{c.business.Token}
-		if containsAnySecret(string(body), secrets) {
-			body = redactSecretBytes(body, secrets)
-		}
 	}
 	return body, nil
 }
@@ -894,8 +880,8 @@ func (c *Client) do(ctx context.Context, req *Request) ([]byte, error) {
 
 	// Route the message-search family by chat-id scope and token kind
 	// (no channel_id → cross-session global; uk_ → /v1/user; app_ → error).
-	// Non-search paths pass through unchanged.
-	if c.business == nil || !req.ExactPath {
+	// Unified API passthrough uses the caller's path verbatim.
+	if c.business == nil {
 		routedPath, err := routeSearchPath(c.cred, req.Path, req.Body)
 		if err != nil {
 			return nil, err

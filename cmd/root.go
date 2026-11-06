@@ -30,6 +30,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 		Long:  "octo-cli is a CLI for AI Agent Bots to interact with Octo services.\nService commands are generated from the embedded OpenAPI registry.",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			f.Globals.ProfileSet = cmd.Flags().Changed("profile")
+			f.Globals.BotIDSet = cmd.Flags().Changed("bot-id")
 			f.Globals.CredentialFileSet = cmd.Flags().Changed("credential-file")
 			if err := validateTaskModeCommand(cmd); err != nil {
 				return err
@@ -50,6 +51,20 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				}
 				return nil
 			}
+			business, err := f.BusinessCredential()
+			if err != nil {
+				return err
+			}
+			if business != nil {
+				// CLI-01/02 expose a caller-supplied path through the generic
+				// transport. Generated and named service routes need CLI-07.
+				if cmd.Parent() != cmd.Root() || cmd.Name() != "api" || cmd.Flags().Changed("service") {
+					return output.ErrWithHint("validation", "UNIFIED_API_ONLY",
+						"unified credentials currently require api without --service",
+						"use api METHOD PATH with a route that accepts unified credentials")
+				}
+				return f.PreflightOutput(f.Format())
+			}
 			cfg, err := f.Config()
 			if err != nil {
 				return err
@@ -57,18 +72,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 			if err := f.PreflightOutput(f.Format()); err != nil {
 				return err
 			}
-			business, err := f.BusinessCredential()
-			if err != nil {
-				return err
-			}
-			if business == nil {
-				return cfg.Validate()
-			}
-			switch topLevelCommand(cmd).Name() {
-			case "mail", "loop":
-				return output.ErrValidation("this command requires its existing dedicated credential", "use the Mail or Loop credential flow")
-			}
-			return nil
+			return cfg.Validate()
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -114,8 +118,12 @@ func validateTaskModeCommand(cmd *cobra.Command) error {
 	if strings.ToLower(strings.TrimSpace(os.Getenv(config.EnvCredentialMode))) != config.CredentialModeTask {
 		return nil
 	}
-	current := topLevelCommand(cmd)
-	if current.Parent() == nil {
+	root := cmd.Root()
+	current := cmd
+	for current.Parent() != nil && current.Parent() != root {
+		current = current.Parent()
+	}
+	if current == root {
 		return nil
 	}
 	switch current.Name() {
@@ -124,13 +132,6 @@ func validateTaskModeCommand(cmd *cobra.Command) error {
 	default:
 		return fmt.Errorf("%s=task only allows Loop commands", config.EnvCredentialMode)
 	}
-}
-
-func topLevelCommand(cmd *cobra.Command) *cobra.Command {
-	for cmd.Parent() != nil && cmd.Parent().Parent() != nil {
-		cmd = cmd.Parent()
-	}
-	return cmd
 }
 
 // withholdDisabledServices removes the command subtree for any service whose

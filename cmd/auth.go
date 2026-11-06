@@ -226,13 +226,6 @@ func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "Show the single active bot identity (whoami); use `auth list` to enumerate",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			business, err := f.BusinessCredential()
-			if err != nil {
-				return failErr(f, err)
-			}
-			if business != nil {
-				return emitJSON(f, map[string]any{"active": businessCredentialInfo(business)})
-			}
 			// Report the same credential an ordinary request would use. In
 			// particular, environment credentials must bypass the local store.
 			cred, resolveErr := f.Credential()
