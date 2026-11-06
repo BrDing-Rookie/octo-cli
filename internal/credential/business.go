@@ -52,6 +52,9 @@ func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessCon
 	if err != nil {
 		return nil, err
 	}
+	if !external && p.TokenSource != nil && p.APIBaseURL == "" {
+		return nil, output.ErrValidation("profile token_source requires api_base_url", "set the API origin in the selected profile")
+	}
 	if err := runtime.ApplyProfile(p, opts.Space); err != nil {
 		return nil, output.ErrValidation(err.Error(), "check the profile, OCTO_API_BASE_URL and Space settings")
 	}
