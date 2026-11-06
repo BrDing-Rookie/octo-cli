@@ -1089,7 +1089,15 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		// *url.Error.Error() embeds the whole request URL, so an x-octo-secret
 		// path parameter (invite / share token) would otherwise reach the default
 		// stderr error envelope — no --verbose needed to leak it.
-		msg := redactSecrets(err.Error(), req.SecretValues)
+		diagnosticErr := err
+		var urlErr *url.Error
+		// Only the original URL can be rebuilt from this request's parameters.
+		if c.business != nil && len(req.Query) > 0 && errors.As(err, &urlErr) && urlErr.URL == urlStr {
+			diagnostic := *urlErr
+			diagnostic.URL = c.redactDiagnosticURL(req, urlStr)
+			diagnosticErr = &diagnostic
+		}
+		msg := redactSecrets(diagnosticErr.Error(), req.SecretValues)
 		if len(req.ResponseSecretFields) > 0 {
 			// Go parses Location before CheckRedirect runs. A malformed redirect
 			// therefore surfaces here as a *url.Error containing the raw signed

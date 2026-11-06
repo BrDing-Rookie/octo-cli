@@ -574,6 +574,64 @@ func TestPhaseOneEncodedBearerStructuredQueryDiagnostics(t *testing.T) {
 	}
 }
 
+func TestPhaseOneEncodedBearerNetworkError(t *testing.T) {
+	phaseOneEnv(t)
+	const bearer = "abc/1234"
+	const params = `{"note":"prefix%61bc%2f1234suffix","prefix%61bc%2f1234suffix":"keep"}`
+	const wire = "/check?note=prefix%2561bc%252f1234suffix&prefix%2561bc%252f1234suffix=keep"
+	const masked = "/check?note=prefix%2A%2A%2AREDACTED%2A%2A%2Asuffix&prefix%2A%2A%2AREDACTED%2A%2A%2Asuffix=keep"
+	calls := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- r.RequestURI
+		if r.Header.Get("Authorization") != "Bearer "+bearer {
+			t.Error("request did not use the expected bearer")
+		}
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Errorf("hijack connection: %v", err)
+			return
+		}
+		if err := conn.Close(); err != nil {
+			t.Errorf("close connection: %v", err)
+		}
+	}))
+	defer server.Close()
+	t.Setenv("OCTO_API_BASE_URL", server.URL)
+	for _, tc := range []struct{ name, mode, tokenEnv, want string }{
+		{"unified", "unified", "OCTO_TOKEN", masked},
+		{"legacy", "", "OCTO_BOT_TOKEN", wire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
+			t.Setenv(tc.tokenEnv, bearer)
+			stderr, err := phaseOneRun("--no-retry", "api", "GET", "/check", "--params", params)
+			exitErr := output.AsExitError(err)
+			if exitErr == nil || exitErr.ExitCode() != 1 {
+				t.Fatalf("expected network exit code 1, got %v", err)
+			}
+			var envelope struct {
+				Error struct{ Code, Type, Message, Hint string }
+			}
+			if err := json.Unmarshal([]byte(stderr), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			got := envelope.Error
+			if got.Code != "NETWORK_ERROR" || got.Type != "network" || got.Hint != "transport error" ||
+				!strings.HasPrefix(got.Message, fmt.Sprintf("Get %q: ", server.URL+tc.want)) {
+				t.Fatalf("unexpected structured error: %s", stderr)
+			}
+			select {
+			case uri := <-calls:
+				if uri != wire {
+					t.Errorf("sent URI = %q, want %q", uri, wire)
+				}
+			default:
+				t.Fatal("no request received")
+			}
+		})
+	}
+}
+
 func TestPhaseOneEncodedBearerRequestBodyDiagnostics(t *testing.T) {
 	phaseOneEnv(t)
 	const bearer = "abc/1234"
