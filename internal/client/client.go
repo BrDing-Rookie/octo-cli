@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -785,8 +786,30 @@ func RedactBearer(s, token string) string {
 	if token == "" {
 		return s
 	}
+	if strings.Contains(s, "%") {
+		s = redactEscapedBearer(s, token)
+	}
 	for _, form := range secretForms(token) {
 		s = strings.ReplaceAll(s, form, secretMask)
+	}
+	return s
+}
+
+var urlEscapeTriplet = regexp.MustCompile(`%[0-9A-F]{2}`)
+
+func redactEscapedBearer(s, token string) string {
+	for _, escaped := range []string{url.PathEscape(token), url.QueryEscape(token)} {
+		if escaped == token || !strings.Contains(escaped, "%") {
+			continue
+		}
+		// Only the hexadecimal escapes are case-insensitive. Literal bearer
+		// characters, including characters following an encoded %, match exactly.
+		pattern := urlEscapeTriplet.ReplaceAllString(regexp.QuoteMeta(escaped), `(?i:${0})`)
+		matcher, err := regexp.Compile(pattern)
+		if err != nil {
+			return secretMask
+		}
+		s = matcher.ReplaceAllLiteralString(s, secretMask)
 	}
 	return s
 }

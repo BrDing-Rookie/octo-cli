@@ -345,6 +345,63 @@ func TestPhaseOneShortBearerDiagnostics(t *testing.T) {
 	}
 }
 
+func TestPhaseOneEncodedBearerURLDiagnostics(t *testing.T) {
+	phaseOneEnv(t)
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+	t.Setenv("OCTO_API_BASE_URL", "https://example.invalid")
+	for _, tc := range []struct {
+		name, bearer, target, want string
+	}{
+		{"lowercase path", "abc/1234", "/prefixabc%2f1234suffix", "/prefix***REDACTED***suffix"},
+		{"uppercase path", "abc/1234", "/prefixabc%2F1234suffix", "/prefix***REDACTED***suffix"},
+		{"lowercase query", "abc/1234", "/check?note=prefixabc%2f1234suffix", "/check?note=prefix***REDACTED***suffix"},
+		{"mixed escapes", "abc/?1234", "/prefixabc%2f%3F1234suffix", "/prefix***REDACTED***suffix"},
+		{"literal token case", "abc/1234", "/prefixAbc%2f1234suffix", "/prefixAbc%2f1234suffix"},
+		{"encoded literal percent", "abc%2f1234", "/prefixabc%252F1234suffix", "/prefixabc%252F1234suffix"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_TOKEN", tc.bearer)
+			out, err := phaseOneRun("--dry-run", "api", "GET", tc.target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope struct {
+				Data struct{ URL string }
+			}
+			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if want := "https://example.invalid" + tc.want; envelope.Data.URL != want {
+				t.Errorf("URL = %q, want %q", envelope.Data.URL, want)
+			}
+		})
+	}
+}
+
+func TestPhaseOneOutputPreflightMasksUnifiedBearer(t *testing.T) {
+	phaseOneEnv(t)
+	const bearer = "abc1234"
+	const format = "prefix" + bearer + "suffix"
+	t.Setenv("OCTO_TOKEN", bearer)
+	t.Setenv("OCTO_API_BASE_URL", "https://example.invalid")
+	for _, tc := range []struct{ name, mode, want string }{
+		{"unified", "unified", "prefix***REDACTED***suffix"},
+		{"legacy", "", format},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
+			_, err := phaseOneRun("--dry-run", "api", "GET", "/check", "--format", format)
+			exit := output.AsExitError(cmdutil.WrapCLIError(err))
+			if exit == nil || exit.Code != "CLI_ERROR" || !strings.Contains(exit.Message, tc.want) {
+				t.Fatalf("unexpected output preflight error: %v", err)
+			}
+			if tc.mode == "unified" && strings.Contains(exit.Message, bearer) {
+				t.Fatal("output preflight error disclosed the unified bearer")
+			}
+		})
+	}
+}
+
 func TestPhaseOneMissingBodyFileDiagnostics(t *testing.T) {
 	dir := phaseOneEnv(t)
 	const bearer = "abc1234"

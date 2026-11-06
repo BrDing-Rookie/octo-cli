@@ -62,7 +62,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				if _, err := f.BusinessCredential(); err != nil {
 					return err
 				}
-				return f.PreflightOutput(f.Format())
+				return preflightUnifiedOutput(f)
 			}
 			cfg, err := f.Config()
 			if err != nil {
@@ -108,6 +108,17 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	withholdDisabledServices(root, f)
 
 	return root
+}
+
+func preflightUnifiedOutput(f *cmdutil.Factory) error {
+	err := f.PreflightOutput(f.Format())
+	if err == nil {
+		return nil
+	}
+	// Classify the original error before masking its message.
+	exit := *output.AsExitError(cmdutil.WrapCLIError(err))
+	exit.Message = f.RedactUnifiedBearer(exit.Message)
+	return &exit
 }
 
 // CLI-01/02 use a caller-supplied API path. Named service behavior and
