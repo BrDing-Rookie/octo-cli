@@ -147,7 +147,7 @@ func NormalizeAPIBaseURL(raw string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("%s must use http or https", EnvAPIBaseURL)
 	}
-	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+	if u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return "", fmt.Errorf("%s must be an absolute base URL without credentials, query parameters, or fragments", EnvAPIBaseURL)
 	}
 	if strings.TrimRight(u.Path, "/") != "" {

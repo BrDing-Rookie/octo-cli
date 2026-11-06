@@ -38,10 +38,10 @@ func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
 	return cmd
 }
 
-func rejectUnifiedAuth(f *cmdutil.Factory, cmd *cobra.Command) error {
+func rejectUnifiedCredentialCommand(f *cmdutil.Factory, name string) error {
 	if config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet) {
 		return failErr(f, output.ErrValidation(
-			"auth "+cmd.Name()+" is unavailable for unified credentials",
+			name+" is unavailable for unified credentials",
 			"use auth list to inspect versioned profiles",
 		))
 	}
@@ -50,7 +50,7 @@ func rejectUnifiedAuth(f *cmdutil.Factory, cmd *cobra.Command) error {
 
 func authMutationPreRun(f *cmdutil.Factory, hint string) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		if err := rejectUnifiedAuth(f, cmd); err != nil {
+		if err := rejectUnifiedCredentialCommand(f, "auth "+cmd.Name()); err != nil {
 			return err
 		}
 		if !f.Globals.DryRun {
@@ -239,7 +239,7 @@ func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "Show the single active bot identity (whoami); use `auth list` to enumerate",
 		Args:  cobra.NoArgs,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return rejectUnifiedAuth(f, cmd)
+			return rejectUnifiedCredentialCommand(f, "auth "+cmd.Name())
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Report the same credential an ordinary request would use. In

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -195,13 +196,6 @@ func TestPhaseOneStandaloneFileAndOfflineDiscovery(t *testing.T) {
 	if err != nil || !strings.Contains(out, "https://standalone.example"+path) ||
 		!strings.Contains(out, "Bearer ***") || strings.Contains(out, "standalone-secret") {
 		t.Fatalf("standalone dry run: %v (%s)", err, out)
-	}
-
-	// Unified mode keeps the bearer opaque even if its prefix looks familiar.
-	phaseOneWrite(t, file, "bf_unified-file-bearer")
-	out, err = phaseOneRun("--dry-run", "api", "POST", path)
-	if err != nil || !strings.Contains(out, `"Authorization": "Bearer ***"`) {
-		t.Fatalf("unified dry-run bearer was not fully masked: %v (%s)", err, out)
 	}
 
 	// A named credential file that cannot be opened must not affect local commands.
@@ -561,13 +555,18 @@ func TestPhaseOneStoredTokenRequiresProfileOrigin(t *testing.T) {
 		_, _ = io.WriteString(w, `{}`)
 	}))
 	defer server.Close()
+	origin, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("OCTO_API_BASE_URL", server.URL)
 	phaseOneWrite(t, filepath.Join(dir, "config.json"), fmt.Sprintf(`{
 		"version":1,"current_profile":"missing-origin","profiles":{
 			"missing-origin":{"token_source":{"type":"token_file","path":"token"}},
+			"missing-host":{"api_base_url":%q,"token_source":{"type":"token_file","path":"token"}},
 			"complete":{"api_base_url":%q,"token_source":{"type":"token_file","path":"token"}}
 		}
-	}`, server.URL))
+	}`, "http://:"+origin.Port(), server.URL))
 
 	args := []string{"api", "GET", "/phase-one"}
 	if out, err := phaseOneRun(args...); err == nil || !strings.Contains(err.Error(), "profile token_source requires api_base_url") {
@@ -576,6 +575,15 @@ func TestPhaseOneStoredTokenRequiresProfileOrigin(t *testing.T) {
 	select {
 	case got := <-calls:
 		t.Fatalf("missing Profile origin sent a request with %q", got)
+	default:
+	}
+	if out, err := phaseOneRun(append([]string{"--profile", "missing-host"}, args...)...); err == nil ||
+		!strings.Contains(err.Error(), "invalid API base URL from profile") {
+		t.Errorf("hostless Profile origin: %v (%s), want invalid origin error", err, out)
+	}
+	select {
+	case <-calls:
+		t.Fatal("hostless Profile origin sent an HTTP request")
 	default:
 	}
 	check := func(profile, want string) {
@@ -595,4 +603,98 @@ func TestPhaseOneStoredTokenRequiresProfileOrigin(t *testing.T) {
 	check("complete", "stored-profile-bearer")
 	t.Setenv("OCTO_TOKEN", "external-bearer")
 	check("missing-origin", "external-bearer")
+}
+
+func TestPhaseOneRejectsLegacyTokensInUnifiedAPI(t *testing.T) {
+	calls := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	args := []string{"api", "GET", "/phase-one"}
+	for _, prefix := range []string{"bf_", "app_", "uk_", "octo_loop_", "omb_"} {
+		for _, source := range []string{"env", "env-file", "flag", "profile"} {
+			t.Run(prefix+source, func(t *testing.T) {
+				dir := phaseOneEnv(t)
+				t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+				t.Setenv("OCTO_API_BASE_URL", server.URL)
+				token := prefix + "legacy-fixture-bearer"
+				file := filepath.Join(dir, "token")
+				var flags []string
+				switch source {
+				case "env":
+					t.Setenv("OCTO_TOKEN", token)
+				case "env-file":
+					phaseOneWrite(t, file, token+"\n")
+					t.Setenv("OCTO_TOKEN_FILE", file)
+				case "flag":
+					phaseOneWrite(t, file, token+"\n")
+					flags = []string{"--credential-file", file}
+				case "profile":
+					phaseOneWrite(t, file, token+"\n")
+					phaseOneWrite(t, filepath.Join(dir, "config.json"), fmt.Sprintf(`{
+						"version":1,"current_profile":"a","profiles":{
+							"a":{"api_base_url":%q,"token_source":{"type":"token_file","path":"token"}}
+						}
+					}`, server.URL))
+				}
+				out, err := phaseOneRun(append(flags, args...)...)
+				if err == nil || !strings.Contains(err.Error(), "cannot be used with unified credentials") {
+					t.Errorf("execute: %v (%s), want local legacy Token rejection", err, out)
+				} else if strings.Contains(out+err.Error(), token) {
+					t.Error("diagnostic disclosed the credential")
+				}
+				select {
+				case <-calls:
+					t.Error("a legacy Token reached the HTTP fixture")
+				default:
+				}
+			})
+		}
+	}
+	for _, tc := range []struct{ mode, token string }{
+		{"unified", "opaque-unified-fixture"},
+		{"", "bf_legacy-fixture-bearer"},
+	} {
+		t.Run("accepted "+tc.token, func(t *testing.T) {
+			phaseOneEnv(t)
+			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
+			t.Setenv("OCTO_API_BASE_URL", server.URL)
+			t.Setenv("OCTO_TOKEN", tc.token)
+			if out, err := phaseOneRun(args...); err != nil {
+				t.Fatalf("execute: %v (%s)", err, out)
+			}
+			select {
+			case got := <-calls:
+				if got != "Bearer "+tc.token {
+					t.Error("request did not use the selected credential")
+				}
+			default:
+				t.Fatal("no request received")
+			}
+		})
+	}
+}
+
+func TestPhaseOneConfigShowRejectsUnifiedMode(t *testing.T) {
+	phaseOneEnv(t)
+	t.Setenv("OCTO_API_BASE_URL", "https://legacy.example")
+	t.Setenv("OCTO_TOKEN", "bf_legacy-fixture-bearer")
+	t.Setenv("OCTO_PROFILE", "missing")
+	if out, err := phaseOneRun("api", "GET", "/phase-one"); err == nil || !strings.Contains(err.Error(), "selected profile does not exist") {
+		t.Fatalf("unified API: %v (%s), want missing Profile error", err, out)
+	}
+	if out, err := phaseOneRun("config", "show"); err == nil || !strings.Contains(err.Error(), "config show is unavailable for unified credentials") ||
+		strings.Contains(out, `"ok": true`) {
+		t.Errorf("unified config show: %v (%s), want explicit rejection", err, out)
+	}
+	if err := os.Unsetenv("OCTO_PROFILE"); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := phaseOneRun("config", "show"); err != nil || !strings.Contains(out, `"api_base_url": "https://legacy.example"`) ||
+		strings.Contains(out, "bf_legacy-fixture-bearer") {
+		t.Fatalf("legacy config show: %v (%s), want masked legacy diagnostic", err, out)
+	}
 }

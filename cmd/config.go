@@ -36,6 +36,9 @@ func newConfigShowCmd(f *cmdutil.Factory) *cobra.Command {
 		Use:   "show",
 		Short: "Print the resolved configuration (token masked)",
 		Args:  cobra.NoArgs,
+		PreRunE: func(_ *cobra.Command, _ []string) error {
+			return rejectUnifiedCredentialCommand(f, "config show")
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := f.Config()
 			if err != nil {

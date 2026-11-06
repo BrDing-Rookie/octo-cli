@@ -106,6 +106,10 @@ func resolveBusinessToken(opts BusinessOptions, envToken string, tokenSet bool, 
 	if !validBusinessToken(token) {
 		return "", "", output.ErrAuth("invalid unified Token from "+source, "provide a non-empty Token without whitespace")
 	}
+	// Legacy formats are rejected after selecting unified mode and its source.
+	if TokenKind(token) != "unknown" || strings.HasPrefix(token, "omb_") {
+		return "", "", output.ErrAuth("legacy Token from "+source+" cannot be used with unified credentials", "provide a unified Token or use the legacy credential mode")
+	}
 	return source, token, nil
 }
 
