@@ -6,6 +6,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -41,13 +42,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				// read OCTO_FORMAT without resolving credentials: profiles do
 				// not carry a format setting.
 				if !skipOutputPreflight(cmd, args) {
-					format := config.LoadRuntime().Format
-					if f.Globals != nil && f.Globals.Format != "" {
-						format = f.Globals.Format
-					}
-					if err := f.PreflightOutput(format); err != nil {
-						return err
-					}
+					return preflightOfflineOutput(f)
 				}
 				return nil
 			}
@@ -108,6 +103,25 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	withholdDisabledServices(root, f)
 
 	return root
+}
+
+func preflightOfflineOutput(f *cmdutil.Factory) error {
+	runtime := config.LoadRuntime()
+	format := runtime.Format
+	if f.Globals.Format != "" {
+		format = f.Globals.Format
+	}
+	err := f.PreflightOutput(format)
+	if !errors.Is(err, output.ErrUnknownFormat) {
+		return err
+	}
+	unified, modeErr := runtime.UsesUnifiedCredentials(f.Globals.CredentialFileSet || f.Globals.CredentialFile != "")
+	if modeErr != nil || !unified {
+		return err
+	}
+	exit := *output.AsExitError(cmdutil.WrapCLIError(err))
+	exit.Message = "unknown format (expected json|table|csv|ndjson)"
+	return &exit
 }
 
 func preflightUnifiedOutput(f *cmdutil.Factory) error {

@@ -1098,8 +1098,9 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		// stderr error envelope — no --verbose needed to leak it.
 		diagnosticErr := err
 		var urlErr *url.Error
+		unifiedURLError := c.business != nil && errors.As(err, &urlErr)
 		// Only the original URL can be rebuilt from this request's parameters.
-		if c.business != nil && len(req.Query) > 0 && errors.As(err, &urlErr) && urlErr.URL == urlStr {
+		if unifiedURLError && len(req.Query) > 0 && urlErr.URL == urlStr {
 			diagnostic := *urlErr
 			diagnostic.URL = c.redactDiagnosticURL(req, urlStr)
 			diagnosticErr = &diagnostic
@@ -1118,9 +1119,13 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, output.ErrNetwork(msg, "request timed out or was cancelled")
 		}
-		return nil, &retryableErr{
-			ExitError: output.ErrNetwork(msg, "transport error"),
+		exit := output.ErrNetwork(msg, "transport error")
+		// net/http reports Location parsing as text inside *url.Error.
+		// The server already received the request, so do not replay it.
+		if unifiedURLError && strings.HasPrefix(urlErr.Err.Error(), "failed to parse Location header ") {
+			return nil, exit
 		}
+		return nil, &retryableErr{ExitError: exit}
 	}
 	defer resp.Body.Close() //nolint:errcheck // best-effort close on HTTP response body
 
