@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -412,27 +412,31 @@ func redactBodyForLog(req *Request, marshalled []byte) string {
 // being destroyed on purpose, and the walk iterates in sorted order so the same input
 // always collapses the same way.
 func redactResponseBody(b []byte, secrets []string) []byte {
+	return redactErrorBody(b, secrets, "")
+}
+
+func redactErrorBody(b []byte, secrets []string, bearer string) []byte {
 	if len(b) == 0 || len(secrets) == 0 {
 		return b
+	}
+	mask := func(s string) string {
+		s = maskOrSuppressValue(s, secrets)
+		if bearer != "" && strings.Contains(s, "%") {
+			s = redactEscapedBearer(s, bearer)
+		}
+		return s
 	}
 	if json.Valid(b) {
 		var parsed any
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.UseNumber()
 		if err := dec.Decode(&parsed); err == nil {
-			if buf, merr := json.Marshal(redactErrorEnvelope(parsed, secrets)); merr == nil {
+			if buf, merr := json.Marshal(redactErrorEnvelope(parsed, secrets, mask)); merr == nil {
 				return buf
 			}
 		}
 	}
-	out := redactSecrets(string(b), secrets)
-	if containsAnySecret(out, secrets) {
-		// The whole body, not the occurrence: an opaque body has no structure to bound the
-		// suppression to, and suppressing a diagnostic costs a line of text while
-		// publishing it costs the user their password.
-		return []byte(secretMask)
-	}
-	return []byte(out)
+	return []byte(mask(string(b)))
 }
 
 // redactErrorEnvelope masks a decoded error body, leaving the machine-readable
@@ -490,10 +494,10 @@ func redactResponseBody(b []byte, secrets []string) []byte {
 // tokens are base64url, so they carry upper-case characters or "-", and
 // IsErrorCodeShaped admits only lower-case alphanumerics and underscores. A token
 // therefore fails the shape gate before the vocabulary question is asked.
-func redactErrorEnvelope(v any, secrets []string) any {
+func redactErrorEnvelope(v any, secrets []string, mask func(string) string) any {
 	obj, ok := v.(map[string]any)
 	if !ok {
-		return redactBodyValue(v, secrets)
+		return redactBodyValueWithMask(v, secrets, mask)
 	}
 	out := make(map[string]any, len(obj))
 	// Sorted, not map order: two keys that both carry secrets mask to the same string
@@ -512,7 +516,7 @@ func redactErrorEnvelope(v any, secrets []string) any {
 		// The semantic decisions below are made on the key as the backend wrote it —
 		// whether it is the code-bearing field, whether it is the nested envelope —
 		// while what gets written is the masked spelling.
-		outKey := maskKey(key, secrets)
+		outKey := maskKey(key, mask)
 		if _, taken := out[outKey]; taken {
 			continue // an earlier key already masked to this name
 		}
@@ -522,9 +526,9 @@ func redactErrorEnvelope(v any, secrets []string) any {
 		case key == "error":
 			// The matters envelope nests {"code":…,"message":…} under "error";
 			// recurse so its code is exempt too while its message is masked.
-			out[outKey] = redactErrorEnvelope(val, secrets)
+			out[outKey] = redactErrorEnvelope(val, secrets, mask)
 		default:
-			out[outKey] = redactBodyValue(val, secrets)
+			out[outKey] = redactBodyValueWithMask(val, secrets, mask)
 		}
 	}
 	return out
@@ -549,11 +553,11 @@ func redactErrorEnvelope(v any, secrets []string) any {
 // leave the key position with the same short-secret hole the string leaves had: the boundary
 // rule declines a secret under shortSecretRunes unless it is delimited, so a backend keying
 // a map by "<password>x" would have published it.
-func maskKey(key string, secrets []string) string {
+func maskKey(key string, mask func(string) string) string {
 	if isEnvelopeContractKey(key) {
 		return key
 	}
-	return maskOrSuppressValue(key, secrets)
+	return mask(key)
 }
 
 // isEnvelopeContractKey names the keys this CLI itself reads out of a backend body.
@@ -679,9 +683,15 @@ func sortedStringKeys(m map[string]string) []string {
 // safe by construction is worth the marshal on a path that only runs for
 // secret-bearing requests.
 func redactBodyValue(v any, secrets []string) any {
+	return redactBodyValueWithMask(v, secrets, func(s string) string {
+		return maskOrSuppressValue(s, secrets)
+	})
+}
+
+func redactBodyValueWithMask(v any, secrets []string, mask func(string) string) any {
 	switch t := v.(type) {
 	case string:
-		return maskOrSuppressValue(t, secrets)
+		return mask(t)
 	case nil:
 		// JSON null is the one scalar whose spelling is fixed by the grammar rather than
 		// derived from a value, so there is nothing here to disclose.
@@ -698,17 +708,17 @@ func redactBodyValue(v any, secrets []string) any {
 			// spec-derived key cannot contain a declared secret; on a response body it
 			// is what stops a backend that keys a map by a caller-supplied id from
 			// printing it.
-			outKey := maskKey(key, secrets)
+			outKey := maskKey(key, mask)
 			if _, taken := out[outKey]; taken {
 				continue
 			}
-			out[outKey] = redactBodyValue(t[key], secrets)
+			out[outKey] = redactBodyValueWithMask(t[key], secrets, mask)
 		}
 		return out
 	case []any:
 		out := make([]any, len(t))
 		for i, val := range t {
-			out[i] = redactBodyValue(val, secrets)
+			out[i] = redactBodyValueWithMask(val, secrets, mask)
 		}
 		return out
 	case []string:
@@ -795,23 +805,46 @@ func RedactBearer(s, token string) string {
 	return s
 }
 
-var urlEscapeTriplet = regexp.MustCompile(`%[0-9A-F]{2}`)
-
 func redactEscapedBearer(s, token string) string {
-	for _, escaped := range []string{url.PathEscape(token), url.QueryEscape(token)} {
-		if escaped == token || !strings.Contains(escaped, "%") {
-			continue
+	// Match against one decoded layer and use the original byte offsets to
+	// preserve the spelling of everything outside the match.
+	decoded := make([]byte, 0, len(s))
+	offsets := make([]int, 0, len(s)+1)
+	for i := 0; i < len(s); {
+		offsets = append(offsets, i)
+		if s[i] == '%' && i+2 < len(s) {
+			var b [1]byte
+			if _, err := hex.Decode(b[:], []byte(s[i+1:i+3])); err == nil {
+				decoded = append(decoded, b[0])
+				i += 3
+				continue
+			}
 		}
-		// Only the hexadecimal escapes are case-insensitive. Literal bearer
-		// characters, including characters following an encoded %, match exactly.
-		pattern := urlEscapeTriplet.ReplaceAllString(regexp.QuoteMeta(escaped), `(?i:${0})`)
-		matcher, err := regexp.Compile(pattern)
-		if err != nil {
-			return secretMask
-		}
-		s = matcher.ReplaceAllLiteralString(s, secretMask)
+		decoded = append(decoded, s[i])
+		i++
 	}
-	return s
+	offsets = append(offsets, len(s))
+
+	var masked strings.Builder
+	written, end := 0, 0
+	for {
+		match := bytes.Index(decoded[end:], []byte(token))
+		if match < 0 {
+			break
+		}
+		start := end + match
+		end = start + len(token)
+		if offsets[end]-offsets[start] > len(token) {
+			masked.WriteString(s[written:offsets[start]])
+			masked.WriteString(secretMask)
+			written = offsets[end]
+		}
+	}
+	if written == 0 {
+		return s
+	}
+	masked.WriteString(s[written:])
+	return masked.String()
 }
 
 func (c *Client) bearer() (token, space string) {
@@ -897,18 +930,13 @@ func (c *Client) redactExitError(e *output.ExitError, secrets []string) *output.
 	out.Message = c.redactBearer(redactSecrets(e.Message, secrets))
 	out.Hint = c.redactBearer(redactSecrets(e.Hint, secrets))
 	if len(e.Detail) > 0 {
-		out.Detail = redactSecretBytes(e.Detail, secrets)
+		var bearer string
+		if c.business != nil {
+			bearer = c.business.Token
+		}
+		out.Detail = redactErrorBody(e.Detail, secrets, bearer)
 	}
 	return &out
-}
-
-// redactSecretBytes masks secrets in a JSON fragment, preserving its structure
-// where it parses so a detail payload stays readable.
-func redactSecretBytes(b []byte, secrets []string) []byte {
-	if len(b) == 0 || len(secrets) == 0 {
-		return b
-	}
-	return redactResponseBody(b, secrets)
 }
 
 // do is Do's body. It returns errors unredacted; Do is the single place that

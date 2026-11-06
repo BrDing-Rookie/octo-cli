@@ -355,8 +355,12 @@ func TestPhaseOneEncodedBearerURLDiagnostics(t *testing.T) {
 		{"lowercase path", "abc/1234", "/prefixabc%2f1234suffix", "/prefix***REDACTED***suffix"},
 		{"uppercase path", "abc/1234", "/prefixabc%2F1234suffix", "/prefix***REDACTED***suffix"},
 		{"lowercase query", "abc/1234", "/check?note=prefixabc%2f1234suffix", "/check?note=prefix***REDACTED***suffix"},
+		{"escaped path letters", "abc/1234", "/prefix%61bc%2f1234suffix%21", "/prefix***REDACTED***suffix%21"},
+		{"escaped query letters", "abc/1234", "/check?note=prefix%61bc%2f1234suffix", "/check?note=prefix***REDACTED***suffix"},
 		{"mixed escapes", "abc/?1234", "/prefixabc%2f%3F1234suffix", "/prefix***REDACTED***suffix"},
 		{"literal token case", "abc/1234", "/prefixAbc%2f1234suffix", "/prefixAbc%2f1234suffix"},
+		{"escaped token case", "abc/1234", "/prefix%41bc%2f1234suffix", "/prefix%41bc%2f1234suffix"},
+		{"escaped literal percent", "abc%2f1234", "/prefixabc%252f1234suffix", "/prefix***REDACTED***suffix"},
 		{"encoded literal percent", "abc%2f1234", "/prefixabc%252F1234suffix", "/prefixabc%252F1234suffix"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -375,6 +379,57 @@ func TestPhaseOneEncodedBearerURLDiagnostics(t *testing.T) {
 				t.Errorf("URL = %q, want %q", envelope.Data.URL, want)
 			}
 		})
+	}
+}
+
+func TestPhaseOneEncodedBearerErrorDetail(t *testing.T) {
+	phaseOneEnv(t)
+	const bearer = "abc/1234"
+	const target = "/prefix%61bc%2f1234suffix?note=prefix%61bc%2f1234suffix"
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+	t.Setenv("OCTO_TOKEN", bearer)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.RequestURI != target || r.Header.Get("Authorization") != "Bearer "+bearer {
+			t.Error("masking changed the outbound request")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"code":"REQUEST_FAILED","message":"invalid prefixabc%2f1234suffix","detail":{"credential":"prefixabc%2f1234suffix","attempt":9007199254740993}}`)
+	}))
+	defer server.Close()
+	t.Setenv("OCTO_API_BASE_URL", server.URL)
+
+	stderr, err := phaseOneRun("api", "GET", target)
+	exitErr := output.AsExitError(err)
+	if exitErr == nil || exitErr.ExitCode() != 2 {
+		t.Fatalf("expected validation exit code 2, got %v", err)
+	}
+	var envelope struct {
+		Error struct {
+			Code    string
+			Message string
+			Detail  struct {
+				Code    string
+				Message string
+				Detail  struct {
+					Credential string
+					Attempt    int64
+				}
+			}
+		}
+	}
+	if err := json.Unmarshal([]byte(stderr), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	got := envelope.Error
+	const masked = "prefix***REDACTED***suffix"
+	if got.Code != "HTTP_400" || !strings.Contains(got.Message, "invalid "+masked) ||
+		got.Detail.Code != "REQUEST_FAILED" || got.Detail.Message != "invalid "+masked ||
+		got.Detail.Detail.Credential != masked || got.Detail.Detail.Attempt != 9007199254740993 {
+		t.Fatalf("unexpected structured error: %s", stderr)
+	}
+	if strings.Contains(stderr, "abc%2f1234") || strings.Contains(stderr, bearer) {
+		t.Fatal("credential leaked in stderr")
 	}
 }
 
