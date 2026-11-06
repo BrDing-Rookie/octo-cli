@@ -1105,6 +1105,7 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 			diagnosticErr = &diagnostic
 		}
 		msg := redactSecrets(diagnosticErr.Error(), req.SecretValues)
+		msg = maskOrSuppressValue(msg, c.queryBearerForms(req.Query))
 		if len(req.ResponseSecretFields) > 0 {
 			// Go parses Location before CheckRedirect runs. A malformed redirect
 			// therefore surfaces here as a *url.Error containing the raw signed
@@ -1140,8 +1141,9 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	// handling (file.download). Any other endpoint returning 3xx is treated
 	// as an unexpected error.
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		loc := redactRedirectLocation(resp.Header.Get("Location"), req.SecretValues, req.ResponseSecretFields)
+		loc = maskOrSuppressValue(loc, c.queryBearerForms(req.Query))
 		if req.BinaryResponse {
-			loc := redactRedirectLocation(resp.Header.Get("Location"), req.SecretValues, req.ResponseSecretFields)
 			env := map[string]any{
 				"url":    loc,
 				"status": resp.StatusCode,
@@ -1153,7 +1155,7 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		}
 		return nil, output.ErrAPI(
 			fmt.Sprintf("HTTP_%d", resp.StatusCode),
-			fmt.Sprintf("unexpected redirect to %q", redactRedirectLocation(resp.Header.Get("Location"), req.SecretValues, req.ResponseSecretFields)),
+			fmt.Sprintf("unexpected redirect to %q", loc),
 			"",
 		)
 	}
@@ -1204,10 +1206,8 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	}
 
 	requestSecrets := req.SecretValues
-	if c.business != nil {
-		if forms := queryBearerForms(req.Query, c.business.Token); len(forms) > 0 {
-			requestSecrets = append(slices.Clone(requestSecrets), forms...)
-		}
+	if forms := c.queryBearerForms(req.Query); len(forms) > 0 {
+		requestSecrets = append(slices.Clone(requestSecrets), forms...)
 	}
 	redactedBody := redactBackendErrorBody(respBody, requestSecrets, req.ResponseSecretFields)
 	parseError := output.ParseBackendError
@@ -1481,10 +1481,13 @@ func (c *Client) redactDiagnosticURL(req *Request, urlStr string) string {
 // queryBearerForms finds encoded bearer fragments in the structured query.
 // Declaring those forms as secrets lets the error masker also cover their
 // QueryEscape spelling, as it appeared on the wire.
-func queryBearerForms(query url.Values, token string) []string {
+func (c *Client) queryBearerForms(query url.Values) []string {
+	if c.business == nil {
+		return nil
+	}
 	forms := make(map[string]struct{})
 	collect := func(s string) {
-		forEachEscapedBearer(s, token, func(start, end int) {
+		forEachEscapedBearer(s, c.business.Token, func(start, end int) {
 			forms[s[start:end]] = struct{}{}
 		})
 	}

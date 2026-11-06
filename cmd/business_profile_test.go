@@ -637,6 +637,58 @@ func TestPhaseOneEncodedBearerStructuredQueryDiagnostics(t *testing.T) {
 	}
 }
 
+func TestPhaseOneEncodedBearerRedirect(t *testing.T) {
+	phaseOneEnv(t)
+	const bearer = "abc/1234"
+	const params = `{"note":"prefix%61bc%2f1234suffix","prefix%61bc%2f1234suffix":"keep"}`
+	const wireValue = "prefix%2561bc%252f1234suffix"
+	const rawQuery = "note=" + wireValue + "&" + wireValue + "=keep"
+	for _, tc := range []struct{ name, mode, tokenEnv, path, code, want string }{
+		{"unified", "unified", "OCTO_TOKEN", "/redirect/", "HTTP_307", "prefix***REDACTED***suffix"},
+		{"unified malformed", "unified", "OCTO_TOKEN", "/redirect/%zz", "NETWORK_ERROR", "prefix***REDACTED***suffix"},
+		{"legacy", "", "OCTO_BOT_TOKEN", "/redirect/", "HTTP_307", wireValue},
+		{"legacy malformed", "", "OCTO_BOT_TOKEN", "/redirect/%zz", "NETWORK_ERROR", wireValue},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
+			t.Setenv(tc.tokenEnv, bearer)
+			calls := make(chan string, 16)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls <- r.RequestURI
+				if r.Header.Get("Authorization") != "Bearer "+bearer {
+					t.Error("request did not use the expected bearer")
+				}
+				w.Header().Set("Location", tc.path+"?"+r.URL.RawQuery)
+				w.WriteHeader(http.StatusTemporaryRedirect)
+			}))
+			defer server.Close()
+			t.Setenv("OCTO_API_BASE_URL", server.URL)
+			stderr, err := phaseOneRun("--no-retry", "api", "GET", "/redirect", "--params", params)
+			exitErr := output.AsExitError(err)
+			if exitErr == nil || exitErr.ExitCode() != 1 {
+				t.Fatalf("expected exit code 1, got %v", err)
+			}
+			var envelope struct {
+				Error struct{ Code, Message string }
+			}
+			if err := json.Unmarshal([]byte(stderr), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			want := tc.path + "?" + strings.ReplaceAll(rawQuery, wireValue, tc.want)
+			if envelope.Error.Code != tc.code || !strings.Contains(envelope.Error.Message, want) ||
+				(tc.mode == "unified" && strings.Contains(envelope.Error.Message, wireValue)) {
+				t.Errorf("unexpected structured error: %s", stderr)
+			}
+			if len(calls) != 1 {
+				t.Fatalf("got %d requests, want 1", len(calls))
+			}
+			if uri := <-calls; uri != "/redirect?"+rawQuery {
+				t.Errorf("sent URI = %q, want /redirect?%s", uri, rawQuery)
+			}
+		})
+	}
+}
+
 func TestPhaseOneEncodedBearerNetworkError(t *testing.T) {
 	phaseOneEnv(t)
 	const bearer = "abc/1234"
