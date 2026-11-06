@@ -16,6 +16,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
+	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
@@ -263,7 +264,7 @@ func TestPhaseOneStandaloneFileAndOfflineDiscovery(t *testing.T) {
 		}}`)
 	t.Setenv("OCTO_TOKEN_FILE", filepath.Join(dir, "missing"))
 	t.Setenv("OCTO_TOKEN", "conflicting-secret")
-	for _, args := range [][]string{{"help"}, {"schema", "group.list"}, {"auth", "list"}} {
+	for _, args := range [][]string{{"help"}, {"version"}, {"schema", "group.list"}, {"auth", "list"}} {
 		out, err := phaseOneRun(args...)
 		if err != nil || strings.Contains(out, "conflicting-secret") {
 			t.Fatalf("offline %v: %v (%s)", args, err, out)
@@ -883,6 +884,45 @@ func TestPhaseOneUnifiedCredentialOnlyOnExplicitAPI(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "unified credentials currently require api with the default service") {
 			t.Errorf("%v: %v (%s), want unified API boundary error", args, err, out)
 		}
+	}
+}
+
+func TestPhaseOneMarketplaceVersionCredentialBoundary(t *testing.T) {
+	phaseOneEnv(t)
+	t.Setenv("OCTO_TOKEN", "opaque-runtime-bearer")
+	t.Setenv("OCTO_API_BASE_URL", "https://marketplace.example")
+	for _, tc := range []struct {
+		args []string
+		path string
+	}{
+		{[]string{"list", "--plugin-id", "fixture-plugin"}, "/market/api/v1/plugins/versions?plugin_id=fixture-plugin"},
+		{[]string{"get", "fixture-plugin", "fixture-version"}, "/market/api/v1/plugins/fixture-plugin/versions/fixture-version"},
+		{[]string{"download", "fixture-plugin", "fixture-version", "--path", "AGENTS.md"}, "/market/api/v1/plugins/fixture-plugin/versions/fixture-version/file?path=AGENTS.md"},
+	} {
+		t.Run(tc.args[0], func(t *testing.T) {
+			args := append([]string{"--dry-run", "marketplace", "plugin", "version"}, tc.args...)
+			t.Run("unified", func(t *testing.T) {
+				t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+				f := cmdutil.NewDefaultFactory()
+				f.IOStreams.Out, f.IOStreams.ErrOut = io.Discard, io.Discard
+				f.BusinessCredentialFunc = func() (*credential.BusinessContext, error) {
+					t.Fatal("resolved credentials before enforcing the unified API boundary")
+					return nil, nil
+				}
+				root := NewRootCmd(f)
+				root.SetArgs(args)
+				err := root.Execute()
+				if exit := output.AsExitError(err); exit == nil || exit.Code != "UNIFIED_API_ONLY" {
+					t.Fatalf("Execute = %v, want UNIFIED_API_ONLY before credential resolution", err)
+				}
+			})
+			t.Run("legacy", func(t *testing.T) {
+				out, err := phaseOneRun(args...)
+				if err != nil || !strings.Contains(out, "https://marketplace.example"+tc.path) {
+					t.Fatalf("legacy request: %v (%s), want version route %s", err, out, tc.path)
+				}
+			})
+		})
 	}
 }
 

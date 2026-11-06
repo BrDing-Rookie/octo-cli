@@ -3,11 +3,14 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
+	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
 func TestRedactBearer_EncodedURL(t *testing.T) {
@@ -70,5 +73,55 @@ func TestBusinessDryRun_ShortEncodedQueryBearer(t *testing.T) {
 	}
 	if req.Query.Get("note") != value || len(req.SecretValues) != 0 {
 		t.Fatal("diagnostics modified the caller's request")
+	}
+}
+
+func TestBusinessError_PreservesKnownCodeAndMasksBearer(t *testing.T) {
+	for _, tc := range []struct {
+		name, code, wantCode, wantType string
+		wantExit                       int
+	}{
+		{"known uppercase code", "UNAUTHORIZED", "UNAUTHORIZED", "auth_error", 3},
+		{"unknown code with bearer", "UNAUTHENTICATED", secretMask, "api_error", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cli := NewBusiness(&credential.BusinessContext{
+				Token: "AUTH", APIBaseURL: "https://example.invalid",
+			}, Options{NoRetry: true})
+			cli.httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				if req.Header.Get("Authorization") != "Bearer AUTH" {
+					t.Error("redaction changed the outbound bearer")
+				}
+				return &http.Response{
+					StatusCode: http.StatusUnauthorized,
+					Header:     make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{"error":{"code":"` + tc.code +
+						`","message":"expired AUTH","details":{"token":"AUTH","context":"keep"}}}`)),
+				}, nil
+			})
+			_, err := cli.Do(context.Background(), &Request{Method: http.MethodGet, Path: "/check"})
+			ee := output.AsExitError(err)
+			if ee == nil {
+				t.Fatalf("expected a structured error, got %v", err)
+			}
+			if ee.Code != tc.wantCode || ee.Type != tc.wantType || ee.ExitCode() != tc.wantExit {
+				t.Errorf("classification = %s/%s/exit %d, want %s/%s/exit %d",
+					ee.Code, ee.Type, ee.ExitCode(), tc.wantCode, tc.wantType, tc.wantExit)
+			}
+			var detail struct {
+				Error struct {
+					Code, Message string
+					Details       struct{ Token, Context string }
+				}
+			}
+			if err := json.Unmarshal(ee.Detail, &detail); err != nil {
+				t.Fatal(err)
+			}
+			if ee.Message != "expired "+secretMask || strings.Contains(ee.Hint, "AUTH") ||
+				detail.Error.Code != tc.wantCode || detail.Error.Message != ee.Message ||
+				detail.Error.Details.Token != secretMask || detail.Error.Details.Context != "keep" {
+				t.Errorf("unexpected redacted diagnostics: %+v, detail %s", ee, ee.Detail)
+			}
+		})
 	}
 }

@@ -489,10 +489,10 @@ func redactErrorBody(b []byte, secrets []string, bearer string) []byte {
 // anywhere else in the redaction path. That bound is a property of the masker, not of
 // this rule, which is the point of delegating rather than re-deciding.
 //
-// Why a real token never reaches clause 1 or 3 by accident: Octo share and invite
-// tokens are base64url, so they carry upper-case characters or "-", and
-// IsErrorCodeShaped admits only lower-case alphanumerics and underscores. A token
-// therefore fails the shape gate before the vocabulary question is asked.
+// The known vocabulary includes uppercase and lowercase codes. Check it before
+// the lowercase shape gate so a short bearer overlapping UNAUTHORIZED cannot
+// change an authentication failure's classification. Unknown values still need
+// to pass both the shape gate and the secret checks to be exempt.
 func redactErrorEnvelope(v any, secrets []string, mask func(string) string) any {
 	obj, ok := v.(map[string]any)
 	if !ok {
@@ -575,15 +575,17 @@ func isCodeBearingKey(key string) bool {
 	return key == "code" || key == "error"
 }
 
-// isExemptCode applies the shape gate and three-clause rule documented on
-// redactErrorEnvelope.
+// isExemptCode applies the three-clause rule documented on redactErrorEnvelope.
 func isExemptCode(val any, secrets []string) bool {
 	s, ok := val.(string)
-	if !ok || !output.IsErrorCodeShaped(s) {
+	if !ok {
 		return false
 	}
 	if output.IsKnownErrorCode(s) {
 		return true // clause 1
+	}
+	if !output.IsErrorCodeShaped(s) {
+		return false
 	}
 	// Clause 2: not exempt if the value carries a declared secret at all. Two tests,
 	// because they catch different things: containsAnySecret is a raw substring check,

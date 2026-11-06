@@ -213,16 +213,14 @@ func skipValidation(cmd *cobra.Command) bool {
 		return true
 	}
 	for c := cmd; c != nil; c = c.Parent() {
+		// Only root command families are credential-free. A nested name
+		// such as `marketplace plugin version` is still a business route.
+		if c.Parent() != cmd.Root() {
+			continue
+		}
 		switch c.Name() {
-		case "version", "help", "schema", "config", "completion", "skills", "sheet-cell", "":
+		case "version", "help", "schema", "config", "completion", "skills", "sheet-cell", "auth":
 			return true
-		case "auth":
-			// Only the top-level `octo-cli auth` is credential-free. Nested
-			// service auth flows such as `mail auth login` require the active
-			// Bot credential and must pass the normal validation gate.
-			if c.Parent() != nil && c.Parent().Parent() == nil {
-				return true
-			}
 		}
 	}
 	return false
