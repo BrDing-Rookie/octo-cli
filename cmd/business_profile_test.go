@@ -330,7 +330,9 @@ func TestPhaseOneExternalTokenTarget(t *testing.T) {
 	}
 	configOrigin, envOrigin := server("profile"), server("env")
 	phaseOneWrite(t, filepath.Join(dir, "config.json"), fmt.Sprintf(`{
-		"version":1,"current_profile":"a","profiles":{"a":{"api_base_url":%q,"space_id":"space-a"}}
+		"version":1,"current_profile":"a","profiles":{
+			"a":{"api_base_url":%q,"space_id":"space-a"},"null-profile":null,"empty-profile":{}
+		}
 	}`, configOrigin))
 	t.Setenv("OCTO_API_BASE_URL", envOrigin)
 
@@ -358,6 +360,16 @@ func TestPhaseOneExternalTokenTarget(t *testing.T) {
 	t.Setenv("OCTO_TOKEN", "external-bearer")
 	check("env Bearer external-bearer ", args...)
 	check("profile Bearer external-bearer space-a", append([]string{"--profile", "a"}, args...)...)
+	check("env Bearer external-bearer ", append([]string{"--profile", "empty-profile"}, args...)...)
+	if out, err := phaseOneRun(append([]string{"--profile", "null-profile"}, args...)...); err == nil ||
+		!strings.Contains(err.Error(), "selected profile is null") {
+		t.Errorf("null Profile: %v (%s), want invalid Profile error", err, out)
+	}
+	select {
+	case <-calls:
+		t.Fatal("explicit null Profile sent an HTTP request")
+	default:
+	}
 
 	t.Setenv("OCTO_SPACE_ID", "runtime-space")
 	check("env Bearer external-bearer runtime-space", append(args, "--service=default")...)
@@ -463,7 +475,7 @@ func TestPhaseOneProfileStoresCoexist(t *testing.T) {
 		t.Fatal(err)
 	}
 	phaseOneWrite(t, filepath.Join(dir, "config.json"), `{
-		"version":1,"current_profile":"new","profiles":{"new":{"token_source":{"type":"token_file","path":"missing"}}}
+		"version":1,"current_profile":"new","profiles":{"new":{"token_source":{"type":"token_file","path":"missing"}},"null-profile":null}
 	}`)
 
 	checkList := func(want string) {
@@ -495,15 +507,17 @@ func TestPhaseOneProfileStoresCoexist(t *testing.T) {
 	checkList("new")
 }
 
-func TestPhaseOneUnifiedAuthDoesNotAccessLegacyCredentials(t *testing.T) {
+func TestPhaseOneAuthDoesNotFallBackToLegacyCredentials(t *testing.T) {
 	for _, tc := range []struct {
 		name, env, value string
+		modeError        string
 		flags            []string
 	}{
 		{name: "mode", env: "OCTO_CREDENTIAL_MODE", value: "unified"},
 		{name: "profile", env: "OCTO_PROFILE", value: "shared"},
 		{name: "token file env", env: "OCTO_TOKEN_FILE", value: "unused"},
 		{name: "credential file flag", flags: []string{"--credential-file", "unused"}},
+		{name: "unknown mode", env: "OCTO_CREDENTIAL_MODE", value: "unifed", modeError: `unsupported OCTO_CREDENTIAL_MODE "unifed"`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := phaseOneEnv(t)
@@ -545,34 +559,49 @@ func TestPhaseOneUnifiedAuthDoesNotAccessLegacyCredentials(t *testing.T) {
 				t.Setenv(tc.env, tc.value)
 			}
 			t.Setenv("OCTO_TOKEN", "opaque-runtime-bearer")
-			for _, command := range []struct {
-				name string
-				args []string
-			}{
-				{"status", []string{"auth", "status"}},
-				{"login", []string{"--profile", "shared", "auth", "login", "--with-token"}},
-				{"update", []string{"--profile", "shared", "auth", "update", "--api-base-url", "https://other.example"}},
-				{"logout", []string{"--profile", "shared", "auth", "logout"}},
-			} {
+			commands := [][]string{
+				{"status"},
+				{"login", "--with-token"},
+				{"update", "--api-base-url", "https://other.example"},
+				{"logout"},
+			}
+			if tc.modeError != "" {
+				commands = append([][]string{{"list"}}, commands...)
+			}
+			for _, command := range commands {
+				name := command[0]
 				f := cmdutil.NewDefaultFactory()
 				stdin := strings.NewReader("unused-stdin-bearer")
 				initial := stdin.Len()
 				var out bytes.Buffer
 				f.IOStreams.In, f.IOStreams.Out, f.IOStreams.ErrOut = stdin, &out, &out
 				root := NewRootCmd(f)
-				root.SetArgs(append(append([]string{}, tc.flags...), command.args...))
-				want := "auth " + command.name + " is unavailable for unified credentials"
+				args := append([]string{}, tc.flags...)
+				if name != "status" && name != "list" {
+					args = append(args, "--profile", "shared")
+				}
+				root.SetArgs(append(append(args, "auth"), command...))
+				want := tc.modeError
+				if want == "" {
+					want = "auth " + name + " is unavailable for unified credentials"
+				}
 				if err := root.Execute(); err == nil || !strings.Contains(err.Error(), want) {
-					t.Errorf("execute %s: %v (%s), want %q", command.name, err, &out, want)
+					t.Errorf("execute %s: %v (%s), want %q", name, err, &out, want)
 				}
 				if stdin.Len() != initial {
-					t.Errorf("auth %s read stdin", command.name)
+					t.Errorf("auth %s read stdin", name)
 				}
 				for path, before := range snapshot {
 					after, err := os.ReadFile(path)
 					if err != nil || !bytes.Equal(after, before) {
-						t.Errorf("auth %s modified %s: %v", command.name, path, err)
+						t.Errorf("auth %s modified %s: %v", name, path, err)
 					}
+				}
+			}
+			if tc.modeError != "" {
+				phaseOneWrite(t, filepath.Join(store.Dir(), "config.json"), "{")
+				if out, err := phaseOneRun("auth", "list"); err == nil || !strings.Contains(err.Error(), tc.modeError) {
+					t.Errorf("mode validation must precede reading the legacy config: %v (%s)", err, out)
 				}
 			}
 		})

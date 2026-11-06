@@ -39,7 +39,11 @@ func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
 }
 
 func rejectUnifiedCredentialCommand(f *cmdutil.Factory, name string) error {
-	if config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet) {
+	unified, err := config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet)
+	if err != nil {
+		return failErr(f, err)
+	}
+	if unified {
 		return failErr(f, output.ErrValidation(
 			name+" is unavailable for unified credentials",
 			"use auth list to inspect versioned profiles",
@@ -348,7 +352,11 @@ func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "List local profiles (never shows tokens)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet) {
+			unified, err := config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet)
+			if err != nil {
+				return failErr(f, err)
+			}
+			if unified {
 				return listUnifiedProfiles(f)
 			}
 			store, err := f.AuthStore()
@@ -379,8 +387,10 @@ func listUnifiedProfiles(f *cmdutil.Factory) error {
 	}
 
 	names := make([]string, 0, len(profiles.Profiles))
-	for name := range profiles.Profiles {
-		names = append(names, name)
+	for name, profile := range profiles.Profiles {
+		if profile != nil {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	entries := make([]map[string]any, 0, len(names))

@@ -16,9 +16,9 @@ const (
 
 // ProfileConfig is the versioned, non-secret business configuration.
 type ProfileConfig struct {
-	Version        json.RawMessage    `json:"version"`
-	CurrentProfile string             `json:"current_profile"`
-	Profiles       map[string]Profile `json:"profiles"`
+	Version        json.RawMessage     `json:"version"`
+	CurrentProfile string              `json:"current_profile"`
+	Profiles       map[string]*Profile `json:"profiles"`
 	dir            string
 }
 
@@ -79,24 +79,26 @@ func (c *ProfileConfig) isLegacy() bool {
 		return false
 	}
 	for _, p := range c.Profiles {
-		if p.TokenSource != nil {
+		if p != nil && p.TokenSource != nil {
 			return false
 		}
 	}
 	return true
 }
 
-// UsesUnifiedCredentials checks for an explicit mode or a unified-only selector.
-func (c *Config) UsesUnifiedCredentials(credentialFileSet bool) bool {
+// UsesUnifiedCredentials checks the mode before selecting a credential store.
+func (c *Config) UsesUnifiedCredentials(credentialFileSet bool) (bool, error) {
 	switch c.CredentialMode {
 	case CredentialModeUnified:
-		return true
+		return true, nil
+	case CredentialModeTask:
+		return false, nil
 	case "":
 		_, profileSet := os.LookupEnv(EnvProfile)
 		_, tokenFileSet := os.LookupEnv(EnvTokenFile)
-		return credentialFileSet || profileSet || tokenFileSet
+		return credentialFileSet || profileSet || tokenFileSet, nil
 	default:
-		return false
+		return false, fmt.Errorf("unsupported %s %q", EnvCredentialMode, c.CredentialMode)
 	}
 }
 
@@ -121,7 +123,10 @@ func (c *ProfileConfig) SelectProfile(name string, explicit bool) (string, Profi
 	}
 	if c != nil && name != "" {
 		if p, ok := c.Profiles[name]; ok {
-			return name, p, nil
+			if p == nil {
+				return "", Profile{}, fmt.Errorf("selected profile is null")
+			}
+			return name, *p, nil
 		}
 	}
 	return "", Profile{}, fmt.Errorf("selected profile does not exist")

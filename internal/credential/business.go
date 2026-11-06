@@ -31,8 +31,9 @@ type BusinessOptions struct {
 // ResolveBusiness reads the profile and bearer once for an opted-in command.
 // A nil result leaves credential selection to the legacy command path.
 func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessContext, error) {
-	if !runtime.UsesUnifiedCredentials(opts.FileSet) {
-		return nil, nil
+	unified, err := runtime.UsesUnifiedCredentials(opts.FileSet)
+	if err != nil || !unified {
+		return nil, err
 	}
 	if opts.BotIDSet {
 		return nil, output.ErrValidation("--bot-id cannot be used with unified credentials", "select a Profile or remove --bot-id")
