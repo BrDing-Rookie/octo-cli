@@ -433,6 +433,77 @@ func TestPhaseOneEncodedBearerErrorDetail(t *testing.T) {
 	}
 }
 
+func TestPhaseOneEncodedBearerRequestBodyDiagnostics(t *testing.T) {
+	phaseOneEnv(t)
+	const bearer = "abc/1234"
+	const data = `{"nested":[{"value":"prefixabc%2F1234suffix"}],"note":"prefix%61bc%2f1234suffix","prefix%61bc%2f1234suffix":9007199254740993}`
+	const masked = `{"nested":[{"value":"prefix***REDACTED***suffix"}],"note":"prefix***REDACTED***suffix","prefix***REDACTED***suffix":9007199254740993}`
+	calls := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		if r.Header.Get("Authorization") != "Bearer "+bearer {
+			t.Error("request did not use the expected bearer")
+		}
+		calls <- string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"accepted":true}`)
+	}))
+	defer server.Close()
+	t.Setenv("OCTO_API_BASE_URL", server.URL)
+	args := []string{"api", "POST", "/check", "--data", data}
+
+	for _, tc := range []struct{ name, mode, want string }{
+		{"unified", "unified", masked},
+		{"legacy", "", data},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
+			if tc.mode == "unified" {
+				t.Setenv("OCTO_TOKEN", bearer)
+			} else {
+				t.Setenv("OCTO_BOT_TOKEN", bearer)
+			}
+
+			out, err := phaseOneRun(append([]string{"--dry-run"}, args...)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope struct {
+				Data struct{ Body json.RawMessage }
+			}
+			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			var compact bytes.Buffer
+			if err := json.Compact(&compact, envelope.Data.Body); err != nil {
+				t.Fatal(err)
+			}
+			if compact.String() != tc.want {
+				t.Errorf("dry-run body = %s, want %s", &compact, tc.want)
+			}
+			if len(calls) != 0 {
+				t.Fatal("dry-run sent an HTTP request")
+			}
+
+			out, err = phaseOneRun(append([]string{"--verbose"}, args...)...)
+			if err != nil || !strings.Contains(out, "request body: "+tc.want+"\n") {
+				t.Errorf("unexpected verbose output: %s (%v)", out, err)
+			}
+			select {
+			case body := <-calls:
+				if body != data {
+					t.Errorf("sent body = %s, want %s", body, data)
+				}
+			default:
+				t.Fatal("no request received")
+			}
+		})
+	}
+}
+
 func TestPhaseOneOutputPreflightMasksUnifiedBearer(t *testing.T) {
 	phaseOneEnv(t)
 	const bearer = "abc1234"

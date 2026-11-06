@@ -340,7 +340,7 @@ func jsonStringBody(v string) string {
 // than on whatever escaped form it took in the output. A RawBody (multipart) has
 // no structure to walk, so it falls back to text substitution over the encoded
 // forms. Either way the bytes on the wire are untouched — only the log copy is.
-func redactBodyForLog(req *Request, marshalled []byte) string {
+func redactBodyForLog(req *Request, marshalled []byte, bearer string) string {
 	if len(req.SecretValues) == 0 {
 		return string(marshalled)
 	}
@@ -349,7 +349,8 @@ func redactBodyForLog(req *Request, marshalled []byte) string {
 		// request body's keys are caller-controlled — --data merges arbitrary JSON,
 		// so a secret can land in a key — while a response body's keys are the
 		// backend's contract and masking them is what broke error parsing.
-		if buf, err := json.Marshal(redactBodyKeysAndValues(req.Body, req.SecretValues)); err == nil {
+		mask := diagnosticValueMask(req.SecretValues, bearer)
+		if buf, err := json.Marshal(redactBodyKeysAndValues(req.Body, req.SecretValues, mask)); err == nil {
 			return string(buf)
 		}
 	}
@@ -419,13 +420,7 @@ func redactErrorBody(b []byte, secrets []string, bearer string) []byte {
 	if len(b) == 0 || len(secrets) == 0 {
 		return b
 	}
-	mask := func(s string) string {
-		s = maskOrSuppressValue(s, secrets)
-		if bearer != "" && strings.Contains(s, "%") {
-			s = redactEscapedBearer(s, bearer)
-		}
-		return s
-	}
+	mask := diagnosticValueMask(secrets, bearer)
 	if json.Valid(b) {
 		var parsed any
 		dec := json.NewDecoder(bytes.NewReader(b))
@@ -614,32 +609,34 @@ func isExemptCode(val any, secrets []string) bool {
 // map is randomised, so with two keys that mask to the same string the surviving value was
 // whichever one the runtime visited last — a dry-run description that differed between
 // identical invocations.
-func redactBodyKeysAndValues(v any, secrets []string) any {
+func redactBodyKeysAndValues(v any, secrets []string, mask func(string) string) any {
 	switch t := v.(type) {
+	case string:
+		return mask(t)
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for _, key := range sortedKeys(t) {
-			outKey := maskOrSuppressValue(key, secrets)
+			outKey := mask(key)
 			if _, taken := out[outKey]; taken {
 				continue
 			}
-			out[outKey] = redactBodyKeysAndValues(t[key], secrets)
+			out[outKey] = redactBodyKeysAndValues(t[key], secrets, mask)
 		}
 		return out
 	case map[string]string:
 		out := make(map[string]string, len(t))
 		for _, key := range sortedStringKeys(t) {
-			outKey := maskOrSuppressValue(key, secrets)
+			outKey := mask(key)
 			if _, taken := out[outKey]; taken {
 				continue
 			}
-			out[outKey] = maskOrSuppressValue(t[key], secrets)
+			out[outKey] = mask(t[key])
 		}
 		return out
 	case []any:
 		out := make([]any, len(t))
 		for i, val := range t {
-			out[i] = redactBodyKeysAndValues(val, secrets)
+			out[i] = redactBodyKeysAndValues(val, secrets, mask)
 		}
 		return out
 	}
@@ -796,9 +793,7 @@ func RedactBearer(s, token string) string {
 	if token == "" {
 		return s
 	}
-	if strings.Contains(s, "%") {
-		s = redactEscapedBearer(s, token)
-	}
+	s = redactEscapedBearer(s, token)
 	for _, form := range secretForms(token) {
 		s = strings.ReplaceAll(s, form, secretMask)
 	}
@@ -806,6 +801,9 @@ func RedactBearer(s, token string) string {
 }
 
 func redactEscapedBearer(s, token string) string {
+	if token == "" || !strings.Contains(s, "%") {
+		return s
+	}
 	// Match against one decoded layer and use the original byte offsets to
 	// preserve the spelling of everything outside the match.
 	decoded := make([]byte, 0, len(s))
@@ -845,6 +843,12 @@ func redactEscapedBearer(s, token string) string {
 	}
 	masked.WriteString(s[written:])
 	return masked.String()
+}
+
+func diagnosticValueMask(secrets []string, bearer string) func(string) string {
+	return func(s string) string {
+		return redactEscapedBearer(maskOrSuppressValue(s, secrets), bearer)
+	}
 }
 
 func (c *Client) bearer() (token, space string) {
@@ -1073,7 +1077,7 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 
 	c.verbosef("%s %s", req.Method, redactSecrets(urlStr, req.SecretValues))
 	if c.options.Verbose && len(body) > 0 {
-		c.verbosef("request body: %s", truncate(redactDiagnosticBody(req, body), 1024))
+		c.verbosef("request body: %s", truncate(c.redactDiagnosticBody(req, body), 1024))
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -1353,7 +1357,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte, error) {
 	var bodyField any
 	if len(body) > 0 {
-		redacted := redactDiagnosticBody(req, body)
+		redacted := c.redactDiagnosticBody(req, body)
 		// UseNumber so a uint64 id in the echoed body is shown at full precision;
 		// a plain unmarshal would round it and make --dry-run misreport what the
 		// request actually carries.
@@ -1418,8 +1422,12 @@ func redactJSONBody(body []byte, sensitiveFields []string) []byte {
 	return redacted
 }
 
-func redactDiagnosticBody(req *Request, body []byte) string {
-	redacted := []byte(redactBodyForLog(req, body))
+func (c *Client) redactDiagnosticBody(req *Request, body []byte) string {
+	var bearer string
+	if c.business != nil {
+		bearer = c.business.Token
+	}
+	redacted := []byte(redactBodyForLog(req, body, bearer))
 	return string(redactJSONBody(redacted, req.SensitiveJSONFields))
 }
 

@@ -133,7 +133,7 @@ func TestSecretCensus_RequestTracesNeverDiscloseADeclaredSecret(t *testing.T) {
 					t.Fatalf("marshal the fixture: %v", err)
 				}
 				req := &Request{Body: shape.body, SecretValues: []string{kind.secret}}
-				got := redactBodyForLog(req, marshalled)
+				got := redactBodyForLog(req, marshalled, "")
 				if strings.Contains(got, kind.secret) {
 					t.Errorf("redactBodyForLog(%s) = %s — the secret survived", marshalled, got)
 				}
