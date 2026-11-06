@@ -803,8 +803,23 @@ func RedactBearer(s, token string) string {
 }
 
 func redactEscapedBearer(s, token string) string {
-	if token == "" || !strings.Contains(s, "%") {
+	var masked strings.Builder
+	written := 0
+	forEachEscapedBearer(s, token, func(start, end int) {
+		masked.WriteString(s[written:start])
+		masked.WriteString(secretMask)
+		written = end
+	})
+	if written == 0 {
 		return s
+	}
+	masked.WriteString(s[written:])
+	return masked.String()
+}
+
+func forEachEscapedBearer(s, token string, matchSpan func(start, end int)) {
+	if token == "" || !strings.Contains(s, "%") {
+		return
 	}
 	// Match against one decoded layer and use the original byte offsets to
 	// preserve the spelling of everything outside the match.
@@ -825,8 +840,7 @@ func redactEscapedBearer(s, token string) string {
 	}
 	offsets = append(offsets, len(s))
 
-	var masked strings.Builder
-	written, end := 0, 0
+	end := 0
 	for {
 		match := bytes.Index(decoded[end:], []byte(token))
 		if match < 0 {
@@ -835,16 +849,9 @@ func redactEscapedBearer(s, token string) string {
 		start := end + match
 		end = start + len(token)
 		if offsets[end]-offsets[start] > len(token) {
-			masked.WriteString(s[written:offsets[start]])
-			masked.WriteString(secretMask)
-			written = offsets[end]
+			matchSpan(offsets[start], offsets[end])
 		}
 	}
-	if written == 0 {
-		return s
-	}
-	masked.WriteString(s[written:])
-	return masked.String()
 }
 
 func diagnosticValueMask(secrets []string, bearer string) func(string) string {
@@ -1196,7 +1203,13 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		return nil, output.ErrLoopAPIUnsupported()
 	}
 
-	redactedBody := redactBackendErrorBody(respBody, req.SecretValues, req.ResponseSecretFields)
+	requestSecrets := req.SecretValues
+	if c.business != nil {
+		if forms := queryBearerForms(req.Query, c.business.Token); len(forms) > 0 {
+			requestSecrets = append(slices.Clone(requestSecrets), forms...)
+		}
+	}
+	redactedBody := redactBackendErrorBody(respBody, requestSecrets, req.ResponseSecretFields)
 	parseError := output.ParseBackendError
 	if req.Service == "loop" {
 		parseError = output.ParsePublicAPIError
@@ -1463,6 +1476,28 @@ func (c *Client) redactDiagnosticURL(req *Request, urlStr string) string {
 		urlStr = maskedURL
 	}
 	return redactSecrets(urlStr, req.SecretValues)
+}
+
+// queryBearerForms finds encoded bearer fragments in the structured query.
+// Declaring those forms as secrets lets the error masker also cover their
+// QueryEscape spelling, as it appeared on the wire.
+func queryBearerForms(query url.Values, token string) []string {
+	forms := make(map[string]struct{})
+	collect := func(s string) {
+		forEachEscapedBearer(s, token, func(start, end int) {
+			forms[s[start:end]] = struct{}{}
+		})
+	}
+	for key, values := range query {
+		if len(values) == 0 {
+			continue
+		}
+		collect(key)
+		for _, value := range values {
+			collect(value)
+		}
+	}
+	return slices.Sorted(maps.Keys(forms))
 }
 
 // --- helpers ---

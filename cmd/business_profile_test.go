@@ -513,6 +513,69 @@ func TestPhaseOneEncodedBearerErrorDetail(t *testing.T) {
 	}
 }
 
+func TestPhaseOneEncodedBearerStructuredQueryError(t *testing.T) {
+	phaseOneEnv(t)
+	const bearer = "abc/1234"
+	const params = `{"note":"prefix%61bc%2f1234suffix","prefix%61bc%2f1234suffix":"keep"}`
+	const wireValue = "prefix%2561bc%252f1234suffix"
+	const maskedValue = "prefix***REDACTED***suffix"
+	const control = "prefix%2541bc%252f1234suffix"
+	const wire = "/check?note=" + wireValue + "&" + wireValue + "=keep"
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.RequestURI != wire || r.Header.Get("Authorization") != "Bearer "+bearer {
+			t.Error("masking changed the outbound request")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprintf(w, `{"error":{"code":"bad_request","message":%q,"details":{"request_uri":%q,"query":{%q:%q},"control":%q,"attempt":9007199254740993}}}`,
+			"invalid URI "+r.RequestURI, r.RequestURI, wireValue, wireValue, control)
+	}))
+	defer server.Close()
+	t.Setenv("OCTO_API_BASE_URL", server.URL)
+	for _, tc := range []struct{ name, mode, tokenEnv, want string }{
+		{"unified", "unified", "OCTO_TOKEN", maskedValue},
+		{"legacy", "", "OCTO_BOT_TOKEN", wireValue},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
+			t.Setenv(tc.tokenEnv, bearer)
+			stderr, err := phaseOneRun("api", "GET", "/check", "--params", params)
+			exitErr := output.AsExitError(err)
+			if exitErr == nil || exitErr.ExitCode() != 1 {
+				t.Fatalf("expected API exit code 1, got %v", err)
+			}
+			var envelope struct {
+				Error struct {
+					Code, Type, Message string
+					Detail              struct {
+						Error struct {
+							Code, Message string
+							Details       struct {
+								RequestURI string `json:"request_uri"`
+								Query      map[string]string
+								Control    string
+								Attempt    int64
+							}
+						}
+					}
+				}
+			}
+			if err := json.Unmarshal([]byte(stderr), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			wantURI := strings.ReplaceAll(wire, wireValue, tc.want)
+			got := envelope.Error
+			detail := got.Detail.Error
+			if got.Code != "bad_request" || got.Type != "api_error" || detail.Code != got.Code ||
+				got.Message != "invalid URI "+wantURI || detail.Message != got.Message ||
+				detail.Details.RequestURI != wantURI || len(detail.Details.Query) != 1 || detail.Details.Query[tc.want] != tc.want ||
+				detail.Details.Control != control || detail.Details.Attempt != 9007199254740993 {
+				t.Fatalf("unexpected structured error: %s", stderr)
+			}
+		})
+	}
+}
+
 func TestPhaseOneEncodedBearerStructuredQueryDiagnostics(t *testing.T) {
 	phaseOneEnv(t)
 	const bearer = "abc/1234"
