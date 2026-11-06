@@ -51,12 +51,15 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				}
 				return nil
 			}
-			business, err := f.BusinessCredential()
+			unified, err := config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet || f.Globals.CredentialFile != "")
 			if err != nil {
 				return err
 			}
-			if business != nil {
+			if unified {
 				if err := validateUnifiedAPICommand(cmd); err != nil {
+					return err
+				}
+				if _, err := f.BusinessCredential(); err != nil {
 					return err
 				}
 				return f.PreflightOutput(f.Format())

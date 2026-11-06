@@ -744,34 +744,44 @@ type Client struct {
 // the default and emit a verbose warning (not a hard error — a bad flag value
 // shouldn't fail commands that wouldn't otherwise need HTTP).
 func New(cfg *config.Config, cred *credential.BotCredential, opts Options) *Client {
+	return newClient(cfg, cred, nil, opts)
+}
+
+func newClient(cfg *config.Config, cred *credential.BotCredential, business *credential.BusinessContext, opts Options) *Client {
+	c := &Client{cfg: cfg, cred: cred, business: business, options: opts}
 	timeout := defaultTimeout
 	if opts.Timeout != "" {
 		if d, err := time.ParseDuration(opts.Timeout); err == nil {
 			timeout = d
 		} else if opts.ErrOut != nil {
-			fmt.Fprintf(opts.ErrOut, "warning: invalid --timeout %q; using %s\n", opts.Timeout, defaultTimeout) //nolint:errcheck // stderr warning
+			fmt.Fprintf(opts.ErrOut, "warning: invalid --timeout %q; using %s\n", c.redactBearer(opts.Timeout), defaultTimeout) //nolint:errcheck // stderr warning
 		}
 	}
-	return &Client{
-		cfg:  cfg,
-		cred: cred,
-		httpClient: &http.Client{
-			Timeout: timeout,
-			// Don't auto-follow — file.download returns 302 to a presigned URL
-			// and we want to surface that URL in the envelope, not fetch it.
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+	c.httpClient = &http.Client{
+		Timeout: timeout,
+		// Don't auto-follow — file.download returns 302 to a presigned URL
+		// and we want to surface that URL in the envelope, not fetch it.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
 		},
-		options: opts,
 	}
+	return c
 }
 
 // NewBusiness takes the request origin and bearer from the same resolution.
 func NewBusiness(cred *credential.BusinessContext, opts Options) *Client {
-	c := New(&config.Config{APIBaseURL: cred.APIBaseURL}, nil, opts)
-	c.business = cred
-	return c
+	return newClient(&config.Config{APIBaseURL: cred.APIBaseURL}, nil, cred, opts)
+}
+
+// redactBearer masks the unified bearer even when it appears inside a word.
+func (c *Client) redactBearer(s string) string {
+	if c.business == nil || c.business.Token == "" {
+		return s
+	}
+	for _, form := range secretForms(c.business.Token) {
+		s = strings.ReplaceAll(s, form, secretMask)
+	}
+	return s
 }
 
 func (c *Client) bearer() (token, space string) {
@@ -816,7 +826,7 @@ func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 	}
 	body, err := c.do(ctx, req)
 	if err != nil {
-		return nil, redactError(err, req.SecretValues)
+		return nil, c.redactError(err, req.SecretValues)
 	}
 	return body, nil
 }
@@ -825,37 +835,37 @@ func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 // fields. The concrete type is preserved where it carries meaning: a
 // *retryableErr is rebuilt as one so a caller inspecting retryability still sees
 // it, and a plain error with nothing to redact is returned untouched.
-func redactError(err error, secrets []string) error {
+func (c *Client) redactError(err error, secrets []string) error {
 	if err == nil || len(secrets) == 0 {
 		return err
 	}
 	var re *retryableErr
 	if errors.As(err, &re) && re.ExitError != nil {
 		return &retryableErr{
-			ExitError:  redactExitError(re.ExitError, secrets),
+			ExitError:  c.redactExitError(re.ExitError, secrets),
 			retryAfter: re.retryAfter,
 			status:     re.status,
 		}
 	}
 	var ee *output.ExitError
 	if errors.As(err, &ee) {
-		return redactExitError(ee, secrets)
+		return c.redactExitError(ee, secrets)
 	}
 	// Not one of ours: wrap so the text is still masked rather than passed
 	// through, since the caller renders whatever it receives.
-	return output.ErrNetwork(redactSecrets(err.Error(), secrets), "")
+	return output.ErrNetwork(c.redactBearer(redactSecrets(err.Error(), secrets)), "")
 }
 
 // redactExitError copies e with its message, hint and detail masked. A copy
 // rather than a mutation: the value may be shared (a package-level sentinel, or
 // an error already handed to another caller).
-func redactExitError(e *output.ExitError, secrets []string) *output.ExitError {
+func (c *Client) redactExitError(e *output.ExitError, secrets []string) *output.ExitError {
 	if e == nil {
 		return nil
 	}
 	out := *e
-	out.Message = redactSecrets(e.Message, secrets)
-	out.Hint = redactSecrets(e.Hint, secrets)
+	out.Message = c.redactBearer(redactSecrets(e.Message, secrets))
+	out.Hint = c.redactBearer(redactSecrets(e.Hint, secrets))
 	if len(e.Detail) > 0 {
 		out.Detail = redactSecretBytes(e.Detail, secrets)
 	}
@@ -956,7 +966,7 @@ func (c *Client) doWithRetry(ctx context.Context, req *Request, urlStr string, b
 			// URL, so on a share or invite path that is the token — printed once per
 			// retry.
 			c.verbosef("retry #%d after %s (last error: %v)", attempt, delay,
-				redactError(lastErr, req.SecretValues))
+				c.redactError(lastErr, req.SecretValues))
 			select {
 			case <-ctx.Done():
 				return nil, output.ErrNetwork(ctx.Err().Error(), "request cancelled")
@@ -1292,14 +1302,15 @@ func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte,
 		dec := json.NewDecoder(strings.NewReader(redacted))
 		dec.UseNumber()
 		if err := dec.Decode(&bodyField); err != nil {
-			bodyField = redacted
+			bodyField = c.redactBearer(redacted)
 		}
 	}
 	hdr := map[string]string{}
 	for k, v := range req.Headers {
-		hdr[k] = redactSecrets(v, req.SecretValues)
+		if !strings.EqualFold(k, "Authorization") {
+			hdr[c.redactBearer(k)] = c.redactBearer(redactSecrets(v, req.SecretValues))
+		}
 	}
-	removeHeader(hdr, "Authorization")
 	token, spaceID := c.bearer()
 	if token != "" {
 		masked := "***"
@@ -1309,12 +1320,12 @@ func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte,
 		hdr["Authorization"] = "Bearer " + masked
 	}
 	if spaceID != "" && !req.SuppressSpaceHeader {
-		hdr["X-Space-Id"] = spaceID
+		hdr["X-Space-Id"] = c.redactBearer(spaceID)
 	}
 	out := map[string]any{
 		"dry_run": true,
-		"method":  req.Method,
-		"url":     redactSecrets(urlStr, req.SecretValues),
+		"method":  c.redactBearer(req.Method),
+		"url":     c.redactBearer(redactSecrets(urlStr, req.SecretValues)),
 		"headers": hdr,
 	}
 	if bodyField != nil {
@@ -1325,14 +1336,6 @@ func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte,
 		return nil, output.ErrWithHint("internal", "MARSHAL_FAILED", err.Error(), "")
 	}
 	return buf, nil
-}
-
-func removeHeader(headers map[string]string, name string) {
-	for key := range headers {
-		if strings.EqualFold(key, name) {
-			delete(headers, key)
-		}
-	}
 }
 
 func redactJSONBody(body []byte, sensitiveFields []string) []byte {
@@ -1368,7 +1371,7 @@ func (c *Client) verbosef(format string, args ...any) {
 	if !c.options.Verbose || c.options.ErrOut == nil {
 		return
 	}
-	fmt.Fprintf(c.options.ErrOut, "[octo] "+format+"\n", args...) //nolint:errcheck // stderr verbose log
+	fmt.Fprintln(c.options.ErrOut, "[octo] "+c.redactBearer(fmt.Sprintf(format, args...))) //nolint:errcheck // stderr verbose log
 }
 
 func buildURL(base, path string, query url.Values) (string, error) {

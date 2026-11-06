@@ -26,6 +26,7 @@ const ROOT_FLAGS_WITH_VALUES = new Set([
   "--space",
   "--bot-id",
   "--profile",
+  "--credential-file",
 ]);
 const ROOT_BOOLEAN_FLAGS = new Set(["--dry-run", "--verbose", "--no-retry", "--help", "-h"]);
 

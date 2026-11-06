@@ -13,12 +13,11 @@ import (
 // BusinessContext is the unified bearer and its target for one invocation.
 // It does not encode a Bot identity or infer an execution principal.
 type BusinessContext struct {
-	Token            string
-	Source           string
-	Profile          string
-	APIBaseURL       string
-	APIBaseURLSource string
-	SpaceID          string
+	Token      string
+	Source     string
+	Profile    string
+	APIBaseURL string
+	SpaceID    string
 }
 
 // BusinessOptions contains explicit command-line selectors.
@@ -63,7 +62,7 @@ func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessCon
 
 	return &BusinessContext{
 		Token: token, Source: source, Profile: name, SpaceID: runtime.SpaceID,
-		APIBaseURL: runtime.APIBaseURL, APIBaseURLSource: runtime.APIBaseURLSource,
+		APIBaseURL: runtime.APIBaseURL,
 	}, nil
 }
 
@@ -128,8 +127,7 @@ func profileToken(profiles *config.ProfileConfig, ref *config.TokenSource) (sour
 		return "", "", output.ErrAuth("no unified credential configured", "set OCTO_TOKEN or OCTO_TOKEN_FILE, or select a configured profile")
 	case ref.Type == "token_file" && ref.Backend == "" && ref.Entry == "":
 		return fileToken("profile:token_file", profiles.TokenFilePath(ref.Path))
-	case ref.Type == "managed_store" && ref.Path == "" && ref.Entry != "" &&
-		(ref.Backend == "keychain" || ref.Backend == "encrypted_file"):
+	case ref.Type == "managed_store":
 		return "", "", output.ErrAuth("managed credential storage is unavailable", "use an external Token file or environment credential")
 	default:
 		return "", "", output.ErrValidation("invalid profile token_source", "check the type and reference in config.json")
