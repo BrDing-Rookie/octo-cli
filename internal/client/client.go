@@ -1213,7 +1213,11 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	if len(req.diagnosticBearerForms) > 0 {
 		requestSecrets = append(slices.Clone(requestSecrets), req.diagnosticBearerForms...)
 	}
-	redactedBody := redactBackendErrorBody(respBody, requestSecrets, req.ResponseSecretFields)
+	var bearer string
+	if c.business != nil {
+		bearer = c.business.Token
+	}
+	redactedBody := redactBackendErrorBody(respBody, requestSecrets, req.ResponseSecretFields, bearer)
 	parseError := output.ParseBackendError
 	if req.Service == "loop" {
 		parseError = output.ParsePublicAPIError
@@ -1235,10 +1239,11 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 // wrapped by a backend error envelope (for example under "details"), so exact
 // path values are collected at any depth. URL-shaped strings are also treated
 // as secret for these operations: a proxy may move the URL from its declared
-// field into a free-form message. Non-JSON bodies fail closed.
-func redactBackendErrorBody(body []byte, requestSecrets, responseSecretFields []string) []byte {
+// field into a free-form message. Non-JSON bodies fail closed. Unified bearer
+// encodings are masked before the parser extracts the backend error code.
+func redactBackendErrorBody(body []byte, requestSecrets, responseSecretFields []string, bearer string) []byte {
 	if len(body) == 0 || len(responseSecretFields) == 0 {
-		return redactResponseBody(body, requestSecrets)
+		return redactErrorBody(body, requestSecrets, bearer)
 	}
 	if !json.Valid(body) {
 		return []byte(secretMask)
@@ -1256,7 +1261,7 @@ func redactBackendErrorBody(body []byte, requestSecrets, responseSecretFields []
 		secrets = append(secrets, responseSecretValues(parsed, field)...)
 	}
 	collectURLValues(parsed, &secrets)
-	return redactResponseBody(body, secrets)
+	return redactErrorBody(body, secrets, bearer)
 }
 
 // responseSecretValues finds a schema path starting at every object/array node,

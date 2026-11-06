@@ -78,28 +78,33 @@ func TestBusinessDryRun_ShortEncodedQueryBearer(t *testing.T) {
 
 func TestBusinessError_PreservesKnownCodeAndMasksBearer(t *testing.T) {
 	for _, tc := range []struct {
-		name, code, wantCode, wantType string
-		wantExit                       int
+		name, bearer, code, wantCode, wantType string
+		wantExit                               int
+		responseSecretFields                   []string
 	}{
-		{"known uppercase code", "UNAUTHORIZED", "UNAUTHORIZED", "auth_error", 3},
-		{"unknown code with bearer", "UNAUTHENTICATED", secretMask, "api_error", 1},
+		{"known uppercase code", "AUTH", "UNAUTHORIZED", "UNAUTHORIZED", "auth_error", 3, nil},
+		{"unknown code with bearer", "AUTH", "UNAUTHENTICATED", secretMask, "api_error", 1, nil},
+		{"unknown code with encoded bearer", "abc/1234", "invalid_prefix%61bc%2f1234suffix", "invalid_prefix" + secretMask + "suffix", "api_error", 1, nil},
+		{"encoded bearer with response secrets", "abc/1234", "invalid_prefix%61bc%2f1234suffix", "invalid_prefix" + secretMask + "suffix", "api_error", 1, []string{"download_url"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cli := NewBusiness(&credential.BusinessContext{
-				Token: "AUTH", APIBaseURL: "https://example.invalid",
+				Token: tc.bearer, APIBaseURL: "https://example.invalid",
 			}, Options{NoRetry: true})
 			cli.httpClient.Transport = roundTripFunc(func(req *http.Request) (*http.Response, error) {
-				if req.Header.Get("Authorization") != "Bearer AUTH" {
+				if req.Header.Get("Authorization") != "Bearer "+tc.bearer {
 					t.Error("redaction changed the outbound bearer")
 				}
 				return &http.Response{
 					StatusCode: http.StatusUnauthorized,
 					Header:     make(http.Header),
 					Body: io.NopCloser(strings.NewReader(`{"error":{"code":"` + tc.code +
-						`","message":"expired AUTH","details":{"token":"AUTH","context":"keep"}}}`)),
+						`","message":"expired ` + tc.bearer + `","details":{"token":"` + tc.bearer + `","context":"keep"}}}`)),
 				}, nil
 			})
-			_, err := cli.Do(context.Background(), &Request{Method: http.MethodGet, Path: "/check"})
+			_, err := cli.Do(context.Background(), &Request{
+				Method: http.MethodGet, Path: "/check", ResponseSecretFields: tc.responseSecretFields,
+			})
 			ee := output.AsExitError(err)
 			if ee == nil {
 				t.Fatalf("expected a structured error, got %v", err)
@@ -117,7 +122,7 @@ func TestBusinessError_PreservesKnownCodeAndMasksBearer(t *testing.T) {
 			if err := json.Unmarshal(ee.Detail, &detail); err != nil {
 				t.Fatal(err)
 			}
-			if ee.Message != "expired "+secretMask || strings.Contains(ee.Hint, "AUTH") ||
+			if ee.Message != "expired "+secretMask || strings.Contains(ee.Hint, tc.bearer) ||
 				detail.Error.Code != tc.wantCode || detail.Error.Message != ee.Message ||
 				detail.Error.Details.Token != secretMask || detail.Error.Details.Context != "keep" {
 				t.Errorf("unexpected redacted diagnostics: %+v, detail %s", ee, ee.Detail)
