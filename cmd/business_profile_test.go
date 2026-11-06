@@ -16,6 +16,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
+	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
 func phaseOneEnv(t *testing.T) string {
@@ -339,6 +340,41 @@ func TestPhaseOneShortBearerDiagnostics(t *testing.T) {
 			}
 			if strings.Contains(out+fmt.Sprint(err), bearer) || !strings.Contains(out, "prefix***REDACTED***suffix") {
 				t.Fatalf("Bearer must be masked inside diagnostic values: %s (%v)", out, err)
+			}
+		})
+	}
+}
+
+func TestPhaseOneMissingBodyFileDiagnostics(t *testing.T) {
+	dir := phaseOneEnv(t)
+	const bearer = "abc1234"
+	const filename = "prefix" + bearer + "suffix"
+	t.Setenv("OCTO_TOKEN", bearer)
+	t.Setenv("OCTO_API_BASE_URL", "https://example.invalid")
+	for _, tc := range []struct {
+		name, mode, want string
+	}{
+		{"unified", "unified", "prefix***REDACTED***suffix"},
+		{"legacy", "", filename},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
+			out, err := phaseOneRun("--dry-run", "api", "POST", "/check", "--data", "@"+filepath.Join(dir, filename))
+			exit := output.AsExitError(err)
+			if exit == nil || exit.Code != "VALIDATION_ERROR" {
+				t.Fatalf("want VALIDATION_ERROR, got %v (%s)", err, out)
+			}
+			var envelope struct {
+				Error struct{ Code, Message string }
+			}
+			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+				t.Fatalf("decode error envelope: %v", err)
+			}
+			if envelope.Error.Code != exit.Code || envelope.Error.Message != exit.Message || !strings.Contains(exit.Message, tc.want) {
+				t.Fatalf("unexpected file diagnostic: %s (%v)", out, err)
+			}
+			if tc.mode == "unified" && strings.Contains(out+err.Error(), bearer) {
+				t.Fatal("file diagnostic disclosed the unified bearer")
 			}
 		})
 	}

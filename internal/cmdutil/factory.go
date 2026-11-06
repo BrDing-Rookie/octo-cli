@@ -430,6 +430,14 @@ func (f *Factory) BusinessCredential() (*credential.BusinessContext, error) {
 	return f.businessFunc()
 }
 
+// RedactUnifiedBearer masks diagnostics using the already resolved credential.
+func (f *Factory) RedactUnifiedBearer(s string) string {
+	if f.business == nil {
+		return s
+	}
+	return client.RedactBearer(s, f.business.Token)
+}
+
 // Config returns the resolved config (cached).
 func (f *Factory) Config() (*config.Config, error) { return f.ConfigFunc() }
 

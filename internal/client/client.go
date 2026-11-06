@@ -773,12 +773,19 @@ func NewBusiness(cred *credential.BusinessContext, opts Options) *Client {
 	return newClient(&config.Config{APIBaseURL: cred.APIBaseURL}, nil, cred, opts)
 }
 
-// redactBearer masks the unified bearer even when it appears inside a word.
 func (c *Client) redactBearer(s string) string {
-	if c.business == nil || c.business.Token == "" {
+	if c.business == nil {
 		return s
 	}
-	for _, form := range secretForms(c.business.Token) {
+	return RedactBearer(s, c.business.Token)
+}
+
+// RedactBearer masks the unified bearer in diagnostics, including within words.
+func RedactBearer(s, token string) string {
+	if token == "" {
+		return s
+	}
+	for _, form := range secretForms(token) {
 		s = strings.ReplaceAll(s, form, secretMask)
 	}
 	return s

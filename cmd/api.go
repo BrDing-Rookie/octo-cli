@@ -65,7 +65,7 @@ flags are not auto-generated and --page-all is not available.`,
 
 			rawData, err := cmdutil.ParseInput(f, dataSpec)
 			if err != nil {
-				ee := output.ErrValidation(fmt.Sprintf("--data: %v", err), "pass inline JSON, @file, or @-")
+				ee := output.ErrValidation(f.RedactUnifiedBearer(fmt.Sprintf("--data: %v", err)), "pass inline JSON, @file, or @-")
 				_ = f.EmitError(ee) //nolint:errcheck // best-effort emit before returning err
 				return ee
 			}
