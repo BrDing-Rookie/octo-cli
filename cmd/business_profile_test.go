@@ -124,6 +124,44 @@ func TestPhaseOneBusinessProfileRequest(t *testing.T) {
 	}
 }
 
+func TestPhaseOneBusinessProfileIdentityRedaction(t *testing.T) {
+	dir := phaseOneEnv(t)
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+	t.Setenv("OCTO_TOKEN", "abc/1234")
+	phaseOneWrite(t, filepath.Join(dir, "config.json"), `{
+		"version":1,"profiles":{
+			"prefixabc/1234suffix":{"api_base_url":"https://literal.example.invalid"},
+			"prefix%61bc%2f1234suffix":{"api_base_url":"https://encoded.example.invalid"},
+			"ordinary":{"api_base_url":"https://ordinary.example.invalid"}
+		}
+	}`)
+	for _, tc := range []struct{ name, profile, want, url string }{
+		{"literal", "prefixabc/1234suffix", "prefix***REDACTED***suffix", "https://literal.example.invalid/check"},
+		{"encoded", "prefix%61bc%2f1234suffix", "prefix***REDACTED***suffix", "https://encoded.example.invalid/check"},
+		{"ordinary", "ordinary", "ordinary", "https://ordinary.example.invalid/check"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := phaseOneRun("--dry-run", "--profile", tc.profile, "api", "GET", "/check")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope struct {
+				Identity struct{ Type, Source, Profile string }
+				Data     struct{ URL string }
+			}
+			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if id := envelope.Identity; id.Type != "token" || id.Source != "env:OCTO_TOKEN" || id.Profile != tc.want {
+				t.Errorf("identity = %+v, want token from env:OCTO_TOKEN with profile %q", id, tc.want)
+			}
+			if envelope.Data.URL != tc.url {
+				t.Errorf("URL = %q, want %q", envelope.Data.URL, tc.url)
+			}
+		})
+	}
+}
+
 func TestPhaseOneBusinessProfileFailures(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

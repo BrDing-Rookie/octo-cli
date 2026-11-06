@@ -640,7 +640,7 @@ func (f *Factory) identityValue() any {
 	if f.business != nil {
 		id := map[string]any{"type": "token", "source": f.business.Source}
 		if f.business.Profile != "" {
-			id["profile"] = f.business.Profile
+			id["profile"] = f.RedactUnifiedBearer(f.business.Profile)
 		}
 		return id
 	}
