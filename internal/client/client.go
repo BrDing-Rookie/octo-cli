@@ -1102,8 +1102,6 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		// path parameter (invite / share token) would otherwise reach the default
 		// stderr error envelope — no --verbose needed to leak it.
 		msg := c.redactDiagnosticText(req, err.Error())
-		var urlErr *url.Error
-		unifiedURLError := c.business != nil && errors.As(err, &urlErr)
 		if len(req.ResponseSecretFields) > 0 {
 			// Go parses Location before CheckRedirect runs. A malformed redirect
 			// therefore surfaces here as a *url.Error containing the raw signed
@@ -1117,9 +1115,11 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 			return nil, output.ErrNetwork(msg, "request timed out or was cancelled")
 		}
 		exit := output.ErrNetwork(msg, "transport error")
-		// net/http reports Location parsing as text inside *url.Error.
-		// The server already received the request, so do not replay it.
-		if unifiedURLError && strings.HasPrefix(urlErr.Err.Error(), "failed to parse Location header ") {
+		// net/http parses Location before CheckRedirect and reports a malformed
+		// header as text inside *url.Error. The server already received this
+		// request; replaying it cannot repair the redirect and may repeat a write.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && strings.HasPrefix(urlErr.Err.Error(), "failed to parse Location header ") {
 			return nil, exit
 		}
 		return nil, &retryableErr{ExitError: exit}

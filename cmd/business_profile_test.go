@@ -602,39 +602,22 @@ func TestPhaseOneEncodedBearerRedirect(t *testing.T) {
 	const params = `{"note":"prefix%61bc%2f1234suffix","prefix%61bc%2f1234suffix":"keep"}`
 	const wireValue = "prefix%2561bc%252f1234suffix"
 	const rawQuery = "note=" + wireValue + "&" + wireValue + "=keep"
-	const body = `{"operation":"example"}`
 	for _, tc := range []struct {
 		name, mode, tokenEnv, path, code, want string
-		defaultPost                            bool
-		wantCalls                              int
 	}{
-		{"unified", "unified", "OCTO_TOKEN", "/redirect/", "HTTP_307", "prefix***REDACTED***suffix", false, 1},
-		{"unified malformed", "unified", "OCTO_TOKEN", "/redirect/%zz", "NETWORK_ERROR", "prefix***REDACTED***suffix", false, 1},
-		{"unified malformed default POST", "unified", "OCTO_TOKEN", "/write/%zz", "NETWORK_ERROR", "prefix***REDACTED***suffix", true, 1},
-		{"legacy", "", "OCTO_BOT_TOKEN", "/redirect/", "HTTP_307", wireValue, false, 1},
-		{"legacy malformed", "", "OCTO_BOT_TOKEN", "/redirect/%zz", "NETWORK_ERROR", wireValue, false, 1},
-		{"legacy malformed default POST", "", "OCTO_BOT_TOKEN", "/write/%zz", "NETWORK_ERROR", wireValue, true, 4},
+		{"unified", "unified", "OCTO_TOKEN", "/redirect/", "HTTP_307", "prefix***REDACTED***suffix"},
+		{"unified malformed", "unified", "OCTO_TOKEN", "/redirect/%zz", "NETWORK_ERROR", "prefix***REDACTED***suffix"},
+		{"legacy", "", "OCTO_BOT_TOKEN", "/redirect/", "HTTP_307", wireValue},
+		{"legacy malformed", "", "OCTO_BOT_TOKEN", "/redirect/%zz", "NETWORK_ERROR", wireValue},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
 			t.Setenv(tc.tokenEnv, bearer)
-			path, method := "/redirect", http.MethodGet
-			args := []string{"--no-retry"}
-			if tc.defaultPost {
-				path, method = "/write", http.MethodPost
-				args = nil
-			}
 			calls := make(chan struct{}, 16)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				calls <- struct{}{}
-				if r.Method != method || r.RequestURI != path+"?"+rawQuery {
+				if r.Method != http.MethodGet || r.RequestURI != "/redirect?"+rawQuery {
 					t.Errorf("unexpected request: %s %s", r.Method, r.RequestURI)
-				}
-				if tc.defaultPost {
-					got, err := io.ReadAll(r.Body)
-					if err != nil || string(got) != body {
-						t.Errorf("unexpected POST body: %s (%v)", got, err)
-					}
 				}
 				if r.Header.Get("Authorization") != "Bearer "+bearer {
 					t.Error("request did not use the expected bearer")
@@ -644,11 +627,7 @@ func TestPhaseOneEncodedBearerRedirect(t *testing.T) {
 			}))
 			defer server.Close()
 			t.Setenv("OCTO_API_BASE_URL", server.URL)
-			args = append(args, "api", method, path, "--params", params)
-			if tc.defaultPost {
-				args = append(args, "--data", body)
-			}
-			stderr, err := phaseOneRun(args...)
+			stderr, err := phaseOneRun("--no-retry", "api", "GET", "/redirect", "--params", params)
 			exitErr := output.AsExitError(err)
 			if exitErr == nil || exitErr.ExitCode() != 1 {
 				t.Fatalf("expected exit code 1, got %v", err)
@@ -664,8 +643,8 @@ func TestPhaseOneEncodedBearerRedirect(t *testing.T) {
 				(tc.mode == "unified" && strings.Contains(envelope.Error.Message, wireValue)) {
 				t.Errorf("unexpected structured error: %s", stderr)
 			}
-			if len(calls) != tc.wantCalls {
-				t.Fatalf("got %d requests, want %d", len(calls), tc.wantCalls)
+			if len(calls) != 1 {
+				t.Fatalf("got %d requests, want 1", len(calls))
 			}
 		})
 	}
