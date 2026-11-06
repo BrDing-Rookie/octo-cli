@@ -998,9 +998,15 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, output.ErrNetwork(msg, "request timed out or was cancelled")
 		}
-		return nil, &retryableErr{
-			ExitError: output.ErrNetwork(msg, "transport error"),
+		exit := output.ErrNetwork(msg, "transport error")
+		// net/http parses Location before CheckRedirect and reports a malformed
+		// header as text inside *url.Error. The server already received this
+		// request; replaying it cannot repair the redirect and may repeat a write.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && strings.HasPrefix(urlErr.Err.Error(), "failed to parse Location header ") {
+			return nil, exit
 		}
+		return nil, &retryableErr{ExitError: exit}
 	}
 	defer resp.Body.Close() //nolint:errcheck // best-effort close on HTTP response body
 
