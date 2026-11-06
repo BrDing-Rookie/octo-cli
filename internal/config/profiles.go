@@ -135,26 +135,6 @@ func (c *ProfileConfig) TokenFilePath(path string) string {
 	return filepath.Join(c.dir, path)
 }
 
-// CheckImplicitProfileOrigin prevents sending an external credential when an
-// explicit environment origin disagrees with the configured default target.
-func (c *Config) CheckImplicitProfileOrigin(p Profile) error {
-	if c.APIBaseURLSource != "env" || p.APIBaseURL == "" {
-		return nil
-	}
-	explicit, err := NormalizeAPIBaseURL(c.APIBaseURL)
-	if err != nil {
-		return fmt.Errorf("invalid OCTO_API_BASE_URL")
-	}
-	implicit, err := NormalizeAPIBaseURL(p.APIBaseURL)
-	if err != nil {
-		return fmt.Errorf("invalid API base URL in current_profile")
-	}
-	if explicit != implicit {
-		return fmt.Errorf("OCTO_API_BASE_URL conflicts with current_profile")
-	}
-	return nil
-}
-
 // ApplyProfile validates the request target without inspecting any token.
 func (c *Config) ApplyProfile(p Profile, spaceFlag string) error {
 	if p.APIBaseURL != "" {

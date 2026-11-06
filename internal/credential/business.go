@@ -43,12 +43,8 @@ func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessCon
 		return nil, output.ErrValidation("OCTO_TOKEN and OCTO_TOKEN_FILE are both set", "set only one of these environment variables")
 	}
 
-	profiles, err := config.LoadProfileConfig()
-	if err != nil {
-		return nil, ProfileConfigError(err)
-	}
 	external := opts.FileSet || tokenSet || tokenFileSet
-	name, p, err := selectBusinessProfile(runtime, profiles, opts, external)
+	profiles, name, p, err := selectBusinessProfile(opts, external)
 	if err != nil {
 		return nil, err
 	}
@@ -70,22 +66,24 @@ func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessCon
 	}, nil
 }
 
-func selectBusinessProfile(runtime *config.Config, profiles *config.ProfileConfig, opts BusinessOptions, external bool) (name string, profile config.Profile, err error) {
+func selectBusinessProfile(opts BusinessOptions, external bool) (profiles *config.ProfileConfig, name string, profile config.Profile, err error) {
 	selected, selector := config.ProfileSelector(opts.Profile, opts.ProfileSet)
+	// Standalone credentials use only the runtime target.
+	if external && selector == "" {
+		return nil, "", config.Profile{}, nil
+	}
 	if selector != "" && selected == "" {
-		return "", config.Profile{}, output.ErrValidation(selector+" is empty", "select an existing profile name")
+		return nil, "", config.Profile{}, output.ErrValidation(selector+" is empty", "select an existing profile name")
+	}
+	profiles, err = config.LoadProfileConfig()
+	if err != nil {
+		return nil, "", config.Profile{}, ProfileConfigError(err)
 	}
 	name, profile, err = profiles.SelectProfile(selected, selector != "")
 	if err != nil {
-		return "", config.Profile{}, output.ErrValidation(err.Error(), "check octo-cli auth list and the profile selector")
+		return nil, "", config.Profile{}, output.ErrValidation(err.Error(), "check octo-cli auth list and the profile selector")
 	}
-	if external && selector == "" {
-		if err := runtime.CheckImplicitProfileOrigin(profile); err != nil {
-			return "", config.Profile{}, output.ErrValidation(err.Error(), "explicitly select the intended profile or align OCTO_API_BASE_URL")
-		}
-		return "", config.Profile{}, nil
-	}
-	return name, profile, nil
+	return profiles, name, profile, nil
 }
 
 func resolveBusinessToken(opts BusinessOptions, envToken string, tokenSet bool, tokenFile string, tokenFileSet bool, profiles *config.ProfileConfig, ref *config.TokenSource) (source, token string, err error) {

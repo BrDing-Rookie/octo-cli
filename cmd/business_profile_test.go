@@ -335,52 +335,87 @@ func TestPhaseOneExternalTokenTarget(t *testing.T) {
 	t.Setenv("OCTO_API_BASE_URL", envOrigin)
 
 	args := []string{"api", "GET", "/phase-one"}
-	if out, err := phaseOneRun(args...); err == nil || !strings.Contains(err.Error(), "OCTO_API_BASE_URL conflicts with current_profile") {
-		t.Errorf("implicit profile: %v (%s), want origin conflict", err, out)
+	check := func(want string, args ...string) {
+		t.Helper()
+		if out, err := phaseOneRun(args...); err != nil {
+			t.Fatalf("execute %v: %v (%s)", args, err, out)
+		}
+		select {
+		case got := <-calls:
+			if got != want {
+				t.Fatalf("request = %q, want %q", got, want)
+			}
+		default:
+			t.Fatal("no request received")
+		}
 	}
-	select {
-	case got := <-calls:
-		t.Fatalf("origin conflict sent a request: %s", got)
-	default:
-	}
+	check("env Bearer external-bearer ", args...)
 
 	if err := os.Unsetenv("OCTO_TOKEN_FILE"); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
 	t.Setenv("OCTO_TOKEN", "external-bearer")
-	if out, err := phaseOneRun(args...); err == nil || !strings.Contains(err.Error(), "OCTO_API_BASE_URL conflicts with current_profile") {
-		t.Fatalf("implicit profile with OCTO_TOKEN: %v (%s), want origin conflict", err, out)
-	}
-	select {
-	case got := <-calls:
-		t.Fatalf("origin conflict sent a request: %s", got)
-	default:
-	}
+	check("env Bearer external-bearer ", args...)
+	check("profile Bearer external-bearer space-a", append([]string{"--profile", "a"}, args...)...)
 
-	if out, err := phaseOneRun(append([]string{"--profile", "a"}, args...)...); err != nil {
-		t.Fatalf("explicit profile: %v (%s)", err, out)
-	}
-	select {
-	case got := <-calls:
-		if got != "profile Bearer external-bearer space-a" {
-			t.Fatalf("explicit profile request = %q", got)
-		}
-	default:
-		t.Fatal("no request with explicitly selected profile")
-	}
+	t.Setenv("OCTO_SPACE_ID", "runtime-space")
+	check("env Bearer external-bearer runtime-space", append(args, "--service=default")...)
+}
 
-	t.Setenv("OCTO_API_BASE_URL", configOrigin+"/")
-	if out, err := phaseOneRun(append(args, "--service=default")...); err != nil {
-		t.Fatalf("standalone credential: %v (%s)", err, out)
-	}
-	select {
-	case got := <-calls:
-		if got != "profile Bearer external-bearer " {
-			t.Fatalf("standalone request inherited implicit Profile metadata: %q", got)
-		}
-	default:
-		t.Fatal("no standalone request")
+func TestPhaseOneExternalTokenDoesNotReadProfileConfig(t *testing.T) {
+	calls := make(chan string, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	for _, tc := range []struct {
+		name, contents, profileError string
+		unreadable                   bool
+	}{
+		{"malformed", "{", "invalid config.json", false},
+		{"dangling default", `{"version":1,"current_profile":"missing","profiles":{}}`, "selected profile does not exist", false},
+		{"unreadable", `{"version":1,"profiles":{}}`, "cannot read config.json", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			path := filepath.Join(dir, "config.json")
+			phaseOneWrite(t, path, tc.contents)
+			if tc.unreadable {
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.ReadFile(path); !os.IsPermission(err) {
+					t.Skipf("cannot exercise permission denial: %v", err)
+				}
+			}
+			t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+			t.Setenv("OCTO_TOKEN", "external-bearer")
+			t.Setenv("OCTO_API_BASE_URL", server.URL)
+			args := []string{"api", "GET", "/phase-one"}
+			if out, err := phaseOneRun(args...); err != nil {
+				t.Fatalf("standalone: %v (%s)", err, out)
+			}
+			select {
+			case got := <-calls:
+				if got != "Bearer external-bearer" {
+					t.Fatal("request did not use the external credential")
+				}
+			default:
+				t.Fatal("standalone request did not reach the runtime origin")
+			}
+			if out, err := phaseOneRun(append([]string{"--profile", "a"}, args...)...); err == nil ||
+				!strings.Contains(err.Error(), tc.profileError) {
+				t.Errorf("explicit profile: %v (%s), want %q", err, out, tc.profileError)
+			}
+			select {
+			case <-calls:
+				t.Fatal("explicit profile failure sent an HTTP request")
+			default:
+			}
+		})
 	}
 }
 
