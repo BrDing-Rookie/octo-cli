@@ -425,43 +425,6 @@ func TestPhaseOneShortBearerDiagnostics(t *testing.T) {
 	}
 }
 
-func TestPhaseOneEncodedBearerURLDiagnostics(t *testing.T) {
-	phaseOneEnv(t)
-	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
-	t.Setenv("OCTO_API_BASE_URL", "https://example.invalid")
-	for _, tc := range []struct {
-		name, bearer, target, want string
-	}{
-		{"lowercase path", "abc/1234", "/prefixabc%2f1234suffix", "/prefix***REDACTED***suffix"},
-		{"uppercase path", "abc/1234", "/prefixabc%2F1234suffix", "/prefix***REDACTED***suffix"},
-		{"lowercase query", "abc/1234", "/check?note=prefixabc%2f1234suffix", "/check?note=prefix***REDACTED***suffix"},
-		{"escaped path letters", "abc/1234", "/prefix%61bc%2f1234suffix%21", "/prefix***REDACTED***suffix%21"},
-		{"escaped query letters", "abc/1234", "/check?note=prefix%61bc%2f1234suffix", "/check?note=prefix***REDACTED***suffix"},
-		{"mixed escapes", "abc/?1234", "/prefixabc%2f%3F1234suffix", "/prefix***REDACTED***suffix"},
-		{"literal token case", "abc/1234", "/prefixAbc%2f1234suffix", "/prefixAbc%2f1234suffix"},
-		{"escaped token case", "abc/1234", "/prefix%41bc%2f1234suffix", "/prefix%41bc%2f1234suffix"},
-		{"escaped literal percent", "abc%2f1234", "/prefixabc%252f1234suffix", "/prefix***REDACTED***suffix"},
-		{"encoded literal percent", "abc%2f1234", "/prefixabc%252F1234suffix", "/prefixabc%252F1234suffix"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv("OCTO_TOKEN", tc.bearer)
-			out, err := phaseOneRun("--dry-run", "api", "GET", tc.target)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var envelope struct {
-				Data struct{ URL string }
-			}
-			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
-				t.Fatal(err)
-			}
-			if want := "https://example.invalid" + tc.want; envelope.Data.URL != want {
-				t.Errorf("URL = %q, want %q", envelope.Data.URL, want)
-			}
-		})
-	}
-}
-
 func TestPhaseOneEncodedBearerErrorDetail(t *testing.T) {
 	phaseOneEnv(t)
 	const bearer = "abc/1234"
@@ -582,7 +545,7 @@ func TestPhaseOneEncodedBearerStructuredQueryDiagnostics(t *testing.T) {
 	const target = "/prefix%61bc%2f1234suffix?raw=prefix%61bc%2f1234suffix"
 	const params = `{"note":"prefix%61bc%2f1234suffix","plain":"prefixabc/1234suffix","prefix%61bc%2f1234suffix":9007199254740993}`
 	const wire = "/prefix%61bc%2f1234suffix?note=prefix%2561bc%252f1234suffix&plain=prefixabc%2F1234suffix&prefix%2561bc%252f1234suffix=9007199254740993&raw=prefixabc%2F1234suffix"
-	const masked = "/prefix***REDACTED***suffix?note=prefix%2A%2A%2AREDACTED%2A%2A%2Asuffix&plain=prefix***REDACTED***suffix&prefix%2A%2A%2AREDACTED%2A%2A%2Asuffix=9007199254740993&raw=prefix***REDACTED***suffix"
+	const masked = "/prefix***REDACTED***suffix?note=prefix***REDACTED***suffix&plain=prefix***REDACTED***suffix&prefix***REDACTED***suffix=9007199254740993&raw=prefix***REDACTED***suffix"
 	calls := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+bearer {
@@ -595,17 +558,13 @@ func TestPhaseOneEncodedBearerStructuredQueryDiagnostics(t *testing.T) {
 	defer server.Close()
 	t.Setenv("OCTO_API_BASE_URL", server.URL)
 	args := []string{"api", "GET", target, "--params", params}
-	for _, tc := range []struct{ name, mode, want string }{
-		{"unified", "unified", masked},
-		{"legacy", "", wire},
+	for _, tc := range []struct{ name, mode, tokenEnv, want string }{
+		{"unified", "unified", "OCTO_TOKEN", masked},
+		{"legacy", "", "OCTO_BOT_TOKEN", wire},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
-			if tc.mode == "unified" {
-				t.Setenv("OCTO_TOKEN", bearer)
-			} else {
-				t.Setenv("OCTO_BOT_TOKEN", bearer)
-			}
+			t.Setenv(tc.tokenEnv, bearer)
 			wantURL := server.URL + tc.want
 			out, err := phaseOneRun(append([]string{"--dry-run"}, args...)...)
 			if err != nil {
@@ -717,7 +676,7 @@ func TestPhaseOneEncodedBearerNetworkError(t *testing.T) {
 	const bearer = "abc/1234"
 	const params = `{"note":"prefix%61bc%2f1234suffix","prefix%61bc%2f1234suffix":"keep"}`
 	const wire = "/check?note=prefix%2561bc%252f1234suffix&prefix%2561bc%252f1234suffix=keep"
-	const masked = "/check?note=prefix%2A%2A%2AREDACTED%2A%2A%2Asuffix&prefix%2A%2A%2AREDACTED%2A%2A%2Asuffix=keep"
+	const masked = "/check?note=prefix***REDACTED***suffix&prefix***REDACTED***suffix=keep"
 	calls := make(chan string, 2)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls <- r.RequestURI
@@ -792,17 +751,13 @@ func TestPhaseOneEncodedBearerRequestBodyDiagnostics(t *testing.T) {
 	t.Setenv("OCTO_API_BASE_URL", server.URL)
 	args := []string{"api", "POST", "/check", "--data", data}
 
-	for _, tc := range []struct{ name, mode, want string }{
-		{"unified", "unified", masked},
-		{"legacy", "", data},
+	for _, tc := range []struct{ name, mode, tokenEnv, want string }{
+		{"unified", "unified", "OCTO_TOKEN", masked},
+		{"legacy", "", "OCTO_BOT_TOKEN", data},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
-			if tc.mode == "unified" {
-				t.Setenv("OCTO_TOKEN", bearer)
-			} else {
-				t.Setenv("OCTO_BOT_TOKEN", bearer)
-			}
+			t.Setenv(tc.tokenEnv, bearer)
 
 			out, err := phaseOneRun(append([]string{"--dry-run"}, args...)...)
 			if err != nil {

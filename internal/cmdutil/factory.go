@@ -55,22 +55,21 @@ type Factory struct {
 	IOStreams *IOStreams
 	Globals   *GlobalOptions
 
-	ConfigFunc         func() (*config.Config, error)
-	CredentialFunc     func() (*credential.BotCredential, error)
-	ClientFunc         func() (*client.Client, error)
-	MailCredentialFunc func(context.Context) (*credential.MailCredential, error)
-	MailClientFunc     func(context.Context) (*client.Client, error)
-	RegistryFunc       func() *registry.Registry
+	ConfigFunc             func() (*config.Config, error)
+	CredentialFunc         func() (*credential.BotCredential, error)
+	BusinessCredentialFunc func() (*credential.BusinessContext, error)
+	ClientFunc             func() (*client.Client, error)
+	MailCredentialFunc     func(context.Context) (*credential.MailCredential, error)
+	MailClientFunc         func(context.Context) (*client.Client, error)
+	RegistryFunc           func() *registry.Registry
 
 	// ErrorEmitted is set to true after EmitError writes an envelope to
 	// stderr. The top-level main func checks this to avoid double-emitting
 	// when RunE returns the same error that was already rendered.
 	ErrorEmitted bool
 
-	businessFunc func() (*credential.BusinessContext, error)
-	business     *credential.BusinessContext
-
 	// Cached resolutions.
+	business *credential.BusinessContext
 	config   *config.Config
 	cred     *credential.BotCredential
 	cli      *client.Client
@@ -96,14 +95,12 @@ func NewDefaultFactory() *Factory {
 		Globals:   &GlobalOptions{},
 	}
 
-	f.businessFunc = sync.OnceValues(func() (*credential.BusinessContext, error) {
-		cred, err := credential.ResolveBusiness(config.LoadRuntime(), credential.BusinessOptions{
+	f.BusinessCredentialFunc = sync.OnceValues(func() (*credential.BusinessContext, error) {
+		return credential.ResolveBusiness(config.LoadRuntime(), credential.BusinessOptions{
 			Profile: f.Globals.Profile, ProfileSet: f.Globals.ProfileSet,
-			File: f.Globals.CredentialFile, FileSet: f.Globals.CredentialFileSet || f.Globals.CredentialFile != "",
+			File: f.Globals.CredentialFile, FileSet: f.credentialFileSelected(),
 			Space: f.Globals.Space, BotIDSet: f.Globals.BotIDSet || f.Globals.BotID != "",
 		})
-		f.business = cred
-		return cred, err
 	})
 
 	f.ConfigFunc = func() (*config.Config, error) {
@@ -141,8 +138,12 @@ func NewDefaultFactory() *Factory {
 			Timeout: f.Globals.Timeout,
 			ErrOut:  f.IOStreams.ErrOut,
 		}
-		if f.business != nil {
-			f.cli = client.NewBusiness(f.business, opts)
+		business, err := f.BusinessCredential()
+		if err != nil {
+			return nil, err
+		}
+		if business != nil {
+			f.cli = client.NewBusiness(business, opts)
 			return f.cli, nil
 		}
 		cfg, err := f.ConfigFunc()
@@ -363,7 +364,7 @@ func MailBindingKeyForBot(bot *credential.BotCredential, apiOrigin string) (stri
 // selected task invocation. The daemon provides its value; Fleet verifies the
 // opaque bearer and enforces its principal, bindings and actions.
 func (f *Factory) buildTaskCredential() (*credential.BotCredential, error) {
-	if f.Globals.CredentialFileSet || f.Globals.CredentialFile != "" {
+	if f.credentialFileSelected() {
 		return nil, output.ErrValidation("task mode does not allow --credential-file", "use OCTO_TASK_TOKEN")
 	}
 	if f.Globals.Profile != "" || f.Globals.BotID != "" ||
@@ -422,12 +423,25 @@ func (f *Factory) overlayProfileBaseURL(cfg *config.Config, profile string) erro
 	return nil
 }
 
-// BusinessCredential returns the resolved unified credential when selected.
+func (f *Factory) credentialFileSelected() bool {
+	return f.Globals != nil && (f.Globals.CredentialFileSet || f.Globals.CredentialFile != "")
+}
+
+// UsesUnifiedCredentials checks only non-secret settings; it never invokes a
+// credential provider or reads the profile store.
+func (f *Factory) UsesUnifiedCredentials() (bool, error) {
+	return config.LoadRuntime().UsesUnifiedCredentials(f.credentialFileSelected())
+}
+
+// BusinessCredential returns the resolved unified credential when selected,
+// retaining it for identity output and diagnostic redaction.
 func (f *Factory) BusinessCredential() (*credential.BusinessContext, error) {
-	if f.businessFunc == nil {
+	if f.BusinessCredentialFunc == nil {
 		return nil, nil
 	}
-	return f.businessFunc()
+	cred, err := f.BusinessCredentialFunc()
+	f.business = cred
+	return cred, err
 }
 
 // RedactUnifiedBearer masks diagnostics using the already resolved credential.
@@ -587,12 +601,11 @@ func (f *Factory) Format() string {
 	if f.Globals != nil && f.Globals.Format != "" {
 		return f.Globals.Format
 	}
-	if f.businessFunc != nil && f.Globals != nil {
-		runtime := config.LoadRuntime()
-		unified, err := runtime.UsesUnifiedCredentials(f.Globals.CredentialFileSet || f.Globals.CredentialFile != "")
+	if f.BusinessCredentialFunc != nil && f.Globals != nil {
+		unified, err := f.UsesUnifiedCredentials()
 		if err == nil && unified {
 			// Unified offline commands read the format without resolving credentials.
-			return runtime.Format
+			return config.LoadRuntime().Format
 		}
 	}
 	if cfg, err := f.Config(); err == nil {

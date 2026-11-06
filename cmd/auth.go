@@ -39,7 +39,7 @@ func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
 }
 
 func rejectUnifiedCredentialCommand(f *cmdutil.Factory, name string) error {
-	unified, err := config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet)
+	unified, err := f.UsesUnifiedCredentials()
 	if err != nil {
 		return failErr(f, err)
 	}
@@ -352,7 +352,7 @@ func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "List local profiles (never shows tokens)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			unified, err := config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet)
+			unified, err := f.UsesUnifiedCredentials()
 			if err != nil {
 				return failErr(f, err)
 			}

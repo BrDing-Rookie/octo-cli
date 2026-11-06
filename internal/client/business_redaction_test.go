@@ -1,0 +1,74 @@
+package client
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/url"
+	"testing"
+
+	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
+)
+
+func TestRedactBearer_EncodedURL(t *testing.T) {
+	for _, tc := range []struct {
+		name, bearer, target, want string
+	}{
+		{"lowercase path", "abc/1234", "/prefixabc%2f1234suffix", "/prefix***REDACTED***suffix"},
+		{"uppercase path", "abc/1234", "/prefixabc%2F1234suffix", "/prefix***REDACTED***suffix"},
+		{"lowercase query", "abc/1234", "/check?note=prefixabc%2f1234suffix", "/check?note=prefix***REDACTED***suffix"},
+		{"escaped path letters", "abc/1234", "/prefix%61bc%2f1234suffix%21", "/prefix***REDACTED***suffix%21"},
+		{"escaped query letters", "abc/1234", "/check?note=prefix%61bc%2f1234suffix", "/check?note=prefix***REDACTED***suffix"},
+		{"mixed escapes", "abc/?1234", "/prefixabc%2f%3F1234suffix", "/prefix***REDACTED***suffix"},
+		{"literal token case", "abc/1234", "/prefixAbc%2f1234suffix", "/prefixAbc%2f1234suffix"},
+		{"escaped token case", "abc/1234", "/prefix%41bc%2f1234suffix", "/prefix%41bc%2f1234suffix"},
+		{"escaped literal percent", "abc%2f1234", "/prefixabc%252f1234suffix", "/prefix***REDACTED***suffix"},
+		{"encoded literal percent", "abc%2f1234", "/prefixabc%252F1234suffix", "/prefixabc%252F1234suffix"},
+		{"short encoded token", "abc", "/prefix%61bcsuffix", "/prefix***REDACTED***suffix"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedactBearer(tc.target, tc.bearer); got != tc.want {
+				t.Errorf("RedactBearer() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestBusinessDryRun_ShortEncodedQueryBearer(t *testing.T) {
+	const value = "prefix%61bcsuffix"
+	cli := NewBusiness(&credential.BusinessContext{
+		Token: "abc", APIBaseURL: "https://example.invalid",
+	}, Options{DryRun: true})
+	req := &Request{
+		Method: http.MethodGet,
+		Path:   "/check",
+		Query:  url.Values{"note": {value}},
+		Body: map[string]any{
+			"note":              value,
+			"first%61bcsuffix":  "first",
+			"second%61bcsuffix": "second",
+		},
+	}
+	body, err := cli.Do(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var description struct {
+		URL  string
+		Body map[string]string
+	}
+	if err := json.Unmarshal(body, &description); err != nil {
+		t.Fatal(err)
+	}
+	const want = "https://example.invalid/check?note=prefix***REDACTED***suffix"
+	if description.URL != want {
+		t.Errorf("URL = %q, want %q", description.URL, want)
+	}
+	if len(description.Body) != 3 || description.Body["note"] != "prefix***REDACTED***suffix" ||
+		description.Body["first***REDACTED***suffix"] != "first" || description.Body["second***REDACTED***suffix"] != "second" {
+		t.Errorf("body diagnostics lost non-secret context or collapsed keys: %#v", description.Body)
+	}
+	if req.Query.Get("note") != value || len(req.SecretValues) != 0 {
+		t.Fatal("diagnostics modified the caller's request")
+	}
+}

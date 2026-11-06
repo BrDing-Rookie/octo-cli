@@ -46,7 +46,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				}
 				return nil
 			}
-			unified, err := config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet || f.Globals.CredentialFile != "")
+			unified, err := f.UsesUnifiedCredentials()
 			if err != nil {
 				return err
 			}
@@ -115,7 +115,7 @@ func preflightOfflineOutput(f *cmdutil.Factory) error {
 	if !errors.Is(err, output.ErrUnknownFormat) {
 		return err
 	}
-	unified, modeErr := runtime.UsesUnifiedCredentials(f.Globals.CredentialFileSet || f.Globals.CredentialFile != "")
+	unified, modeErr := f.UsesUnifiedCredentials()
 	if modeErr != nil || !unified {
 		return err
 	}

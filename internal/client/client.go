@@ -101,6 +101,8 @@ type Request struct {
 	// traces and --dry-run output, whether it appears in the URL path or the
 	// request body. The values still go on the wire unchanged.
 	SecretValues []string
+	// diagnosticBearerForms is populated on Do's request copy, once per call.
+	diagnosticBearerForms []string
 	// ResponseSecretFields lists response-schema paths marked x-octo-secret.
 	// On a non-2xx response, the client extracts the actual values at these
 	// paths (at any envelope depth) and treats them as secrets for error
@@ -897,12 +899,13 @@ func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 		// Keep the selected bearer out of diagnostics even when a backend
 		// echoes it or the caller also placed it in a request field.
 		copyReq := *req
+		copyReq.diagnosticBearerForms = c.queryBearerForms(req.Query)
 		copyReq.SecretValues = append([]string{c.business.Token}, req.SecretValues...)
 		req = &copyReq
 	}
 	body, err := c.do(ctx, req)
 	if err != nil {
-		return nil, c.redactError(err, req.SecretValues)
+		return nil, c.redactError(err, req)
 	}
 	return body, nil
 }
@@ -911,37 +914,39 @@ func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 // fields. The concrete type is preserved where it carries meaning: a
 // *retryableErr is rebuilt as one so a caller inspecting retryability still sees
 // it, and a plain error with nothing to redact is returned untouched.
-func (c *Client) redactError(err error, secrets []string) error {
+func (c *Client) redactError(err error, req *Request) error {
+	secrets := req.SecretValues
 	if err == nil || len(secrets) == 0 {
 		return err
 	}
 	var re *retryableErr
 	if errors.As(err, &re) && re.ExitError != nil {
 		return &retryableErr{
-			ExitError:  c.redactExitError(re.ExitError, secrets),
+			ExitError:  c.redactExitError(re.ExitError, req),
 			retryAfter: re.retryAfter,
 			status:     re.status,
 		}
 	}
 	var ee *output.ExitError
 	if errors.As(err, &ee) {
-		return c.redactExitError(ee, secrets)
+		return c.redactExitError(ee, req)
 	}
 	// Not one of ours: wrap so the text is still masked rather than passed
 	// through, since the caller renders whatever it receives.
-	return output.ErrNetwork(c.redactBearer(redactSecrets(err.Error(), secrets)), "")
+	return output.ErrNetwork(c.redactDiagnosticText(req, err.Error()), "")
 }
 
 // redactExitError copies e with its message, hint and detail masked. A copy
 // rather than a mutation: the value may be shared (a package-level sentinel, or
 // an error already handed to another caller).
-func (c *Client) redactExitError(e *output.ExitError, secrets []string) *output.ExitError {
+func (c *Client) redactExitError(e *output.ExitError, req *Request) *output.ExitError {
+	secrets := req.SecretValues
 	if e == nil {
 		return nil
 	}
 	out := *e
-	out.Message = c.redactBearer(redactSecrets(e.Message, secrets))
-	out.Hint = c.redactBearer(redactSecrets(e.Hint, secrets))
+	out.Message = c.redactDiagnosticText(req, e.Message)
+	out.Hint = c.redactDiagnosticText(req, e.Hint)
 	if len(e.Detail) > 0 {
 		var bearer string
 		if c.business != nil {
@@ -1037,7 +1042,7 @@ func (c *Client) doWithRetry(ctx context.Context, req *Request, urlStr string, b
 			// URL, so on a share or invite path that is the token — printed once per
 			// retry.
 			c.verbosef("retry #%d after %s (last error: %v)", attempt, delay,
-				c.redactError(lastErr, req.SecretValues))
+				c.redactError(lastErr, req))
 			select {
 			case <-ctx.Done():
 				return nil, output.ErrNetwork(ctx.Err().Error(), "request cancelled")
@@ -1085,7 +1090,7 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	}
 
 	if c.options.Verbose {
-		c.verbosef("%s %s", req.Method, c.redactDiagnosticURL(req, urlStr))
+		c.verbosef("%s %s", req.Method, c.redactDiagnosticText(req, urlStr))
 		if len(body) > 0 {
 			c.verbosef("request body: %s", truncate(c.redactDiagnosticBody(req, body), 1024))
 		}
@@ -1096,17 +1101,9 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		// *url.Error.Error() embeds the whole request URL, so an x-octo-secret
 		// path parameter (invite / share token) would otherwise reach the default
 		// stderr error envelope — no --verbose needed to leak it.
-		diagnosticErr := err
+		msg := c.redactDiagnosticText(req, err.Error())
 		var urlErr *url.Error
 		unifiedURLError := c.business != nil && errors.As(err, &urlErr)
-		// Only the original URL can be rebuilt from this request's parameters.
-		if unifiedURLError && len(req.Query) > 0 && urlErr.URL == urlStr {
-			diagnostic := *urlErr
-			diagnostic.URL = c.redactDiagnosticURL(req, urlStr)
-			diagnosticErr = &diagnostic
-		}
-		msg := redactSecrets(diagnosticErr.Error(), req.SecretValues)
-		msg = maskOrSuppressValue(msg, c.queryBearerForms(req.Query))
 		if len(req.ResponseSecretFields) > 0 {
 			// Go parses Location before CheckRedirect runs. A malformed redirect
 			// therefore surfaces here as a *url.Error containing the raw signed
@@ -1147,7 +1144,7 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	// as an unexpected error.
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
 		loc := redactRedirectLocation(resp.Header.Get("Location"), req.SecretValues, req.ResponseSecretFields)
-		loc = maskOrSuppressValue(loc, c.queryBearerForms(req.Query))
+		loc = c.redactDiagnosticText(req, loc)
 		if req.BinaryResponse {
 			env := map[string]any{
 				"url":    loc,
@@ -1211,8 +1208,8 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	}
 
 	requestSecrets := req.SecretValues
-	if forms := c.queryBearerForms(req.Query); len(forms) > 0 {
-		requestSecrets = append(slices.Clone(requestSecrets), forms...)
+	if len(req.diagnosticBearerForms) > 0 {
+		requestSecrets = append(slices.Clone(requestSecrets), req.diagnosticBearerForms...)
 	}
 	redactedBody := redactBackendErrorBody(respBody, requestSecrets, req.ResponseSecretFields)
 	parseError := output.ParseBackendError
@@ -1417,7 +1414,7 @@ func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte,
 	out := map[string]any{
 		"dry_run": true,
 		"method":  c.redactBearer(req.Method),
-		"url":     c.redactBearer(c.redactDiagnosticURL(req, urlStr)),
+		"url":     c.redactDiagnosticText(req, urlStr),
 		"headers": hdr,
 	}
 	if bodyField != nil {
@@ -1461,26 +1458,15 @@ func (c *Client) redactDiagnosticBody(req *Request, body []byte) string {
 	return string(redactJSONBody(redacted, req.SensitiveJSONFields))
 }
 
-func (c *Client) redactDiagnosticURL(req *Request, urlStr string) string {
-	if c.business != nil && len(req.Query) > 0 {
-		// Structured query keys and values gain another layer of escaping
-		// when the URL is assembled. Mask encoded bearers before that step.
-		query := make(url.Values, len(req.Query))
-		for _, key := range slices.Sorted(maps.Keys(req.Query)) {
-			maskedKey := redactEscapedBearer(key, c.business.Token)
-			values := query[maskedKey]
-			for _, value := range req.Query[key] {
-				values = append(values, redactEscapedBearer(value, c.business.Token))
-			}
-			query[maskedKey] = values
-		}
-		maskedURL, err := buildURL(c.cfg.ServiceURL(req.Service), req.Path, query)
-		if err != nil {
-			return secretMask
-		}
-		urlStr = maskedURL
+func (c *Client) redactDiagnosticText(req *Request, text string) string {
+	text = c.redactBearer(redactSecrets(text, req.SecretValues))
+	// Query encoding can conceal a short bearer inside a longer word. Apply
+	// the same strict matching to its collected forms, without changing the
+	// historical boundary rules for other declared secrets.
+	for _, form := range req.diagnosticBearerForms {
+		text = RedactBearer(text, form)
 	}
-	return redactSecrets(urlStr, req.SecretValues)
+	return text
 }
 
 // queryBearerForms finds encoded bearer fragments in the structured query.
