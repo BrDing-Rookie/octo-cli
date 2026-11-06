@@ -38,8 +38,25 @@ func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
 	return cmd
 }
 
+func rejectUnifiedCredentialCommand(f *cmdutil.Factory, name string) error {
+	unified, err := f.UsesUnifiedCredentials()
+	if err != nil {
+		return failErr(f, err)
+	}
+	if unified {
+		return failErr(f, output.ErrValidation(
+			name+" is unavailable for unified credentials",
+			"use auth list to inspect versioned profiles",
+		))
+	}
+	return nil
+}
+
 func authMutationPreRun(f *cmdutil.Factory, hint string) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
+		if err := rejectUnifiedCredentialCommand(f, "auth "+cmd.Name()); err != nil {
+			return err
+		}
 		if !f.Globals.DryRun {
 			return nil
 		}
@@ -225,6 +242,9 @@ func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 		Use:   "status",
 		Short: "Show the single active bot identity (whoami); use `auth list` to enumerate",
 		Args:  cobra.NoArgs,
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			return rejectUnifiedCredentialCommand(f, "auth "+cmd.Name())
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Report the same credential an ordinary request would use. In
 			// particular, environment credentials must bypass the local store.
@@ -329,9 +349,16 @@ func newAuthLogoutCmd(f *cmdutil.Factory) *cobra.Command {
 func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List stored bot credentials (never shows tokens)",
+		Short: "List local profiles (never shows tokens)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unified, err := f.UsesUnifiedCredentials()
+			if err != nil {
+				return failErr(f, err)
+			}
+			if unified {
+				return listUnifiedProfiles(f)
+			}
 			store, err := f.AuthStore()
 			if err != nil {
 				return failErr(f, err)
@@ -348,6 +375,40 @@ func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 			return emitJSON(f, payload)
 		},
 	}
+}
+
+func listUnifiedProfiles(f *cmdutil.Factory) error {
+	profiles, err := config.LoadProfileConfig()
+	if err != nil {
+		return failErr(f, credential.ProfileConfigError(err))
+	}
+	if profiles == nil {
+		return emitJSON(f, map[string]any{"profiles": []any{}, "count": 0, "current_profile": nil})
+	}
+
+	names := make([]string, 0, len(profiles.Profiles))
+	for name, profile := range profiles.Profiles {
+		if profile != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	entries := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		p := profiles.Profiles[name]
+		// An invalid origin can contain credentials or a query secret.
+		origin, err := config.NormalizeAPIBaseURL(p.APIBaseURL)
+		if err != nil {
+			origin = ""
+		}
+		entries = append(entries, map[string]any{
+			"profile": name, "api_base_url": origin, "space_id": p.SpaceID,
+		})
+	}
+	return emitJSON(f, map[string]any{
+		"profiles": entries, "count": len(entries),
+		"current_profile": nullableString(profiles.CurrentProfile),
+	})
 }
 
 // promptBotID asks for the bot id interactively when no selector was given and

@@ -16,10 +16,12 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 )
 
 // EnvConfigDir overrides the default config directory when set.
-const EnvConfigDir = "OCTO_CONFIG_DIR"
+const EnvConfigDir = config.EnvConfigDir
 
 const (
 	configFile = "config.json"
@@ -56,6 +58,7 @@ type ProfileMeta struct {
 
 // configFileShape is the on-disk config.json layout.
 type configFileShape struct {
+	Version  json.RawMessage        `json:"version,omitempty"`
 	Profiles map[string]ProfileMeta `json:"profiles"`
 }
 
@@ -106,6 +109,9 @@ func (s *Store) LoadProfiles() (map[string]ProfileMeta, error) {
 	var cf configFileShape
 	if err := json.Unmarshal(data, &cf); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", configFile, err)
+	}
+	if len(cf.Version) != 0 {
+		return nil, fmt.Errorf("versioned config.json cannot be used as a legacy Bot profile store")
 	}
 	if cf.Profiles == nil {
 		cf.Profiles = map[string]ProfileMeta{}

@@ -252,7 +252,7 @@ var rootPersistentFlagNames = []string{
 	"format", "jq",
 	"dry-run", "verbose",
 	"timeout", "no-retry",
-	"space", "bot-id", "profile",
+	"space", "bot-id", "profile", "credential-file",
 }
 
 func buildReservedFlagNames() map[string]bool {

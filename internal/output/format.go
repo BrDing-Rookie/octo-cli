@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sort"
@@ -18,6 +19,9 @@ const (
 	FormatCSV    = "csv"
 	FormatNDJSON = "ndjson"
 )
+
+// ErrUnknownFormat identifies invalid output formats.
+var ErrUnknownFormat = errors.New("unknown format")
 
 // Format renders v to w using the requested format. For non-JSON formats v is
 // expected to be a JSON-serializable value, typically the success envelope (a
@@ -58,7 +62,7 @@ func normalizeFormat(format string) (string, error) {
 	case FormatTable, FormatCSV, FormatNDJSON:
 		return format, nil
 	default:
-		return "", fmt.Errorf("unknown format %q (expected json|table|csv|ndjson)", raw)
+		return "", fmt.Errorf("%w %q (expected json|table|csv|ndjson)", ErrUnknownFormat, raw)
 	}
 }
 

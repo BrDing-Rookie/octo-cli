@@ -6,6 +6,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/cmd/service"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
+	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
 // NewRootCmd builds the top-level command tree.
@@ -28,6 +30,9 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "Octo CLI — command-line interface for the Octo ecosystem",
 		Long:  "octo-cli is a CLI for AI Agent Bots to interact with Octo services.\nService commands are generated from the embedded OpenAPI registry.",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			f.Globals.ProfileSet = cmd.Flags().Changed("profile")
+			f.Globals.BotIDSet = cmd.Flags().Changed("bot-id")
+			f.Globals.CredentialFileSet = cmd.Flags().Changed("credential-file")
 			if err := validateTaskModeCommand(cmd); err != nil {
 				return err
 			}
@@ -37,15 +42,22 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				// read OCTO_FORMAT without resolving credentials: profiles do
 				// not carry a format setting.
 				if !skipOutputPreflight(cmd, args) {
-					format := config.Load().Format
-					if f.Globals != nil && f.Globals.Format != "" {
-						format = f.Globals.Format
-					}
-					if err := f.PreflightOutput(format); err != nil {
-						return err
-					}
+					return preflightOfflineOutput(f)
 				}
 				return nil
+			}
+			unified, err := f.UsesUnifiedCredentials()
+			if err != nil {
+				return err
+			}
+			if unified {
+				if err := validateUnifiedAPICommand(cmd); err != nil {
+					return err
+				}
+				if _, err := f.BusinessCredential(); err != nil {
+					return err
+				}
+				return preflightUnifiedOutput(f)
 			}
 			cfg, err := f.Config()
 			if err != nil {
@@ -69,7 +81,8 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	pf.BoolVar(&f.Globals.NoRetry, "no-retry", false, "disable retries, including multipart PUT, failure-triggered re-signing and completion; expired URLs may still be signed before the first PUT")
 	pf.StringVar(&f.Globals.Space, "space", "", "space id (for platform-scoped bots)")
 	pf.StringVar(&f.Globals.BotID, "bot-id", "", "select/assert the bot credential by robot id (env OCTO_BOT_ID)")
-	pf.StringVar(&f.Globals.Profile, "profile", "", "select the bot credential by profile name")
+	pf.StringVar(&f.Globals.Profile, "profile", "", "select a profile by name (OCTO_CREDENTIAL_MODE=unified for versioned profiles; env OCTO_PROFILE)")
+	pf.StringVar(&f.Globals.CredentialFile, "credential-file", "", "read the unified Token from a file (env OCTO_TOKEN_FILE)")
 
 	root.AddCommand(newSchemaCmd(f))
 	root.AddCommand(newUpgradeCmd(f))
@@ -90,6 +103,53 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	withholdDisabledServices(root, f)
 
 	return root
+}
+
+func preflightOfflineOutput(f *cmdutil.Factory) error {
+	runtime := config.LoadRuntime()
+	format := runtime.Format
+	if f.Globals.Format != "" {
+		format = f.Globals.Format
+	}
+	err := f.PreflightOutput(format)
+	if !errors.Is(err, output.ErrUnknownFormat) {
+		return err
+	}
+	unified, modeErr := f.UsesUnifiedCredentials()
+	if modeErr != nil || !unified {
+		return err
+	}
+	exit := *output.AsExitError(cmdutil.WrapCLIError(err))
+	exit.Message = "unknown format (expected json|table|csv|ndjson)"
+	return &exit
+}
+
+func preflightUnifiedOutput(f *cmdutil.Factory) error {
+	err := f.PreflightOutput(f.Format())
+	if err == nil {
+		return nil
+	}
+	// Classify the original error before masking its message.
+	exit := *output.AsExitError(cmdutil.WrapCLIError(err))
+	exit.Message = f.RedactUnifiedBearer(exit.Message)
+	return &exit
+}
+
+// CLI-01/02 use a caller-supplied API path. Named service behavior and
+// generated operation routes are added when their CLI-07 contracts are ready.
+func validateUnifiedAPICommand(cmd *cobra.Command) error {
+	if cmd.Parent() == cmd.Root() && cmd.Name() == "api" {
+		serviceName, err := cmd.Flags().GetString("service")
+		if err != nil {
+			return err
+		}
+		if serviceName == "" || serviceName == "default" {
+			return nil
+		}
+	}
+	return output.ErrWithHint("validation", "UNIFIED_API_ONLY",
+		"unified credentials currently require api with the default service",
+		"use api METHOD PATH with a route that accepts unified credentials")
 }
 
 // validateTaskModeCommand is defense in depth. It keeps daemon task processes
@@ -153,16 +213,14 @@ func skipValidation(cmd *cobra.Command) bool {
 		return true
 	}
 	for c := cmd; c != nil; c = c.Parent() {
+		// Only root command families are credential-free. A nested name
+		// such as `marketplace plugin version` is still a business route.
+		if c.Parent() != cmd.Root() {
+			continue
+		}
 		switch c.Name() {
-		case "version", "help", "schema", "config", "completion", "skills", "sheet-cell", "":
+		case "version", "help", "schema", "config", "completion", "skills", "sheet-cell", "auth":
 			return true
-		case "auth":
-			// Only the top-level `octo-cli auth` is credential-free. Nested
-			// service auth flows such as `mail auth login` require the active
-			// Bot credential and must pass the normal validation gate.
-			if c.Parent() != nil && c.Parent().Parent() == nil {
-				return true
-			}
 		}
 	}
 	return false
