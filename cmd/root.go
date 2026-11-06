@@ -56,12 +56,8 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				return err
 			}
 			if business != nil {
-				// CLI-01/02 expose a caller-supplied path through the generic
-				// transport. Generated and named service routes need CLI-07.
-				if cmd.Parent() != cmd.Root() || cmd.Name() != "api" || cmd.Flags().Changed("service") {
-					return output.ErrWithHint("validation", "UNIFIED_API_ONLY",
-						"unified credentials currently require api without --service",
-						"use api METHOD PATH with a route that accepts unified credentials")
+				if err := validateUnifiedAPICommand(cmd); err != nil {
+					return err
 				}
 				return f.PreflightOutput(f.Format())
 			}
@@ -87,7 +83,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	pf.BoolVar(&f.Globals.NoRetry, "no-retry", false, "disable retries, including multipart PUT, failure-triggered re-signing and completion; expired URLs may still be signed before the first PUT")
 	pf.StringVar(&f.Globals.Space, "space", "", "space id (for platform-scoped bots)")
 	pf.StringVar(&f.Globals.BotID, "bot-id", "", "select/assert the bot credential by robot id (env OCTO_BOT_ID)")
-	pf.StringVar(&f.Globals.Profile, "profile", "", "select a profile by name (env OCTO_PROFILE)")
+	pf.StringVar(&f.Globals.Profile, "profile", "", "select a profile by name (OCTO_CREDENTIAL_MODE=unified for versioned profiles; env OCTO_PROFILE)")
 	pf.StringVar(&f.Globals.CredentialFile, "credential-file", "", "read the unified Token from a file (env OCTO_TOKEN_FILE)")
 
 	root.AddCommand(newSchemaCmd(f))
@@ -109,6 +105,23 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	withholdDisabledServices(root, f)
 
 	return root
+}
+
+// CLI-01/02 use a caller-supplied API path. Named service behavior and
+// generated operation routes are added when their CLI-07 contracts are ready.
+func validateUnifiedAPICommand(cmd *cobra.Command) error {
+	if cmd.Parent() == cmd.Root() && cmd.Name() == "api" {
+		serviceName, err := cmd.Flags().GetString("service")
+		if err != nil {
+			return err
+		}
+		if serviceName == "" || serviceName == "default" {
+			return nil
+		}
+	}
+	return output.ErrWithHint("validation", "UNIFIED_API_ONLY",
+		"unified credentials currently require api with the default service",
+		"use api METHOD PATH with a route that accepts unified credentials")
 }
 
 // validateTaskModeCommand is defense in depth. It keeps daemon task processes

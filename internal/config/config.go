@@ -20,13 +20,13 @@ const (
 	// EnvTaskToken carries the daemon-issued Loop task credential separately
 	// from native Octo credentials. It is consumed only by task-mode Loop commands.
 	EnvTaskToken = "OCTO_TASK_TOKEN"
-	// EnvCredentialMode selects the credential resolution policy. The empty
-	// value keeps the normal profile/bot flow; "task" is a fail-closed mode
-	// selected explicitly for an individual task-workflow CLI invocation.
-	EnvCredentialMode  = "OCTO_CREDENTIAL_MODE"
-	CredentialModeTask = "task"
-	EnvSpaceID         = "OCTO_SPACE_ID"
-	EnvFormat          = "OCTO_FORMAT"
+	// EnvCredentialMode selects the credential resolution policy. "task"
+	// isolates a Loop task invocation, and "unified" selects versioned profiles.
+	EnvCredentialMode     = "OCTO_CREDENTIAL_MODE"
+	CredentialModeTask    = "task"
+	CredentialModeUnified = "unified"
+	EnvSpaceID            = "OCTO_SPACE_ID"
+	EnvFormat             = "OCTO_FORMAT"
 	// DefaultAPIBaseURL is the production Octo gateway. Service operations
 	// append their registered paths (for example, /v1/bot/groups).
 	DefaultAPIBaseURL = "https://im.deepminer.com.cn"

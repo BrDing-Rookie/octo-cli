@@ -9,9 +9,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 )
 
@@ -48,6 +50,7 @@ func phaseOneRun(args ...string) (string, error) {
 
 func TestPhaseOneBusinessProfileRequest(t *testing.T) {
 	dir := phaseOneEnv(t)
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
 	tokenA := filepath.Join(dir, "token-a")
 	tokenB := filepath.Join(dir, "token-b")
 	phaseOneWrite(t, tokenA, "unified-profile-a-secret\n")
@@ -147,8 +150,8 @@ func TestPhaseOneBusinessProfileFailures(t *testing.T) {
 			t.Setenv("OCTO_TOKEN", "")
 			return nil
 		}, "invalid unified Token from env:OCTO_TOKEN"},
-		{"legacy token rejected by unified Profile", func(t *testing.T, dir string) []string {
-			t.Setenv("OCTO_TOKEN", "bf_unified-env-secret")
+		{"invalid environment Token does not fall back", func(t *testing.T, dir string) []string {
+			t.Setenv("OCTO_TOKEN", "unified-env-secret with whitespace")
 			return []string{"--profile", "a"}
 		}, "invalid unified Token from env:OCTO_TOKEN"},
 		{"Space mismatch", func(t *testing.T, dir string) []string {
@@ -161,6 +164,7 @@ func TestPhaseOneBusinessProfileFailures(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := phaseOneEnv(t)
+			t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
 			file := filepath.Join(dir, "valid")
 			phaseOneWrite(t, file, "unified-file-secret")
 			phaseOneWrite(t, filepath.Join(dir, "config.json"), fmt.Sprintf(`{
@@ -191,6 +195,13 @@ func TestPhaseOneStandaloneFileAndOfflineDiscovery(t *testing.T) {
 	if err != nil || !strings.Contains(out, "https://standalone.example"+path) ||
 		!strings.Contains(out, "Bearer ***") || strings.Contains(out, "standalone-secret") {
 		t.Fatalf("standalone dry run: %v (%s)", err, out)
+	}
+
+	// Unified mode keeps the bearer opaque even if its prefix looks familiar.
+	phaseOneWrite(t, file, "bf_unified-file-bearer")
+	out, err = phaseOneRun("--dry-run", "api", "POST", path)
+	if err != nil || !strings.Contains(out, `"Authorization": "Bearer ***"`) {
+		t.Fatalf("unified dry-run bearer was not fully masked: %v (%s)", err, out)
 	}
 
 	// A named credential file that cannot be opened must not affect local commands.
@@ -263,6 +274,7 @@ func TestPhaseOneLegacyEnvBypassesConfig(t *testing.T) {
 
 func TestPhaseOneKeepsSuccessfulResponseFields(t *testing.T) {
 	phaseOneEnv(t)
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
 	t.Setenv("OCTO_TOKEN", "id")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer id" {
@@ -290,6 +302,7 @@ func TestPhaseOneKeepsSuccessfulResponseFields(t *testing.T) {
 
 func TestPhaseOneUnifiedCredentialOnlyOnExplicitAPI(t *testing.T) {
 	phaseOneEnv(t)
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
 	t.Setenv("OCTO_TOKEN", "opaque-unified-token")
 	t.Setenv("OCTO_API_BASE_URL", "https://standalone.example")
 	for _, args := range [][]string{
@@ -300,8 +313,155 @@ func TestPhaseOneUnifiedCredentialOnlyOnExplicitAPI(t *testing.T) {
 		{"api", "GET", "/fleet/api/v1/workspaces", "--service", "loop"},
 	} {
 		out, err := phaseOneRun(append([]string{"--dry-run"}, args...)...)
-		if err == nil || !strings.Contains(err.Error(), "unified credentials currently require api without --service") {
+		if err == nil || !strings.Contains(err.Error(), "unified credentials currently require api with the default service") {
 			t.Errorf("%v: %v (%s), want unified API boundary error", args, err, out)
 		}
 	}
+}
+
+func TestPhaseOneExternalTokenTarget(t *testing.T) {
+	dir := phaseOneEnv(t)
+	tokenPath := filepath.Join(dir, "external")
+	phaseOneWrite(t, tokenPath, "external-bearer")
+	t.Setenv("OCTO_TOKEN_FILE", tokenPath)
+	calls := make(chan string, 4)
+	server := func(name string) string {
+		s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls <- fmt.Sprintf("%s %s %s", name, r.Header.Get("Authorization"), r.Header.Get("X-Space-Id"))
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{}`)
+		}))
+		t.Cleanup(s.Close)
+		return s.URL
+	}
+	configOrigin, envOrigin := server("profile"), server("env")
+	phaseOneWrite(t, filepath.Join(dir, "config.json"), fmt.Sprintf(`{
+		"version":1,"current_profile":"a","profiles":{"a":{"api_base_url":%q,"space_id":"space-a"}}
+	}`, configOrigin))
+	t.Setenv("OCTO_API_BASE_URL", envOrigin)
+
+	args := []string{"api", "GET", "/phase-one"}
+	if out, err := phaseOneRun(args...); err == nil || !strings.Contains(err.Error(), "OCTO_API_BASE_URL conflicts with current_profile") {
+		t.Errorf("implicit profile: %v (%s), want origin conflict", err, out)
+	}
+	select {
+	case got := <-calls:
+		t.Fatalf("origin conflict sent a request: %s", got)
+	default:
+	}
+
+	if err := os.Unsetenv("OCTO_TOKEN_FILE"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+	t.Setenv("OCTO_TOKEN", "external-bearer")
+	if out, err := phaseOneRun(args...); err == nil || !strings.Contains(err.Error(), "OCTO_API_BASE_URL conflicts with current_profile") {
+		t.Fatalf("implicit profile with OCTO_TOKEN: %v (%s), want origin conflict", err, out)
+	}
+	select {
+	case got := <-calls:
+		t.Fatalf("origin conflict sent a request: %s", got)
+	default:
+	}
+
+	if out, err := phaseOneRun(append([]string{"--profile", "a"}, args...)...); err != nil {
+		t.Fatalf("explicit profile: %v (%s)", err, out)
+	}
+	select {
+	case got := <-calls:
+		if got != "profile Bearer external-bearer space-a" {
+			t.Fatalf("explicit profile request = %q", got)
+		}
+	default:
+		t.Fatal("no request with explicitly selected profile")
+	}
+
+	t.Setenv("OCTO_API_BASE_URL", configOrigin+"/")
+	if out, err := phaseOneRun(append(args, "--service=default")...); err != nil {
+		t.Fatalf("standalone credential: %v (%s)", err, out)
+	}
+	select {
+	case got := <-calls:
+		if got != "profile Bearer external-bearer " {
+			t.Fatalf("standalone request inherited implicit Profile metadata: %q", got)
+		}
+	default:
+		t.Fatal("no standalone request")
+	}
+}
+
+func TestPhaseOneLegacyOpaqueTokenAliases(t *testing.T) {
+	for _, key := range []string{"OCTO_TOKEN", "OCTO_BOT_TOKEN"} {
+		t.Run(key, func(t *testing.T) {
+			phaseOneEnv(t)
+			t.Setenv(key, "opaque-legacy-bearer")
+			t.Setenv("OCTO_API_BASE_URL", "https://legacy.example")
+			for _, tc := range []struct {
+				args []string
+				path string
+			}{
+				{[]string{"group", "list"}, "/v1/bot/groups"},
+				{[]string{"api", "POST", "/v1/bot/messages/_search"}, "/v1/bot/messages/_search_global_messages"},
+			} {
+				out, err := phaseOneRun(append([]string{"--dry-run"}, tc.args...)...)
+				if err != nil || !strings.Contains(out, "https://legacy.example"+tc.path) {
+					t.Errorf("%v: %v (%s), want legacy path %s", tc.args, err, out, tc.path)
+				}
+			}
+		})
+	}
+}
+
+func TestPhaseOneProfileStoresCoexist(t *testing.T) {
+	home := phaseOneEnv(t)
+	t.Setenv("OCTO_CONFIG_DIR", "")
+	homeVar := "HOME"
+	if runtime.GOOS == "windows" {
+		homeVar = "USERPROFILE"
+	}
+	t.Setenv(homeVar, home)
+	store, err := authstore.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveProfile("legacy", &authstore.ProfileMeta{
+		RobotID: "bot-id", APIBaseURL: "https://legacy.example",
+	}, "bf_legacy-bearer"); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(home, ".octo", "cli")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	phaseOneWrite(t, filepath.Join(dir, "config.json"), `{
+		"version":1,"current_profile":"new","profiles":{"new":{"token_source":{"type":"token_file","path":"missing"}}}
+	}`)
+
+	checkList := func(want string) {
+		t.Helper()
+		out, err := phaseOneRun("auth", "list")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope struct {
+			Data struct {
+				Profiles []struct {
+					Profile string `json:"profile"`
+				} `json:"profiles"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		if profiles := envelope.Data.Profiles; len(profiles) != 1 || profiles[0].Profile != want {
+			t.Fatalf("auth list: got %s, want only profile %q", out, want)
+		}
+	}
+	checkList("legacy")
+	out, err := phaseOneRun("--bot-id", "bot-id", "--dry-run", "group", "list")
+	if err != nil || !strings.Contains(out, "https://legacy.example/v1/bot/groups") {
+		t.Fatalf("legacy bot selection: %v (%s)", err, out)
+	}
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+	checkList("new")
 }

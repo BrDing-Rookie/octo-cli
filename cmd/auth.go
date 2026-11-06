@@ -332,32 +332,8 @@ func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "List local profiles (never shows tokens)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			profilesConfig, err := config.LoadProfileConfig()
-			if err != nil {
-				return failErr(f, credential.ProfileConfigError(err))
-			}
-			if profilesConfig != nil {
-				names := make([]string, 0, len(profilesConfig.Profiles))
-				for name := range profilesConfig.Profiles {
-					names = append(names, name)
-				}
-				sort.Strings(names)
-				entries := make([]map[string]any, 0, len(names))
-				for _, name := range names {
-					p := profilesConfig.Profiles[name]
-					// An invalid origin can contain credentials or a query secret.
-					origin, err := config.NormalizeAPIBaseURL(p.APIBaseURL)
-					if err != nil {
-						origin = ""
-					}
-					entries = append(entries, map[string]any{
-						"name": name, "api_base_url": origin, "space_id": p.SpaceID,
-					})
-				}
-				return emitJSON(f, map[string]any{
-					"profiles": entries, "count": len(entries),
-					"current_profile": nullableString(profilesConfig.CurrentProfile),
-				})
+			if config.LoadRuntime().UsesUnifiedCredentials(f.Globals.CredentialFileSet) {
+				return listUnifiedProfiles(f)
 			}
 			store, err := f.AuthStore()
 			if err != nil {
@@ -375,6 +351,38 @@ func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 			return emitJSON(f, payload)
 		},
 	}
+}
+
+func listUnifiedProfiles(f *cmdutil.Factory) error {
+	profiles, err := config.LoadProfileConfig()
+	if err != nil {
+		return failErr(f, credential.ProfileConfigError(err))
+	}
+	if profiles == nil {
+		return emitJSON(f, map[string]any{"profiles": []any{}, "count": 0, "current_profile": nil})
+	}
+
+	names := make([]string, 0, len(profiles.Profiles))
+	for name := range profiles.Profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]map[string]any, 0, len(names))
+	for _, name := range names {
+		p := profiles.Profiles[name]
+		// An invalid origin can contain credentials or a query secret.
+		origin, err := config.NormalizeAPIBaseURL(p.APIBaseURL)
+		if err != nil {
+			origin = ""
+		}
+		entries = append(entries, map[string]any{
+			"profile": name, "api_base_url": origin, "space_id": p.SpaceID,
+		})
+	}
+	return emitJSON(f, map[string]any{
+		"profiles": entries, "count": len(entries),
+		"current_profile": nullableString(profiles.CurrentProfile),
+	})
 }
 
 // promptBotID asks for the bot id interactively when no selector was given and

@@ -86,16 +86,29 @@ func (c *ProfileConfig) isLegacy() bool {
 	return true
 }
 
+// UsesUnifiedCredentials checks for an explicit mode or a unified-only selector.
+func (c *Config) UsesUnifiedCredentials(credentialFileSet bool) bool {
+	switch c.CredentialMode {
+	case CredentialModeUnified:
+		return true
+	case "":
+		_, profileSet := os.LookupEnv(EnvProfile)
+		_, tokenFileSet := os.LookupEnv(EnvTokenFile)
+		return credentialFileSet || profileSet || tokenFileSet
+	default:
+		return false
+	}
+}
+
 // ProfileSelector resolves the explicit selector independently of credentials.
-func ProfileSelector(name string, flagSet bool) (selected, source string, envSet bool) {
-	envName, envSet := os.LookupEnv(EnvProfile)
+func ProfileSelector(name string, flagSet bool) (selected, source string) {
 	if flagSet || name != "" {
-		return name, "--profile", envSet
+		return name, "--profile"
 	}
-	if envSet {
-		return envName, EnvProfile, true
+	if envName, ok := os.LookupEnv(EnvProfile); ok {
+		return envName, EnvProfile
 	}
-	return "", "", false
+	return "", ""
 }
 
 // SelectProfile returns the requested profile or the configured default.
@@ -120,6 +133,26 @@ func (c *ProfileConfig) TokenFilePath(path string) string {
 		return path
 	}
 	return filepath.Join(c.dir, path)
+}
+
+// CheckImplicitProfileOrigin prevents sending an external credential when an
+// explicit environment origin disagrees with the configured default target.
+func (c *Config) CheckImplicitProfileOrigin(p Profile) error {
+	if c.APIBaseURLSource != "env" || p.APIBaseURL == "" {
+		return nil
+	}
+	explicit, err := NormalizeAPIBaseURL(c.APIBaseURL)
+	if err != nil {
+		return fmt.Errorf("invalid OCTO_API_BASE_URL")
+	}
+	implicit, err := NormalizeAPIBaseURL(p.APIBaseURL)
+	if err != nil {
+		return fmt.Errorf("invalid API base URL in current_profile")
+	}
+	if explicit != implicit {
+		return fmt.Errorf("OCTO_API_BASE_URL conflicts with current_profile")
+	}
+	return nil
 }
 
 // ApplyProfile validates the request target without inspecting any token.

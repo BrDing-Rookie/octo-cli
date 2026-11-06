@@ -1302,7 +1302,11 @@ func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte,
 	removeHeader(hdr, "Authorization")
 	token, spaceID := c.bearer()
 	if token != "" {
-		hdr["Authorization"] = "Bearer " + credential.MaskToken(token)
+		masked := "***"
+		if c.business == nil {
+			masked = credential.MaskToken(token)
+		}
+		hdr["Authorization"] = "Bearer " + masked
 	}
 	if spaceID != "" && !req.SuppressSpaceHeader {
 		hdr["X-Space-Id"] = spaceID

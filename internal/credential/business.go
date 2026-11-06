@@ -28,30 +28,29 @@ type BusinessOptions struct {
 	BotIDSet             bool
 }
 
-// ResolveBusiness reads the profile and bearer once. A nil result leaves
-// existing, unversioned Bot installations on their legacy path until the
-// unified business routes are released.
+// ResolveBusiness reads the profile and bearer once for an opted-in command.
+// A nil result leaves credential selection to the legacy command path.
 func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessContext, error) {
-	if runtime.CredentialMode != "" {
+	if !runtime.UsesUnifiedCredentials(opts.FileSet) {
 		return nil, nil
+	}
+	if opts.BotIDSet {
+		return nil, output.ErrValidation("--bot-id cannot be used with unified credentials", "select a Profile or remove --bot-id")
 	}
 	token, tokenSet := os.LookupEnv(config.EnvToken)
 	tokenFile, tokenFileSet := os.LookupEnv(config.EnvTokenFile)
-	profileName, selector, profileEnvSet := config.ProfileSelector(opts.Profile, opts.ProfileSet)
-	if selector != "" && profileName == "" {
-		return nil, output.ErrValidation(selector+" is empty", "select an existing profile name")
-	}
-	newSelector := opts.FileSet || tokenFileSet || profileEnvSet
 	if tokenSet && tokenFileSet {
 		return nil, output.ErrValidation("OCTO_TOKEN and OCTO_TOKEN_FILE are both set", "set only one of these environment variables")
 	}
-	profiles, unified, err := businessProfiles(token, selector, newSelector, opts.BotIDSet)
-	if err != nil || !unified {
-		return nil, err
-	}
-	name, p, err := profiles.SelectProfile(profileName, selector != "")
+
+	profiles, err := config.LoadProfileConfig()
 	if err != nil {
-		return nil, output.ErrValidation(err.Error(), "check octo-cli auth list and the profile selector")
+		return nil, ProfileConfigError(err)
+	}
+	external := opts.FileSet || tokenSet || tokenFileSet
+	name, p, err := selectBusinessProfile(runtime, profiles, opts, external)
+	if err != nil {
+		return nil, err
 	}
 	if err := runtime.ApplyProfile(p, opts.Space); err != nil {
 		return nil, output.ErrValidation(err.Error(), "check the profile, OCTO_API_BASE_URL and Space settings")
@@ -66,6 +65,24 @@ func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessCon
 		Token: token, Source: source, Profile: name, SpaceID: runtime.SpaceID,
 		APIBaseURL: runtime.APIBaseURL, APIBaseURLSource: runtime.APIBaseURLSource,
 	}, nil
+}
+
+func selectBusinessProfile(runtime *config.Config, profiles *config.ProfileConfig, opts BusinessOptions, external bool) (name string, profile config.Profile, err error) {
+	selected, selector := config.ProfileSelector(opts.Profile, opts.ProfileSet)
+	if selector != "" && selected == "" {
+		return "", config.Profile{}, output.ErrValidation(selector+" is empty", "select an existing profile name")
+	}
+	name, profile, err = profiles.SelectProfile(selected, selector != "")
+	if err != nil {
+		return "", config.Profile{}, output.ErrValidation(err.Error(), "check octo-cli auth list and the profile selector")
+	}
+	if external && selector == "" {
+		if err := runtime.CheckImplicitProfileOrigin(profile); err != nil {
+			return "", config.Profile{}, output.ErrValidation(err.Error(), "explicitly select the intended profile or align OCTO_API_BASE_URL")
+		}
+		return "", config.Profile{}, nil
+	}
+	return name, profile, nil
 }
 
 func resolveBusinessToken(opts BusinessOptions, envToken string, tokenSet bool, tokenFile string, tokenFileSet bool, profiles *config.ProfileConfig, ref *config.TokenSource) (source, token string, err error) {
@@ -84,34 +101,9 @@ func resolveBusinessToken(opts BusinessOptions, envToken string, tokenSet bool, 
 	}
 	token = strings.TrimSpace(token)
 	if !validBusinessToken(token) {
-		return "", "", output.ErrAuth("invalid unified Token from "+source, "provide a non-empty unified Token without whitespace; legacy credentials are not accepted")
+		return "", "", output.ErrAuth("invalid unified Token from "+source, "provide a non-empty Token without whitespace")
 	}
 	return source, token, nil
-}
-
-// businessProfiles keeps unambiguous legacy environment invocations away
-// from the profile file. Explicit new selectors always validate the config.
-func businessProfiles(token, selector string, newSelector, botIDSet bool) (*config.ProfileConfig, bool, error) {
-	kind := TokenKind(strings.TrimSpace(token))
-	if !newSelector && selector == "" && !botIDSet && usesLegacyEnvironment(kind) {
-		return nil, false, nil
-	}
-	profiles, err := config.LoadProfileConfig()
-	if err != nil {
-		return nil, false, ProfileConfigError(err)
-	}
-	unified := newSelector || profiles != nil || (!botIDSet && kind == "unknown")
-	if unified && botIDSet {
-		return nil, false, output.ErrValidation("--bot-id cannot be used with unified credentials", "select a Profile or remove --bot-id")
-	}
-	return profiles, unified, nil
-}
-
-func usesLegacyEnvironment(kind string) bool {
-	if kind == "" {
-		return strings.TrimSpace(os.Getenv(config.EnvBotToken)) != ""
-	}
-	return kind != "unknown"
 }
 
 // ProfileConfigError reports a metadata error without echoing file contents.
@@ -147,7 +139,7 @@ func fileToken(source, path string) (selectedSource, token string, err error) {
 }
 
 func validBusinessToken(token string) bool {
-	return TokenKind(token) == "unknown" && !strings.ContainsFunc(token, func(r rune) bool { return r < '!' || r > '~' })
+	return token != "" && !strings.ContainsFunc(token, func(r rune) bool { return r < '!' || r > '~' })
 }
 
 func readBusinessTokenFile(path string) (string, error) {
