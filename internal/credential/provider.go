@@ -1,6 +1,4 @@
-// Package credential resolves bot credentials from one or more sources.
-// Phase 1 supports environment variables only; future phases add config files
-// and sidecar providers behind the same interface.
+// Package credential resolves CLI credentials for business and specialized commands.
 package credential
 
 import (
@@ -23,9 +21,10 @@ type BotCredential struct {
 	SpaceID string
 	Source  string
 
-	Profile string
-	RobotID string
-	BotKind string
+	Profile    string
+	RobotID    string
+	BotKind    string
+	APIBaseURL string
 }
 
 // Source resolves a credential from a single source. Implementations should

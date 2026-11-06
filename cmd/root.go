@@ -15,6 +15,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/cmd/service"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
+	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
 // NewRootCmd builds the top-level command tree.
@@ -28,6 +29,8 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "Octo CLI — command-line interface for the Octo ecosystem",
 		Long:  "octo-cli is a CLI for AI Agent Bots to interact with Octo services.\nService commands are generated from the embedded OpenAPI registry.",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			f.Globals.ProfileSet = cmd.Flags().Changed("profile")
+			f.Globals.CredentialFileSet = cmd.Flags().Changed("credential-file")
 			if err := validateTaskModeCommand(cmd); err != nil {
 				return err
 			}
@@ -37,7 +40,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				// read OCTO_FORMAT without resolving credentials: profiles do
 				// not carry a format setting.
 				if !skipOutputPreflight(cmd, args) {
-					format := config.Load().Format
+					format := config.LoadRuntime().Format
 					if f.Globals != nil && f.Globals.Format != "" {
 						format = f.Globals.Format
 					}
@@ -54,7 +57,18 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 			if err := f.PreflightOutput(f.Format()); err != nil {
 				return err
 			}
-			return cfg.Validate()
+			business, err := f.BusinessCredential()
+			if err != nil {
+				return err
+			}
+			if business == nil {
+				return cfg.Validate()
+			}
+			switch topLevelCommand(cmd).Name() {
+			case "mail", "loop":
+				return output.ErrValidation("this command requires its existing dedicated credential", "use the Mail or Loop credential flow")
+			}
+			return nil
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -69,7 +83,8 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	pf.BoolVar(&f.Globals.NoRetry, "no-retry", false, "disable retries, including multipart PUT, failure-triggered re-signing and completion; expired URLs may still be signed before the first PUT")
 	pf.StringVar(&f.Globals.Space, "space", "", "space id (for platform-scoped bots)")
 	pf.StringVar(&f.Globals.BotID, "bot-id", "", "select/assert the bot credential by robot id (env OCTO_BOT_ID)")
-	pf.StringVar(&f.Globals.Profile, "profile", "", "select the bot credential by profile name")
+	pf.StringVar(&f.Globals.Profile, "profile", "", "select a profile by name (env OCTO_PROFILE)")
+	pf.StringVar(&f.Globals.CredentialFile, "credential-file", "", "read the unified Token from a file (env OCTO_TOKEN_FILE)")
 
 	root.AddCommand(newSchemaCmd(f))
 	root.AddCommand(newUpgradeCmd(f))
@@ -99,12 +114,8 @@ func validateTaskModeCommand(cmd *cobra.Command) error {
 	if strings.ToLower(strings.TrimSpace(os.Getenv(config.EnvCredentialMode))) != config.CredentialModeTask {
 		return nil
 	}
-	root := cmd.Root()
-	current := cmd
-	for current.Parent() != nil && current.Parent() != root {
-		current = current.Parent()
-	}
-	if current == root {
+	current := topLevelCommand(cmd)
+	if current.Parent() == nil {
 		return nil
 	}
 	switch current.Name() {
@@ -113,6 +124,13 @@ func validateTaskModeCommand(cmd *cobra.Command) error {
 	default:
 		return fmt.Errorf("%s=task only allows Loop commands", config.EnvCredentialMode)
 	}
+}
+
+func topLevelCommand(cmd *cobra.Command) *cobra.Command {
+	for cmd.Parent() != nil && cmd.Parent().Parent() != nil {
+		cmd = cmd.Parent()
+	}
+	return cmd
 }
 
 // withholdDisabledServices removes the command subtree for any service whose

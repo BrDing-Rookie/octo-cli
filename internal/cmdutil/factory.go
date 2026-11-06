@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/client"
@@ -39,8 +40,11 @@ type GlobalOptions struct {
 	// Profile and BotID are explicit stored-profile selectors. When BotID is
 	// empty, OCTO_BOT_ID may instead label an environment credential if the
 	// profile store is empty.
-	Profile string
-	BotID   string
+	Profile           string
+	ProfileSet        bool
+	CredentialFile    string
+	CredentialFileSet bool
+	BotID             string
 }
 
 // Factory is the DI container. All accessors are lazy + cached so a command
@@ -61,6 +65,9 @@ type Factory struct {
 	// stderr. The top-level main func checks this to avoid double-emitting
 	// when RunE returns the same error that was already rendered.
 	ErrorEmitted bool
+
+	businessFunc func() (*credential.BusinessContext, error)
+	business     *credential.BusinessContext
 
 	// Cached resolutions.
 	config   *config.Config
@@ -87,6 +94,16 @@ func NewDefaultFactory() *Factory {
 		IOStreams: NewStdIOStreams(),
 		Globals:   &GlobalOptions{},
 	}
+
+	f.businessFunc = sync.OnceValues(func() (*credential.BusinessContext, error) {
+		cred, err := credential.ResolveBusiness(config.LoadRuntime(), credential.BusinessOptions{
+			Profile: f.Globals.Profile, ProfileSet: f.Globals.ProfileSet,
+			File: f.Globals.CredentialFile, FileSet: f.Globals.CredentialFileSet || f.Globals.CredentialFile != "",
+			Space: f.Globals.Space,
+		})
+		f.business = cred
+		return cred, err
+	})
 
 	f.ConfigFunc = func() (*config.Config, error) {
 		if f.config != nil {
@@ -116,21 +133,16 @@ func NewDefaultFactory() *Factory {
 		if f.cli != nil {
 			return f.cli, nil
 		}
-		cfg, err := f.ConfigFunc()
-		if err != nil {
-			return nil, err
-		}
-		cred, err := f.CredentialFunc()
-		if err != nil {
-			return nil, err
-		}
-		cli := client.New(cfg, cred, client.Options{
+		cli, err := f.RequestClient(client.Options{
 			Verbose: f.Globals.Verbose,
 			DryRun:  f.Globals.DryRun,
 			NoRetry: f.Globals.NoRetry,
 			Timeout: f.Globals.Timeout,
 			ErrOut:  f.IOStreams.ErrOut,
 		})
+		if err != nil {
+			return nil, err
+		}
 		f.cli = cli
 		return cli, nil
 	}
@@ -231,9 +243,18 @@ func configureMailProviders(f *Factory) {
 // (ambiguous / missing profile) AND real IO errors (home dir, salt read) both
 // surface rather than masquerading as a missing token.
 func (f *Factory) buildConfig() (*config.Config, error) {
-	cfg := config.Load()
+	business, err := f.BusinessCredential()
+	if err != nil {
+		return nil, err
+	}
+	cfg := config.LoadRuntime()
 	if f.Globals.Format != "" {
 		cfg.Format = f.Globals.Format
+	}
+	if business != nil {
+		cfg.APIBaseURL, cfg.APIBaseURLSource = business.APIBaseURL, business.APIBaseURLSource
+		cfg.SpaceID = business.SpaceID
+		return cfg, nil
 	}
 	cred, err := f.CredentialFunc()
 	if err != nil {
@@ -249,7 +270,7 @@ func (f *Factory) buildConfig() (*config.Config, error) {
 		if cred.SpaceID != "" {
 			cfg.SpaceID = cred.SpaceID
 		}
-		if err := f.overlayProfileBaseURL(cfg, cred.Profile); err != nil {
+		if err := overlayProfileBaseURL(cfg, cred.Profile, cred.APIBaseURL); err != nil {
 			return nil, err
 		}
 	}
@@ -340,6 +361,9 @@ func MailBindingKeyForBot(bot *credential.BotCredential, apiOrigin string) (stri
 // selected task invocation. The daemon provides its value; Fleet verifies the
 // opaque bearer and enforces its principal, bindings and actions.
 func (f *Factory) buildTaskCredential() (*credential.BotCredential, error) {
+	if f.Globals.CredentialFileSet || f.Globals.CredentialFile != "" {
+		return nil, output.ErrValidation("task mode does not allow --credential-file", "use OCTO_TASK_TOKEN")
+	}
 	if f.Globals.Profile != "" || f.Globals.BotID != "" ||
 		strings.TrimSpace(os.Getenv(config.EnvBotID)) != "" {
 		return nil, fmt.Errorf("%s=task does not allow --profile, --bot-id, or %s", config.EnvCredentialMode, config.EnvBotID)
@@ -370,30 +394,49 @@ func (f *Factory) AuthStore() (*authstore.Store, error) {
 // overlayProfileBaseURL applies the active profile's stored API base URL.
 // Precedence is profile > OCTO_API_BASE_URL > default: a profile that records
 // an origin routes there even when the environment variable names another one.
-func (f *Factory) overlayProfileBaseURL(cfg *config.Config, profile string) error {
-	if profile == "" {
+func overlayProfileBaseURL(cfg *config.Config, profile, baseURL string) error {
+	if baseURL == "" {
 		return nil
 	}
-	store, err := f.AuthStore()
+	normalized, err := config.NormalizeAPIBaseURL(baseURL)
 	if err != nil {
-		return err
+		return output.ErrValidation(
+			fmt.Sprintf("profile %q has an invalid API base URL: %v", profile, err),
+			fmt.Sprintf("repair it with `octo-cli --profile %s auth update --api-base-url <origin>` or remove it with `octo-cli --profile %s auth update --clear-api-base-url`", profile, profile),
+		)
 	}
-	profiles, err := store.LoadProfiles()
-	if err != nil {
-		return err
-	}
-	if m, ok := profiles[profile]; ok && m.APIBaseURL != "" {
-		normalized, err := config.NormalizeAPIBaseURL(m.APIBaseURL)
-		if err != nil {
-			return output.ErrValidation(
-				fmt.Sprintf("profile %q has an invalid API base URL: %v", profile, err),
-				fmt.Sprintf("repair it with `octo-cli --profile %s auth update --api-base-url <origin>` or remove it with `octo-cli --profile %s auth update --clear-api-base-url`", profile, profile),
-			)
-		}
-		cfg.APIBaseURL = normalized
-		cfg.APIBaseURLSource = "profile"
-	}
+	cfg.APIBaseURL = normalized
+	cfg.APIBaseURLSource = "profile"
 	return nil
+}
+
+// BusinessCredential returns the resolved unified credential when selected.
+func (f *Factory) BusinessCredential() (*credential.BusinessContext, error) {
+	if f.businessFunc == nil {
+		return nil, nil
+	}
+	return f.businessFunc()
+}
+
+// RequestClient assembles a transport with the command's resolved credential.
+// Callers may supply different transport options for a preliminary read.
+func (f *Factory) RequestClient(opts client.Options) (*client.Client, error) {
+	cfg, err := f.Config()
+	if err != nil {
+		return nil, err
+	}
+	business, err := f.BusinessCredential()
+	if err != nil {
+		return nil, err
+	}
+	if business != nil {
+		return client.NewBusiness(business, opts), nil
+	}
+	cred, err := f.Credential()
+	if err != nil {
+		return nil, err
+	}
+	return client.New(cfg, cred, opts), nil
 }
 
 // Config returns the resolved config (cached).
@@ -545,6 +588,10 @@ func (f *Factory) Format() string {
 	if f.Globals != nil && f.Globals.Format != "" {
 		return f.Globals.Format
 	}
+	if f.businessFunc != nil {
+		// Output formatting must not resolve credentials for offline commands.
+		return config.LoadRuntime().Format
+	}
 	if cfg, err := f.Config(); err == nil {
 		return cfg.Format
 	}
@@ -591,6 +638,13 @@ func (f *Factory) EmitSuccessWithMeta(raw []byte, meta output.EnvelopeMeta) erro
 // (never forces resolution), so commands that don't authenticate keep the plain
 // "bot" tag. Returns nil to mean "use the default".
 func (f *Factory) identityValue() any {
+	if f.business != nil {
+		id := map[string]any{"type": "token", "source": f.business.Source}
+		if f.business.Profile != "" {
+			id["profile"] = f.business.Profile
+		}
+		return id
+	}
 	if f.cred == nil {
 		return nil
 	}

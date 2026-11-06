@@ -69,7 +69,13 @@ type ResolvedEnvToken struct {
 // Load reads configuration from the environment. Token aliases are normalized
 // by ResolveEnvToken so the auth gate and credential provider cannot drift.
 func Load() *Config {
-	token := ResolveEnvToken()
+	cfg := LoadRuntime()
+	cfg.BotToken = ResolveEnvToken().Token
+	return cfg
+}
+
+// LoadRuntime reads the non-secret process settings.
+func LoadRuntime() *Config {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv(EnvCredentialMode)))
 	spaceID := os.Getenv(EnvSpaceID)
 	if mode == CredentialModeTask {
@@ -84,7 +90,6 @@ func Load() *Config {
 	return &Config{
 		APIBaseURL:       apiBaseURL,
 		APIBaseURLSource: apiBaseURLSource,
-		BotToken:         token.Token,
 		CredentialMode:   mode,
 		SpaceID:          spaceID,
 		Format:           envOrDefault(EnvFormat, "json"),

@@ -226,6 +226,13 @@ func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "Show the single active bot identity (whoami); use `auth list` to enumerate",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			business, err := f.BusinessCredential()
+			if err != nil {
+				return failErr(f, err)
+			}
+			if business != nil {
+				return emitJSON(f, map[string]any{"active": businessCredentialInfo(business)})
+			}
 			// Report the same credential an ordinary request would use. In
 			// particular, environment credentials must bypass the local store.
 			cred, resolveErr := f.Credential()
@@ -329,9 +336,36 @@ func newAuthLogoutCmd(f *cmdutil.Factory) *cobra.Command {
 func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List stored bot credentials (never shows tokens)",
+		Short: "List local profiles (never shows tokens)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			profilesConfig, err := config.LoadProfileConfig()
+			if err != nil {
+				return failErr(f, credential.ProfileConfigError(err))
+			}
+			if profilesConfig != nil {
+				names := make([]string, 0, len(profilesConfig.Profiles))
+				for name := range profilesConfig.Profiles {
+					names = append(names, name)
+				}
+				sort.Strings(names)
+				entries := make([]map[string]any, 0, len(names))
+				for _, name := range names {
+					p := profilesConfig.Profiles[name]
+					// An invalid origin can contain credentials or a query secret.
+					origin, err := config.NormalizeAPIBaseURL(p.APIBaseURL)
+					if err != nil {
+						origin = ""
+					}
+					entries = append(entries, map[string]any{
+						"name": name, "api_base_url": origin, "space_id": p.SpaceID,
+					})
+				}
+				return emitJSON(f, map[string]any{
+					"profiles": entries, "count": len(entries),
+					"current_profile": nullableString(profilesConfig.CurrentProfile),
+				})
+			}
 			store, err := f.AuthStore()
 			if err != nil {
 				return failErr(f, err)

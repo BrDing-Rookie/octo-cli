@@ -37,6 +37,15 @@ func newConfigShowCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "Print the resolved configuration (token masked)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			business, err := f.BusinessCredential()
+			if err != nil {
+				return failErr(f, err)
+			}
+			if business != nil {
+				payload := businessCredentialInfo(business)
+				payload["format"] = f.Format()
+				return emitJSON(f, payload)
+			}
 			cfg, err := f.Config()
 			if err != nil {
 				// Surface structured resolution errors (e.g. a --bot-id that
@@ -124,4 +133,12 @@ func nullableString(s string) any {
 		return nil
 	}
 	return s
+}
+
+func businessCredentialInfo(cred *credential.BusinessContext) map[string]any {
+	return map[string]any{
+		"api_base_url": cred.APIBaseURL, "api_base_url_source": cred.APIBaseURLSource,
+		"profile": nullableString(cred.Profile), "space_id": nullableString(cred.SpaceID),
+		"source": cred.Source,
+	}
 }

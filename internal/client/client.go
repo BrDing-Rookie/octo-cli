@@ -55,12 +55,14 @@ type Options struct {
 type Request struct {
 	Service string
 	// Credential selects the authorization boundary used by the command layer.
-	// Empty means the active Bot credential; "mail" means the Agent Mail token
+	// Empty means the active business credential; "mail" means the Agent Mail token
 	// bound to that same Bot identity. The transport itself never resolves
 	// secrets.
-	Credential  string
-	Method      string
-	Path        string
+	Credential string
+	Method     string
+	Path       string
+	// ExactPath preserves the caller-supplied path for unified API passthrough.
+	ExactPath   bool
 	Query       url.Values
 	Body        any
 	Headers     map[string]string
@@ -735,6 +737,7 @@ func redactBodyValue(v any, secrets []string) any {
 type Client struct {
 	cfg        *config.Config
 	cred       *credential.BotCredential
+	business   *credential.BusinessContext
 	httpClient *http.Client
 	options    Options
 }
@@ -766,6 +769,23 @@ func New(cfg *config.Config, cred *credential.BotCredential, opts Options) *Clie
 	}
 }
 
+// NewBusiness takes the request origin and bearer from the same resolution.
+func NewBusiness(cred *credential.BusinessContext, opts Options) *Client {
+	c := New(&config.Config{APIBaseURL: cred.APIBaseURL}, nil, opts)
+	c.business = cred
+	return c
+}
+
+func (c *Client) bearer() (token, space string) {
+	if c.business != nil {
+		return c.business.Token, c.business.SpaceID
+	}
+	if c.cred != nil {
+		return c.cred.Token, c.cred.SpaceID
+	}
+	return "", ""
+}
+
 // NewMail constructs a client using an account-scoped Agent Mail credential.
 // The conversion is private to the transport boundary so mail credentials
 // cannot be selected by the Bot credential provider or echoed as a Bot kind.
@@ -789,9 +809,28 @@ func NewMail(cfg *config.Config, cred *credential.MailCredential, opts Options) 
 // response read — echoed freely. Redacting on the way out makes the property hold
 // for sites that do not exist yet.
 func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
+	if c.business != nil {
+		// Keep the selected bearer out of diagnostics even when a backend
+		// echoes it or the caller also placed it in a request field.
+		copyReq := *req
+		copyReq.SecretValues = append([]string{c.business.Token}, req.SecretValues...)
+		req = &copyReq
+		for name, value := range req.Headers {
+			if strings.EqualFold(name, "Authorization") ||
+				(strings.EqualFold(name, "X-Space-Id") && (req.SuppressSpaceHeader || value != c.business.SpaceID)) {
+				return nil, output.ErrValidation("request headers conflict with the resolved credential", "use the unified Token and Space selectors")
+			}
+		}
+	}
 	body, err := c.do(ctx, req)
 	if err != nil {
 		return nil, redactError(err, req.SecretValues)
+	}
+	if c.business != nil {
+		secrets := []string{c.business.Token}
+		if containsAnySecret(string(body), secrets) {
+			body = redactSecretBytes(body, secrets)
+		}
 	}
 	return body, nil
 }
@@ -856,11 +895,13 @@ func (c *Client) do(ctx context.Context, req *Request) ([]byte, error) {
 	// Route the message-search family by chat-id scope and token kind
 	// (no channel_id → cross-session global; uk_ → /v1/user; app_ → error).
 	// Non-search paths pass through unchanged.
-	routedPath, err := routeSearchPath(c.cred, req.Path, req.Body)
-	if err != nil {
-		return nil, err
+	if c.business == nil || !req.ExactPath {
+		routedPath, err := routeSearchPath(c.cred, req.Path, req.Body)
+		if err != nil {
+			return nil, err
+		}
+		req.Path = routedPath
 	}
-	req.Path = routedPath
 
 	base := c.cfg.ServiceURL(req.Service)
 	if base == "" {
@@ -962,11 +1003,12 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		return nil, output.ErrNetwork(redactSecrets(err.Error(), req.SecretValues), "invalid request")
 	}
 
-	if c.cred != nil && c.cred.Token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.cred.Token)
+	token, spaceID := c.bearer()
+	if token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	if c.cred != nil && c.cred.SpaceID != "" && !req.SuppressSpaceHeader {
-		httpReq.Header.Set("X-Space-Id", c.cred.SpaceID)
+	if spaceID != "" && !req.SuppressSpaceHeader {
+		httpReq.Header.Set("X-Space-Id", spaceID)
 	}
 	if body != nil && contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
@@ -1272,11 +1314,12 @@ func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte,
 		hdr[k] = redactSecrets(v, req.SecretValues)
 	}
 	removeHeader(hdr, "Authorization")
-	if c.cred != nil && c.cred.Token != "" {
-		hdr["Authorization"] = "Bearer " + credential.MaskToken(c.cred.Token)
+	token, spaceID := c.bearer()
+	if token != "" {
+		hdr["Authorization"] = "Bearer " + credential.MaskToken(token)
 	}
-	if c.cred != nil && c.cred.SpaceID != "" && !req.SuppressSpaceHeader {
-		hdr["X-Space-Id"] = c.cred.SpaceID
+	if spaceID != "" && !req.SuppressSpaceHeader {
+		hdr["X-Space-Id"] = spaceID
 	}
 	out := map[string]any{
 		"dry_run": true,

@@ -60,6 +60,14 @@ func applyIdentityRouting(f *cmdutil.Factory, d *registry.OperationDetail, urlPa
 // forced it via cfg.Validate, so this adds no I/O — but ErrNoCredential must be
 // translated here because buildConfig deliberately swallows it.
 func activeTokenKind(f *cmdutil.Factory) (string, error) {
+	business, err := f.BusinessCredential()
+	if err != nil {
+		return "", err
+	}
+	if business != nil {
+		return "", output.ErrWithHint("validation", "BUSINESS_ROUTE_UNAVAILABLE",
+			"this operation has no unified Token route configured", "check the supported business routes")
+	}
 	cred, err := f.Credential()
 	if err != nil {
 		if errors.Is(err, credential.ErrNoCredential) {

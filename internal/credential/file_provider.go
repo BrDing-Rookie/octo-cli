@@ -66,12 +66,13 @@ func (p *FileProvider) Resolve() (*BotCredential, error) {
 			return nil, err
 		}
 		return &BotCredential{
-			Token:   token,
-			SpaceID: meta.SpaceID,
-			Source:  "profile:" + name,
-			Profile: name,
-			RobotID: meta.RobotID,
-			BotKind: meta.BotKind,
+			Token:      token,
+			SpaceID:    meta.SpaceID,
+			Source:     "profile:" + name,
+			Profile:    name,
+			RobotID:    meta.RobotID,
+			BotKind:    meta.BotKind,
+			APIBaseURL: meta.APIBaseURL,
 		}, nil
 	case authstore.StatusMissing:
 		return nil, p.missingErr()

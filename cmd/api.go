@@ -102,12 +102,13 @@ flags are not auto-generated and --page-all is not available.`,
 				headers = map[string]string{"X-Workspace-ID": workspaceID}
 			}
 			respBody, err := cli.Do(cobraCmd.Context(), &client.Request{
-				Service: serviceName,
-				Method:  method,
-				Path:    path,
-				Query:   q,
-				Body:    body,
-				Headers: headers,
+				Service:   serviceName,
+				Method:    method,
+				Path:      path,
+				ExactPath: true,
+				Query:     q,
+				Body:      body,
+				Headers:   headers,
 				// Recovered from the registry rather than from a command definition,
 				// because this command's path is whatever the caller typed.
 				SecretValues:         secrets,

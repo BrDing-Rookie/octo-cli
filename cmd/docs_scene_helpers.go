@@ -43,14 +43,6 @@ func getScene(cmd *cobra.Command, f *cmdutil.Factory, docID string) (*sceneSnaps
 	if err != nil {
 		return nil, err
 	}
-	cfg, err := f.Config()
-	if err != nil {
-		return nil, err
-	}
-	cred, err := f.Credential()
-	if err != nil {
-		return nil, err
-	}
 	var options client.Options
 	if f.Globals != nil {
 		options.NoRetry = f.Globals.NoRetry
@@ -58,7 +50,10 @@ func getScene(cmd *cobra.Command, f *cmdutil.Factory, docID string) (*sceneSnaps
 		options.Verbose = f.Globals.Verbose
 	}
 	options.ErrOut = f.ErrOut()
-	readClient := client.New(cfg, cred, options)
+	readClient, err := f.RequestClient(options)
+	if err != nil {
+		return nil, err
+	}
 	raw, err := readClient.Do(cmd.Context(), &client.Request{
 		Method:              http.MethodGet,
 		Path:                path,
