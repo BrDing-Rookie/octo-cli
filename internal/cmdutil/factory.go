@@ -587,9 +587,13 @@ func (f *Factory) Format() string {
 	if f.Globals != nil && f.Globals.Format != "" {
 		return f.Globals.Format
 	}
-	if f.businessFunc != nil {
-		// Output formatting must not resolve credentials for offline commands.
-		return config.LoadRuntime().Format
+	if f.businessFunc != nil && f.Globals != nil {
+		runtime := config.LoadRuntime()
+		unified, err := runtime.UsesUnifiedCredentials(f.Globals.CredentialFileSet || f.Globals.CredentialFile != "")
+		if err == nil && unified {
+			// Unified offline commands read the format without resolving credentials.
+			return runtime.Format
+		}
 	}
 	if cfg, err := f.Config(); err == nil {
 		return cfg.Format

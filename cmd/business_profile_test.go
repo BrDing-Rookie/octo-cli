@@ -290,6 +290,48 @@ func TestPhaseOneExplicitBotID(t *testing.T) {
 	}
 }
 
+func TestPhaseOneOfflineSchemaFormat(t *testing.T) {
+	dir := phaseOneEnv(t)
+	unavailable := filepath.Join(dir, "not-a-directory")
+	phaseOneWrite(t, unavailable, "")
+	t.Setenv("OCTO_CONFIG_DIR", unavailable)
+	t.Setenv("OCTO_FORMAT", "table")
+	for _, tc := range []struct {
+		name, mode, format string
+		wantJSON           bool
+	}{
+		{"legacy fallback", "", "", true},
+		{"legacy explicit format", "", "table", false},
+		{"unified runtime format", "unified", "", false},
+		{"unified explicit format", "unified", "json", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
+			args := []string{"--profile", "unavailable", "schema", "--list", "drive"}
+			if tc.format != "" {
+				args = append(args, "--format", tc.format)
+			}
+			out, err := phaseOneRun(args...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !tc.wantJSON {
+				if json.Valid([]byte(out)) || !strings.HasPrefix(out, "operations") {
+					t.Fatal("expected schema table")
+				}
+				return
+			}
+			var envelope struct {
+				OK   bool
+				Data struct{ Service string }
+			}
+			if err := json.Unmarshal([]byte(out), &envelope); err != nil || !envelope.OK || envelope.Data.Service != "drive" {
+				t.Fatalf("expected the drive schema JSON envelope: %v", err)
+			}
+		})
+	}
+}
+
 func TestPhaseOneLegacyEnvBypassesConfig(t *testing.T) {
 	for _, tc := range []struct {
 		name, contents, env, token, configError string
@@ -468,6 +510,67 @@ func TestPhaseOneEncodedBearerErrorDetail(t *testing.T) {
 	}
 	if strings.Contains(stderr, "abc%2f1234") || strings.Contains(stderr, bearer) {
 		t.Fatal("credential leaked in stderr")
+	}
+}
+
+func TestPhaseOneEncodedBearerStructuredQueryDiagnostics(t *testing.T) {
+	phaseOneEnv(t)
+	const bearer = "abc/1234"
+	const target = "/prefix%61bc%2f1234suffix?raw=prefix%61bc%2f1234suffix"
+	const params = `{"note":"prefix%61bc%2f1234suffix","plain":"prefixabc/1234suffix","prefix%61bc%2f1234suffix":9007199254740993}`
+	const wire = "/prefix%61bc%2f1234suffix?note=prefix%2561bc%252f1234suffix&plain=prefixabc%2F1234suffix&prefix%2561bc%252f1234suffix=9007199254740993&raw=prefixabc%2F1234suffix"
+	const masked = "/prefix***REDACTED***suffix?note=prefix%2A%2A%2AREDACTED%2A%2A%2Asuffix&plain=prefix***REDACTED***suffix&prefix%2A%2A%2AREDACTED%2A%2A%2Asuffix=9007199254740993&raw=prefix***REDACTED***suffix"
+	calls := make(chan string, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+bearer {
+			t.Error("request did not use the expected bearer")
+		}
+		calls <- r.RequestURI
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"accepted":true}`)
+	}))
+	defer server.Close()
+	t.Setenv("OCTO_API_BASE_URL", server.URL)
+	args := []string{"api", "GET", target, "--params", params}
+	for _, tc := range []struct{ name, mode, want string }{
+		{"unified", "unified", masked},
+		{"legacy", "", wire},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_CREDENTIAL_MODE", tc.mode)
+			if tc.mode == "unified" {
+				t.Setenv("OCTO_TOKEN", bearer)
+			} else {
+				t.Setenv("OCTO_BOT_TOKEN", bearer)
+			}
+			wantURL := server.URL + tc.want
+			out, err := phaseOneRun(append([]string{"--dry-run"}, args...)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var envelope struct{ Data struct{ URL string } }
+			if err := json.Unmarshal([]byte(out), &envelope); err != nil {
+				t.Fatal(err)
+			}
+			if envelope.Data.URL != wantURL {
+				t.Errorf("dry-run URL = %q, want %q", envelope.Data.URL, wantURL)
+			}
+			if len(calls) != 0 {
+				t.Fatal("dry-run sent an HTTP request")
+			}
+			out, err = phaseOneRun(append([]string{"--verbose"}, args...)...)
+			if err != nil || !strings.Contains(out, "[octo] GET "+wantURL+"\n") {
+				t.Errorf("unexpected verbose output: %s (%v)", out, err)
+			}
+			select {
+			case uri := <-calls:
+				if uri != wire {
+					t.Errorf("sent URI = %q, want %q", uri, wire)
+				}
+			default:
+				t.Fatal("no request received")
+			}
+		})
 	}
 }
 

@@ -13,10 +13,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1075,9 +1077,11 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		httpReq.Header.Set(k, v)
 	}
 
-	c.verbosef("%s %s", req.Method, redactSecrets(urlStr, req.SecretValues))
-	if c.options.Verbose && len(body) > 0 {
-		c.verbosef("request body: %s", truncate(c.redactDiagnosticBody(req, body), 1024))
+	if c.options.Verbose {
+		c.verbosef("%s %s", req.Method, c.redactDiagnosticURL(req, urlStr))
+		if len(body) > 0 {
+			c.verbosef("request body: %s", truncate(c.redactDiagnosticBody(req, body), 1024))
+		}
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -1387,7 +1391,7 @@ func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte,
 	out := map[string]any{
 		"dry_run": true,
 		"method":  c.redactBearer(req.Method),
-		"url":     c.redactBearer(redactSecrets(urlStr, req.SecretValues)),
+		"url":     c.redactBearer(c.redactDiagnosticURL(req, urlStr)),
 		"headers": hdr,
 	}
 	if bodyField != nil {
@@ -1429,6 +1433,28 @@ func (c *Client) redactDiagnosticBody(req *Request, body []byte) string {
 	}
 	redacted := []byte(redactBodyForLog(req, body, bearer))
 	return string(redactJSONBody(redacted, req.SensitiveJSONFields))
+}
+
+func (c *Client) redactDiagnosticURL(req *Request, urlStr string) string {
+	if c.business != nil && len(req.Query) > 0 {
+		// Structured query keys and values gain another layer of escaping
+		// when the URL is assembled. Mask encoded bearers before that step.
+		query := make(url.Values, len(req.Query))
+		for _, key := range slices.Sorted(maps.Keys(req.Query)) {
+			maskedKey := redactEscapedBearer(key, c.business.Token)
+			values := query[maskedKey]
+			for _, value := range req.Query[key] {
+				values = append(values, redactEscapedBearer(value, c.business.Token))
+			}
+			query[maskedKey] = values
+		}
+		maskedURL, err := buildURL(c.cfg.ServiceURL(req.Service), req.Path, query)
+		if err != nil {
+			return secretMask
+		}
+		urlStr = maskedURL
+	}
+	return redactSecrets(urlStr, req.SecretValues)
 }
 
 // --- helpers ---
