@@ -4,7 +4,7 @@ package authstore
 
 import "path/filepath"
 
-func systemKeychain() Keychain {
+func systemKeychain(string) Keychain {
 	return unavailableKeychain{}
 }
 

@@ -69,7 +69,7 @@ func OpenManaged() (*ManagedStore, error) {
 }
 
 func managedIn(dir string) *ManagedStore {
-	return NewManagedStore(dir, systemKeychain())
+	return NewManagedStore(dir, systemKeychain(dir))
 }
 
 // NewManagedStore injects a Keychain for an absolute configuration directory.

@@ -11,6 +11,8 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
+var errManagedCredentialMissing = errors.New("managed credential entry is missing")
+
 // BusinessContext is the unified bearer and its target for one invocation.
 // It does not encode a Bot identity or infer an execution principal.
 type BusinessContext struct {
@@ -49,21 +51,55 @@ func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessCon
 	if err != nil {
 		return nil, err
 	}
-	if !external && p.TokenSource != nil && p.APIBaseURL == "" {
-		return nil, output.ErrValidation("profile token_source requires api_base_url", "set the API origin in the selected profile")
-	}
-	if err := runtime.ApplyProfile(p, opts.Space); err != nil {
-		return nil, output.ErrValidation(err.Error(), "check the profile, OCTO_API_BASE_URL and Space settings")
+	target := *runtime
+	if err := applyBusinessProfile(&target, opts, p, external); err != nil {
+		return nil, err
 	}
 
 	source, token, err := resolveBusinessToken(opts, token, tokenSet, tokenFile, tokenFileSet, profiles, p.TokenSource)
+	if errors.Is(err, errManagedCredentialMissing) {
+		return resolveRotatedBusinessProfile(runtime, opts, name, p.TokenSource, err)
+	}
 	if err != nil {
 		return nil, err
 	}
 
+	*runtime = target
 	return &BusinessContext{
 		Token: token, Source: source, Profile: name, SpaceID: runtime.SpaceID,
 		APIBaseURL: runtime.APIBaseURL,
+	}, nil
+}
+
+func applyBusinessProfile(runtime *config.Config, opts BusinessOptions, p config.Profile, external bool) error {
+	if !external && p.TokenSource != nil && p.APIBaseURL == "" {
+		return output.ErrValidation("profile token_source requires api_base_url", "set the API origin in the selected profile")
+	}
+	if err := runtime.ApplyProfile(p, opts.Space); err != nil {
+		return output.ErrValidation(err.Error(), "check the profile, OCTO_API_BASE_URL and Space settings")
+	}
+	return nil
+}
+
+func resolveRotatedBusinessProfile(runtime *config.Config, opts BusinessOptions, name string, old *config.TokenSource, readErr error) (*BusinessContext, error) {
+	// The writer can delete the old entry between our metadata and secret
+	// reads. Retry once, only for a new managed reference on the same profile.
+	profiles, selected, p, err := selectBusinessProfile(opts, false)
+	if err != nil || selected != name || p.TokenSource == nil || p.TokenSource.Type != "managed_store" || *p.TokenSource == *old {
+		return nil, readErr
+	}
+	target := *runtime
+	if err := applyBusinessProfile(&target, opts, p, false); err != nil {
+		return nil, err
+	}
+	source, token, err := ReadProfileToken(profiles, p.TokenSource)
+	if err != nil {
+		return nil, err
+	}
+	*runtime = target
+	return &BusinessContext{
+		Token: token, Source: source, Profile: name, SpaceID: target.SpaceID,
+		APIBaseURL: target.APIBaseURL,
 	}, nil
 }
 
@@ -143,7 +179,11 @@ func ReadProfileToken(profiles *config.ProfileConfig, ref *config.TokenSource) (
 		source = "profile:managed_store"
 		token, err = authstore.ReadManagedToken(profiles, ref)
 		if err != nil {
-			return "", "", output.ErrAuth("cannot read credential from "+source, "check the selected profile and managed credential store")
+			authErr := output.ErrAuth("cannot read credential from "+source, "check the selected profile and managed credential store")
+			if errors.Is(err, os.ErrNotExist) {
+				return "", "", errors.Join(authErr, errManagedCredentialMissing)
+			}
+			return "", "", authErr
 		}
 	default:
 		return "", "", output.ErrValidation("invalid profile token_source", "check the type and reference in config.json")

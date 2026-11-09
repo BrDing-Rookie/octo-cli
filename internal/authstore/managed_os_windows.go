@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"runtime"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -22,8 +23,17 @@ func replaceManagedFile(from, to string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	err = windows.MoveFileEx(src, dst, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
-	return err == nil, err
+	// Existing readers may briefly hold the destination without delete
+	// sharing, including another CLI process loading config before locking.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		err = windows.MoveFileEx(src, dst, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+		if (!errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED)) ||
+			!time.Now().Before(deadline) {
+			return err == nil, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func protectManagedPath(path string, _ os.FileInfo, _ os.FileMode) error {
