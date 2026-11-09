@@ -30,6 +30,7 @@ func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newAuthLoginCmd(f),
+		newAuthGetCmd(f),
 		newAuthStatusCmd(f),
 		newAuthUpdateCmd(f),
 		newAuthLogoutCmd(f),
@@ -159,19 +160,43 @@ func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
 func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	var withToken bool
 	var tokenFile string
-	var apiBaseURL string
+	var apiBaseURL, ownerID string
+	var unified bool
 
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Store a credential (read from a hidden prompt or stdin, never argv)",
-		Long: "Store an Octo or Loop bearer credential under a profile. Identify a bot with --bot-id " +
+		Long: "In unified mode, verify and import a CLI Token from stdin using --with-token. " +
+			"Select the target with --profile and optionally verify its owner with --owner-id. " +
+			"In legacy mode, identify a bot with --bot-id " +
 			"(its robot id, recommended) and/or --profile (a friendly name). The " +
 			"token is read from a hidden prompt on a terminal, or from stdin with " +
 			"--with-token, or from --token-file — never from the command line. " +
 			"This local credential write rejects --dry-run.",
-		Args:    cobra.NoArgs,
-		PreRunE: authMutationPreRun(f, "omit --dry-run to store the credential locally"),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Args: cobra.NoArgs,
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			var err error
+			unified, err = f.UsesUnifiedCredentials()
+			if err != nil {
+				return failErr(f, err)
+			}
+			if f.Globals.DryRun {
+				return failErr(f, output.ErrValidation(
+					"--dry-run is not supported for auth login", "omit --dry-run to store the credential locally"))
+			}
+			if !unified && cmd.Flags().Changed("owner-id") {
+				return failErr(f, output.ErrValidation(
+					"--owner-id requires unified credentials", "set OCTO_CREDENTIAL_MODE=unified"))
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if unified {
+				if err := runUnifiedAuthLogin(cmd, f, withToken, apiBaseURL, ownerID); err != nil {
+					return failErr(f, err)
+				}
+				return nil
+			}
 			botID := f.Globals.BotID
 			name := f.Globals.Profile
 
@@ -245,6 +270,7 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	cmd.Flags().BoolVar(&withToken, "with-token", false, "read the token from stdin instead of a prompt")
 	cmd.Flags().StringVar(&tokenFile, "token-file", "", "read the token from this file")
 	cmd.Flags().StringVar(&apiBaseURL, "api-base-url", "", "store this profile's API base URL (takes precedence over OCTO_API_BASE_URL)")
+	cmd.Flags().StringVar(&ownerID, "owner-id", "", "verify the expected owner ID when importing a unified CLI Token")
 	cmd.MarkFlagsMutuallyExclusive("with-token", "token-file")
 	return cmd
 }

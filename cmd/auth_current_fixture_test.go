@@ -26,6 +26,7 @@ type authCurrentFixtureReply struct {
 	status              int
 	body                string
 	waitForCancellation bool
+	beforeReply         func()
 }
 
 type authCurrentFixtureRequest struct {
@@ -59,6 +60,9 @@ func newAuthCurrentFixture(t *testing.T, replies map[string]authCurrentFixtureRe
 		reply, found := replies[token]
 		if !hasBearer || !found {
 			reply = authCurrentFixtureError(http.StatusUnauthorized, "AUTH_REQUIRED", "invalid", "")
+		}
+		if reply.beforeReply != nil {
+			reply.beforeReply()
 		}
 		if reply.waitForCancellation {
 			<-r.Context().Done()

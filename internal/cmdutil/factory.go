@@ -62,6 +62,7 @@ type Factory struct {
 	MailCredentialFunc     func(context.Context) (*credential.MailCredential, error)
 	MailClientFunc         func(context.Context) (*client.Client, error)
 	RegistryFunc           func() *registry.Registry
+	ManagedStoreFunc       func() (*authstore.ManagedStore, error)
 
 	// ErrorEmitted is set to true after EmitError writes an envelope to
 	// stderr. The top-level main func checks this to avoid double-emitting
@@ -131,19 +132,12 @@ func NewDefaultFactory() *Factory {
 		if f.cli != nil {
 			return f.cli, nil
 		}
-		opts := client.Options{
-			Verbose: f.Globals.Verbose,
-			DryRun:  f.Globals.DryRun,
-			NoRetry: f.Globals.NoRetry,
-			Timeout: f.Globals.Timeout,
-			ErrOut:  f.IOStreams.ErrOut,
-		}
 		business, err := f.BusinessCredential()
 		if err != nil {
 			return nil, err
 		}
 		if business != nil {
-			f.cli = client.NewBusiness(business, opts)
+			f.cli = f.NewBusinessClient(business)
 			return f.cli, nil
 		}
 		cfg, err := f.ConfigFunc()
@@ -154,7 +148,7 @@ func NewDefaultFactory() *Factory {
 		if err != nil {
 			return nil, err
 		}
-		cli := client.New(cfg, cred, opts)
+		cli := client.New(cfg, cred, f.clientOptions())
 		f.cli = cli
 		return cli, nil
 	}
@@ -381,6 +375,14 @@ func (f *Factory) buildTaskCredential() (*credential.BotCredential, error) {
 	return &credential.BotCredential{Token: resolved.Token, Source: resolved.Source, BotKind: "agent_task"}, nil
 }
 
+// ManagedStore opens the versioned profile store without creating any files.
+func (f *Factory) ManagedStore() (*authstore.ManagedStore, error) {
+	if f.ManagedStoreFunc != nil {
+		return f.ManagedStoreFunc()
+	}
+	return authstore.OpenManaged()
+}
+
 // AuthStore lazily constructs and caches the credential store.
 func (f *Factory) AuthStore() (*authstore.Store, error) {
 	if f.store != nil {
@@ -450,6 +452,21 @@ func (f *Factory) RedactUnifiedBearer(s string) string {
 		return s
 	}
 	return client.RedactBearer(s, f.business.Token)
+}
+
+// NewBusinessClient applies the same runtime options to an already selected bearer.
+func (f *Factory) NewBusinessClient(cred *credential.BusinessContext) *client.Client {
+	return client.NewBusiness(cred, f.clientOptions())
+}
+
+func (f *Factory) clientOptions() client.Options {
+	return client.Options{
+		Verbose: f.Globals.Verbose,
+		DryRun:  f.Globals.DryRun,
+		NoRetry: f.Globals.NoRetry,
+		Timeout: f.Globals.Timeout,
+		ErrOut:  f.IOStreams.ErrOut,
+	}
 }
 
 // Config returns the resolved config (cached).

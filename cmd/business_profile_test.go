@@ -1136,13 +1136,13 @@ func TestPhaseOneAuthDoesNotFallBackToLegacyCredentials(t *testing.T) {
 			}
 			t.Setenv("OCTO_TOKEN", "opaque-runtime-bearer")
 			commands := [][]string{
-				{"login", "--with-token"},
+				{"login"},
 			}
 			if tc.modeError != "" {
-				commands = append(commands,
-					[]string{"list"}, []string{"status"},
-					[]string{"update", "--api-base-url", "https://other.example"}, []string{"logout"},
-				)
+				commands = [][]string{
+					{"login", "--with-token"}, {"list"}, {"status"}, {"get"},
+					{"update", "--api-base-url", "https://other.example"}, {"logout"},
+				}
 			}
 			for _, command := range commands {
 				name := command[0]
@@ -1160,6 +1160,9 @@ func TestPhaseOneAuthDoesNotFallBackToLegacyCredentials(t *testing.T) {
 				want := tc.modeError
 				if want == "" {
 					want = "auth " + name + " is unavailable for unified credentials"
+					if name == "login" {
+						want = "unified auth login requires --with-token"
+					}
 				}
 				if err := root.Execute(); err == nil || !strings.Contains(err.Error(), want) {
 					t.Errorf("execute %s: %v (%s), want %q", name, err, &out, want)

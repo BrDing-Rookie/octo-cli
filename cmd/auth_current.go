@@ -1,0 +1,320 @@
+package cmd
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
+	"github.com/Mininglamp-OSS/octo-cli/internal/client"
+	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
+	"github.com/Mininglamp-OSS/octo-cli/internal/config"
+	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
+	"github.com/Mininglamp-OSS/octo-cli/internal/output"
+)
+
+const authCurrentPath = "/v1/auth/tokens/_current"
+
+type authTokenSelf struct {
+	Token       authTokenMetadata `json:"token"`
+	Permissions []authPermission  `json:"permissions"`
+	BotBindings []map[string]any  `json:"bot_bindings"`
+}
+
+type authTokenMetadata struct {
+	ID         string     `json:"token_id"`
+	OwnerID    string     `json:"owner_id"`
+	SpaceID    string     `json:"space_id"`
+	Name       string     `json:"name"`
+	Remark     *string    `json:"remark"`
+	Status     string     `json:"status"`
+	ExpiresAt  *time.Time `json:"expires_at"`
+	IsExpired  *bool      `json:"is_expired"`
+	Version    int64      `json:"version"`
+	CreatedAt  *time.Time `json:"created_at"`
+	UpdatedAt  *time.Time `json:"updated_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+}
+
+type authPermission struct {
+	Domain  string   `json:"domain"`
+	Actions []string `json:"actions"`
+}
+
+func newAuthGetCmd(f *cmdutil.Factory) *cobra.Command {
+	return &cobra.Command{
+		Use:   "get",
+		Short: "Check the selected unified CLI Token online",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := runAuthGet(cmd.Context(), f); err != nil {
+				return failErr(f, err)
+			}
+			return nil
+		},
+	}
+}
+
+func runAuthGet(ctx context.Context, f *cmdutil.Factory) error {
+	active, err := f.BusinessCredential()
+	if err != nil {
+		return err
+	}
+	if active == nil {
+		return output.ErrValidation("auth get requires unified credentials", "set OCTO_CREDENTIAL_MODE=unified")
+	}
+	raw, err := requestAuthCurrent(ctx, f, active)
+	if err != nil {
+		return err
+	}
+	if f.Globals.DryRun {
+		return f.EmitSuccess(raw)
+	}
+	self, err := decodeAuthTokenSelf(raw)
+	if err != nil {
+		return err
+	}
+	self.redact(active.Token)
+	payload, err := json.Marshal(self)
+	if err != nil {
+		return err
+	}
+	return f.EmitSuccess(payload)
+}
+
+func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL, ownerID string) error {
+	if err := validateUnifiedAuthLogin(cmd, f, withToken, apiBaseURL, ownerID); err != nil {
+		return err
+	}
+	name, _ := config.ProfileSelector(f.Globals.Profile, f.Globals.ProfileSet)
+	if strings.TrimSpace(name) == "" {
+		return output.ErrValidation("unified auth login requires a Profile name", "pass --profile or set OCTO_PROFILE")
+	}
+	store, err := f.ManagedStore()
+	if err != nil {
+		return credential.ProfileConfigError(err)
+	}
+	baseline, err := store.Snapshot(name, true)
+	if err != nil {
+		return credential.ProfileConfigError(err)
+	}
+	target, err := authLoginTarget(f, baseline.Profile, apiBaseURL)
+	if err != nil {
+		return err
+	}
+	token, err := readUnifiedLoginToken(f.IOStreams.In)
+	if err != nil {
+		return err
+	}
+	candidate := &credential.BusinessContext{Token: token, APIBaseURL: target.APIBaseURL, SpaceID: target.SpaceID}
+	raw, err := requestAuthCurrent(cmd.Context(), f, candidate)
+	if err != nil {
+		return err
+	}
+	self, err := decodeAuthTokenSelf(raw)
+	if err != nil {
+		return err
+	}
+	if err := self.Token.verifyImport(target.SpaceID, ownerID); err != nil {
+		return err
+	}
+	if cmd.Context().Err() != nil {
+		return output.ErrNetwork("CLI Token verification was cancelled", "retry the import")
+	}
+	return importVerifiedToken(f, store, &baseline, target, token)
+}
+
+func validateUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL, ownerID string) error {
+	switch {
+	case !withToken:
+		return output.ErrValidation("unified auth login requires --with-token", "pipe the candidate CLI Token through stdin")
+	case f.Globals.CredentialFileSet, f.Globals.BotIDSet:
+		return output.ErrValidation("unified auth login does not accept --credential-file or --bot-id", "select a Profile and pipe the candidate CLI Token through stdin")
+	case cmd.Flags().Changed("api-base-url") && apiBaseURL == "":
+		return output.ErrValidation("--api-base-url is empty", "pass the target API origin")
+	case cmd.Flags().Changed("owner-id") && strings.TrimSpace(ownerID) == "":
+		return output.ErrValidation("--owner-id is empty", "pass the expected owner ID")
+	case cmd.Flags().Changed("space") && strings.TrimSpace(f.Globals.Space) == "":
+		return output.ErrValidation("--space is empty", "pass the target Space ID")
+	}
+	return nil
+}
+
+func authLoginTarget(f *cmdutil.Factory, previous config.Profile, apiBaseURL string) (config.Profile, error) {
+	runtime := config.LoadRuntime()
+	target := config.Profile{APIBaseURL: previous.APIBaseURL, SpaceID: previous.SpaceID}
+	if apiBaseURL != "" {
+		target.APIBaseURL = apiBaseURL
+	}
+	if f.Globals.Space != "" {
+		// Explicit import into a new Space is allowed after that Space is verified.
+		target.SpaceID = f.Globals.Space
+	}
+	if err := runtime.ApplyProfile(target, f.Globals.Space); err != nil {
+		return config.Profile{}, output.ErrValidation(err.Error(), "check the target API origin and Space")
+	}
+	if strings.TrimSpace(runtime.SpaceID) == "" {
+		return config.Profile{}, output.ErrValidation("unified auth login requires a target Space", "pass --space or set OCTO_SPACE_ID")
+	}
+	return config.Profile{APIBaseURL: runtime.APIBaseURL, SpaceID: runtime.SpaceID}, nil
+}
+
+func readUnifiedLoginToken(stdin io.Reader) (string, error) {
+	const limit = 64 * 1024
+	raw, err := io.ReadAll(io.LimitReader(stdin, limit+1))
+	if err != nil || len(raw) > limit {
+		return "", output.ErrValidation("cannot read candidate CLI Token from stdin", "pipe a single CLI Token")
+	}
+	token := strings.TrimSpace(string(raw))
+	if err := credential.ValidateBusinessToken(token, "stdin"); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func requestAuthCurrent(ctx context.Context, f *cmdutil.Factory, cred *credential.BusinessContext) ([]byte, error) {
+	return f.NewBusinessClient(cred).Do(ctx, &client.Request{
+		Method: http.MethodGet,
+		Path:   authCurrentPath,
+	})
+}
+
+func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
+	var envelope struct {
+		Data json.RawMessage `json:"data"`
+	}
+	var self authTokenSelf
+	invalid := output.ErrAPI("INVALID_TOKEN_SELF", "invalid TokenSelf response from octo-auth", "check the octo-auth gateway and response contract")
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return self, invalid
+	}
+	decoder := json.NewDecoder(bytes.NewReader(envelope.Data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&self); err != nil || !self.valid() {
+		return authTokenSelf{}, invalid
+	}
+	return self, nil
+}
+
+func (s *authTokenSelf) valid() bool {
+	meta := &s.Token
+	if meta.ID == "" || meta.OwnerID == "" || meta.SpaceID == "" || meta.IsExpired == nil ||
+		(meta.Status != "active" && meta.Status != "revoked") || s.Permissions == nil || s.BotBindings == nil {
+		return false
+	}
+	for _, permission := range s.Permissions {
+		if permission.Domain == "" || permission.Actions == nil {
+			return false
+		}
+	}
+	for _, binding := range s.BotBindings {
+		id, _ := binding["bot_id"].(string)
+		if _, ok := binding["bot_name"].(string); id == "" || !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *authTokenMetadata) verifyImport(spaceID, ownerID string) error {
+	if m.Status == "revoked" {
+		return output.ErrWithHint("auth_error", "TOKEN_REVOKED", "the candidate CLI Token is revoked", "provide an active CLI Token")
+	}
+	if *m.IsExpired {
+		return output.ErrWithHint("auth_error", "TOKEN_EXPIRED", "the candidate CLI Token is expired", "provide an active CLI Token")
+	}
+	if m.SpaceID != spaceID {
+		return output.ErrValidation("candidate CLI Token belongs to a different Space", "select the Token's target Space")
+	}
+	if ownerID != "" && m.OwnerID != ownerID {
+		return output.ErrValidation("candidate CLI Token belongs to a different owner", "provide a Token owned by the expected account")
+	}
+	return nil
+}
+
+func importVerifiedToken(f *cmdutil.Factory, store *authstore.ManagedStore, baseline *authstore.ProfileSnapshot, target config.Profile, token string) error {
+	result, err := store.Import(*baseline, target, token, authstore.BackendAuto)
+	if errors.Is(err, authstore.ErrProfileConflict) {
+		return output.ErrWithHint("validation", "PROFILE_CONFLICT", "profile changed during CLI Token verification", "retry the import after checking the target Profile")
+	}
+	if err != nil {
+		return output.ErrWithHint("config", "CREDENTIAL_STORE_ERROR", "cannot commit the verified CLI Token", "check the Profile directory and system credential store")
+	}
+	payload := map[string]string{
+		"profile":      client.RedactBearer(baseline.Name, token),
+		"api_base_url": client.RedactBearer(target.APIBaseURL, token),
+		"space_id":     client.RedactBearer(target.SpaceID, token),
+		"token_source": "managed_store",
+	}
+	if result.CleanupWarning != "" {
+		payload["cleanup_warning"] = client.RedactBearer(result.CleanupWarning, token)
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return f.EmitSuccessWithMeta(raw, output.EnvelopeMeta{Identity: map[string]string{
+		"type": "token", "source": "stdin", "profile": payload["profile"],
+	}})
+}
+
+func (s *authTokenSelf) redact(bearer string) {
+	meta := &s.Token
+	for _, field := range []*string{&meta.ID, &meta.OwnerID, &meta.SpaceID, &meta.Name, meta.Remark} {
+		if field != nil {
+			*field = client.RedactBearer(*field, bearer)
+		}
+	}
+	for i := range s.Permissions {
+		group := &s.Permissions[i]
+		group.Domain = client.RedactBearer(group.Domain, bearer)
+		for j, action := range group.Actions {
+			group.Actions[j] = client.RedactBearer(action, bearer)
+		}
+	}
+	for _, binding := range s.BotBindings {
+		redactAuthBinding(binding, bearer)
+	}
+}
+
+func redactAuthBinding(binding map[string]any, bearer string) {
+	for key, value := range binding {
+		switch key {
+		case "token", "token_hash", "token_ciphertext", "device_code_hash":
+			delete(binding, key)
+			continue
+		case "bot_id", "bot_name":
+		default:
+			if client.RedactBearer(key, bearer) != key {
+				delete(binding, key)
+				continue
+			}
+		}
+		binding[key] = redactAuthBindingValue(value, bearer)
+	}
+}
+
+func redactAuthBindingValue(value any, bearer string) any {
+	switch v := value.(type) {
+	case string:
+		return client.RedactBearer(v, bearer)
+	case json.Number:
+		if masked := client.RedactBearer(v.String(), bearer); masked != v.String() {
+			return masked
+		}
+	case map[string]any:
+		redactAuthBinding(v, bearer)
+	case []any:
+		for i, elem := range v {
+			v[i] = redactAuthBindingValue(elem, bearer)
+		}
+	}
+	return value
+}
