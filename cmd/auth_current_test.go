@@ -101,6 +101,65 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 	assertAuthCurrentRedaction(t, candidate, stdout, stderr)
 }
 
+func TestUnifiedAuthCurrentRedactsMetadataScalars(t *testing.T) {
+	for _, tc := range []struct {
+		name, bearer, field string
+		oldJSON, newJSON    string
+	}{
+		{"numeric version", "812759536786399237", "version", `"version":9007199254740993`, `"version":812759536786399237`},
+		{"status", "active", "status", "", ""},
+		{"expiration", "false", "is_expired", "", ""},
+		{"timestamp", "2027-01-23T06:00:00Z", "expires_at", `"expires_at":null`, `"expires_at":"2027-01-23T06:00:00Z"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			phaseOneEnv(t)
+			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+			t.Setenv(config.EnvToken, tc.bearer)
+
+			reply := authCurrentFixtureSuccess("token-id", "owner", "space")
+			reply.body = strings.Replace(reply.body, `"version":1`, `"version":9007199254740993`, 1)
+			if tc.oldJSON != "" {
+				reply.body = strings.Replace(reply.body, tc.oldJSON, tc.newJSON, 1)
+			}
+			reply.body = strings.Replace(reply.body, `"bot_name":"Fixture Bot"`, `"bot_name":"Fixture Bot","enabled":false`, 1)
+			server, _ := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{tc.bearer: reply})
+			t.Setenv(config.EnvAPIBaseURL, server.URL)
+
+			stdout, stderr, err := runUnifiedAuthCurrent(nil, strings.NewReader(""), "--verbose", "auth", "get")
+			if err != nil {
+				t.Fatalf("auth get: %v (%s %s)", err, stdout, stderr)
+			}
+			assertAuthCurrentRedaction(t, tc.bearer, stdout, stderr)
+			var result struct {
+				Data struct {
+					Token       map[string]json.RawMessage
+					BotBindings []map[string]json.RawMessage `json:"bot_bindings"`
+				}
+			}
+			if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+				t.Fatal(err)
+			}
+			for field, want := range map[string]string{
+				"version": "9007199254740993", "status": `"active"`, "is_expired": "false", "expires_at": "null",
+			} {
+				if field == tc.field {
+					want = `"***REDACTED***"`
+				}
+				if got := string(result.Data.Token[field]); got != want {
+					t.Errorf("%s = %s, want %s", field, got, want)
+				}
+			}
+			wantEnabled := "false"
+			if tc.field == "is_expired" {
+				wantEnabled = `"***REDACTED***"`
+			}
+			if got := string(result.Data.BotBindings[0]["enabled"]); got != wantEnabled {
+				t.Errorf("binding enabled = %s, want %s", got, wantEnabled)
+			}
+		})
+	}
+}
+
 func TestUnifiedAuthCurrentCreatesProfile(t *testing.T) {
 	dir := phaseOneEnv(t)
 	store := authstore.NewManagedStore(dir, nil)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -81,8 +82,7 @@ func runAuthGet(ctx context.Context, f *cmdutil.Factory) error {
 	if err != nil {
 		return err
 	}
-	self.redact(active.Token)
-	payload, err := json.Marshal(self)
+	payload, err := self.redactedPayload(active.Token)
 	if err != nil {
 		return err
 	}
@@ -265,12 +265,21 @@ func importVerifiedToken(f *cmdutil.Factory, store *authstore.ManagedStore, base
 	}})
 }
 
-func (s *authTokenSelf) redact(bearer string) {
-	meta := &s.Token
-	for _, field := range []*string{&meta.ID, &meta.OwnerID, &meta.SpaceID, &meta.Name, meta.Remark} {
-		if field != nil {
-			*field = client.RedactBearer(*field, bearer)
-		}
+func (s *authTokenSelf) redactedPayload(bearer string) ([]byte, error) {
+	// Redact the projected metadata's wire values after validating their types.
+	// Preserve unaffected numbers exactly, including versions above 2^53.
+	raw, err := json.Marshal(&s.Token)
+	if err != nil {
+		return nil, err
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var metadata map[string]any
+	if err := decoder.Decode(&metadata); err != nil {
+		return nil, err
+	}
+	for key, value := range metadata {
+		metadata[key] = redactAuthValue(value, bearer)
 	}
 	for i := range s.Permissions {
 		group := &s.Permissions[i]
@@ -282,6 +291,9 @@ func (s *authTokenSelf) redact(bearer string) {
 	for _, binding := range s.BotBindings {
 		redactAuthBinding(binding, bearer)
 	}
+	return json.Marshal(map[string]any{
+		"token": metadata, "permissions": s.Permissions, "bot_bindings": s.BotBindings,
+	})
 }
 
 func redactAuthBinding(binding map[string]any, bearer string) {
@@ -297,23 +309,24 @@ func redactAuthBinding(binding map[string]any, bearer string) {
 				continue
 			}
 		}
-		binding[key] = redactAuthBindingValue(value, bearer)
+		binding[key] = redactAuthValue(value, bearer)
 	}
 }
 
-func redactAuthBindingValue(value any, bearer string) any {
+func redactAuthValue(value any, bearer string) any {
 	switch v := value.(type) {
 	case string:
 		return client.RedactBearer(v, bearer)
-	case json.Number:
-		if masked := client.RedactBearer(v.String(), bearer); masked != v.String() {
+	case json.Number, bool:
+		spelling := fmt.Sprint(v)
+		if masked := client.RedactBearer(spelling, bearer); masked != spelling {
 			return masked
 		}
 	case map[string]any:
 		redactAuthBinding(v, bearer)
 	case []any:
 		for i, elem := range v {
-			v[i] = redactAuthBindingValue(elem, bearer)
+			v[i] = redactAuthValue(elem, bearer)
 		}
 	}
 	return value
