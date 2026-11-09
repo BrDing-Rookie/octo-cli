@@ -280,6 +280,12 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 	revoked.body = strings.Replace(revoked.body, `"status":"active"`, `"status":"revoked"`, 1)
 	duplicateToken := revoked
 	duplicateToken.body = strings.Replace(duplicateToken.body, authCurrentFixtureTokenEnd, authCurrentFixtureDuplicateToken, 1)
+	duplicateStatus := active
+	duplicateStatus.body = strings.Replace(duplicateStatus.body, `"status":"active"`, `"status":"revoked","status":"active"`, 1)
+	duplicateExpiry := active
+	duplicateExpiry.body = strings.Replace(duplicateExpiry.body, `"is_expired":false`, `"is_expired":true,"is_expired":false`, 1)
+	duplicateData := active
+	duplicateData.body = strings.TrimSuffix(revoked.body, "}") + "," + strings.TrimPrefix(active.body, "{")
 	missingMetadata := active
 	missingMetadata.body = strings.NewReplacer(
 		`,"version":1`, "",
@@ -305,6 +311,9 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		{"duplicate error with trailing null", candidate, "INVALID_TOKEN_SELF", "api_error", active.withEnvelopeError(authCurrentFixtureEnvelopeError, "null"), true},
 		{"duplicate null errors", candidate, "INVALID_TOKEN_SELF", "api_error", active.withEnvelopeError("null", "null"), true},
 		{"duplicate token", candidate, "INVALID_TOKEN_SELF", "api_error", duplicateToken, true},
+		{"duplicate data", candidate, "INVALID_TOKEN_SELF", "api_error", duplicateData, true},
+		{"duplicate status", candidate, "INVALID_TOKEN_SELF", "api_error", duplicateStatus, true},
+		{"duplicate expiry flag", candidate, "INVALID_TOKEN_SELF", "api_error", duplicateExpiry, true},
 		{"null action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[null]`), true},
 		{"empty action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[""]`), true},
 		{"blank action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["   "]`), true},
@@ -513,6 +522,11 @@ func TestUnifiedAuthCurrentGetRejectsInvalidTokenSelf(t *testing.T) {
 		{"duplicate error with trailing null", `{"data":`, `{"error":` + authCurrentFixtureEnvelopeError + `,"error":null,"data":`},
 		{"duplicate null errors", `{"data":`, `{"error":null,"error":null,"data":`},
 		{"duplicate token", authCurrentFixtureTokenEnd, authCurrentFixtureDuplicateToken},
+		{"duplicate data", `{"data":`, `{"data":{},"data":`},
+		{"duplicate status", `"status":"active"`, `"status":"revoked","status":"active"`},
+		{"case alias of status", `"status":"active"`, `"STATUS":"revoked","status":"active"`},
+		{"Unicode alias of status", `"status":"active"`, `"\u017ftatus":"revoked","status":"active"`},
+		{"duplicate expiry flag", `"is_expired":false`, `"is_expired":true,"is_expired":false`},
 		{"null action", `["task:read"]`, `[null]`},
 		{"empty action", `["task:read"]`, `[""]`},
 		{"blank action", `["task:read"]`, `["   "]`},
@@ -619,6 +633,55 @@ func TestUnifiedAuthCurrentGetModeAndDryRun(t *testing.T) {
 		t.Fatalf("auth get refusal: %v (%s %s)", err, stdout, stderr)
 	}
 	assertAuthCurrentRedaction(t, candidate, stdout, stderr, err.Error())
+}
+
+func TestUnifiedAuthCurrentGetChecksRequestedSpace(t *testing.T) {
+	phaseOneEnv(t)
+	token := authCurrentFixtureStoredToken
+	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
+		token: authCurrentFixtureSuccess("stored-id", "owner", "space-a"),
+	})
+	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+	t.Setenv(config.EnvToken, token)
+	t.Setenv(config.EnvAPIBaseURL, server.URL)
+	for _, tc := range []struct {
+		name, space, query, want string
+		dryRun, mismatch         bool
+	}{
+		{"unspecified", "", ".data.token.space_id", `"space-a"`, false, false},
+		{"matching", "space-a", ".data.token.space_id", `"space-a"`, false, false},
+		{"mismatch", "space-b", ".data.token.space_id", "", false, true},
+		{"dry run", "space-b", `.data.headers["X-Space-Id"]`, `"space-b"`, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := []string{"auth", "get", "--jq", tc.query}
+			if tc.space != "" {
+				args = append(args, "--space", tc.space)
+			}
+			if tc.dryRun {
+				args = append(args, "--dry-run")
+			}
+			before := len(requests())
+			stdout, stderr, err := runUnifiedAuthCurrent(nil, strings.NewReader(""), args...)
+			if tc.mismatch {
+				exit := output.AsExitError(err)
+				if exit == nil || exit.Code != "VALIDATION_ERROR" || exit.Type != "validation" || stdout != "" {
+					t.Errorf("expected a Space mismatch error: %v (%s %s)", err, stdout, stderr)
+				}
+			} else if err != nil || strings.TrimSpace(stdout) != tc.want {
+				t.Errorf("unexpected self-check output: %v (%s %s)", err, stdout, stderr)
+			}
+			assertAuthCurrentRedaction(t, token, stdout, stderr)
+			calls := requests()[before:]
+			if tc.dryRun {
+				if len(calls) != 0 {
+					t.Fatal("dry-run contacted the gateway")
+				}
+			} else if len(calls) != 1 || calls[0].space != tc.space {
+				t.Fatalf("expected one request with Space %q", tc.space)
+			}
+		})
+	}
 }
 
 func TestUnifiedAuthCurrentGetJQ(t *testing.T) {

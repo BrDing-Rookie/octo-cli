@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -45,15 +46,13 @@ type authTokenMetadata struct {
 	CreatedAt  *time.Time                      `json:"created_at"`
 	UpdatedAt  *time.Time                      `json:"updated_at"`
 	LastUsedAt authRequiredNullable[time.Time] `json:"last_used_at"`
-	seen       bool
 }
 
-// UnmarshalJSON rejects another token object instead of merging its fields.
+// UnmarshalJSON checks metadata keys before the typed decode can overwrite them.
 func (meta *authTokenMetadata) UnmarshalJSON(data []byte) error {
-	if meta.seen {
-		return errors.New("duplicate TokenSelf token field")
+	if !uniqueTokenSelfObjectKeys(data) {
+		return errors.New("invalid or ambiguous TokenSelf metadata")
 	}
-	meta.seen = true
 	type wireMetadata authTokenMetadata
 	return json.Unmarshal(data, (*wireMetadata)(meta))
 }
@@ -111,6 +110,9 @@ func runAuthGet(ctx context.Context, f *cmdutil.Factory) error {
 		self, err := decodeAuthTokenSelf(raw)
 		if err != nil {
 			return err
+		}
+		if active.SpaceID != "" && self.Token.SpaceID != active.SpaceID {
+			return output.ErrValidation("selected CLI Token belongs to a different Space", "select the Token's target Space")
 		}
 		raw, err = self.redactedPayload(active.Token)
 		if err != nil {
@@ -246,12 +248,13 @@ func requestAuthCurrent(ctx context.Context, f *cmdutil.Factory, cred *credentia
 
 func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
 	var envelope struct {
-		Data  json.RawMessage         `json:"data"`
-		Error authTokenSelfErrorField `json:"error"`
+		Data  json.RawMessage  `json:"data"`
+		Error *json.RawMessage `json:"error"`
 	}
 	var self authTokenSelf
 	invalid := output.ErrAPI("INVALID_TOKEN_SELF", "invalid TokenSelf response from octo-auth", "check the octo-auth gateway and response contract")
-	if err := json.Unmarshal(raw, &envelope); err != nil {
+	if !uniqueTokenSelfObjectKeys(raw) || json.Unmarshal(raw, &envelope) != nil ||
+		envelope.Error != nil || !uniqueTokenSelfObjectKeys(envelope.Data) {
 		return self, invalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(envelope.Data))
@@ -262,17 +265,42 @@ func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
 	return self, nil
 }
 
-type authTokenSelfErrorField struct {
-	seen bool
+// Check the containing object's keys before encoding/json applies its
+// case-insensitive struct field matching. The typed decode validates values.
+func uniqueTokenSelfObjectKeys(raw []byte) bool {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if start, err := decoder.Token(); err != nil || start != json.Delim('{') {
+		return false
+	}
+	seen := make(map[string]struct{})
+	var value json.RawMessage
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return false
+		}
+		key = strings.Map(foldTokenSelfKeyRune, key)
+		if _, duplicate := seen[key]; duplicate {
+			return false
+		}
+		seen[key] = struct{}{}
+		if err := decoder.Decode(&value); err != nil {
+			return false
+		}
+	}
+	return true
 }
 
-// UnmarshalJSON accepts at most one explicit null error in a success envelope.
-func (field *authTokenSelfErrorField) UnmarshalJSON(data []byte) error {
-	if field.seen || string(data) != "null" {
-		return errors.New("invalid TokenSelf error field")
+func foldTokenSelfKeyRune(r rune) rune {
+	// Like encoding/json, use the smallest rune in the Unicode fold set.
+	for {
+		next := unicode.SimpleFold(r)
+		if next <= r {
+			return next
+		}
+		r = next
 	}
-	field.seen = true
-	return nil
 }
 
 func (s *authTokenSelf) valid() bool {
