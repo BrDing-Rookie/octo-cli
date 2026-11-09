@@ -29,3 +29,17 @@ func replaceManagedFile(from, to string) (bool, error) {
 	}
 	return true, errors.Join(dir.Sync(), dir.Close())
 }
+
+func protectManagedPath(path string, info os.FileInfo, perm os.FileMode) error {
+	if info.Mode().Perm() != perm {
+		return os.Chmod(path, perm)
+	}
+	return nil
+}
+
+func checkManagedFilePrivacy(_ string, info os.FileInfo) error {
+	if info.Mode().Perm()&0o077 != 0 {
+		return errors.New("managed storage file must be private")
+	}
+	return nil
+}

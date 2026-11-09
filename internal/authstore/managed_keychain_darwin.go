@@ -21,6 +21,7 @@ func systemKeychain() Keychain {
 	return macKeychain{}
 }
 
+// Read decodes the ASCII hex used for both tokens and binary master keys.
 func (macKeychain) Read(account string) ([]byte, error) {
 	raw, err := runKeychain("find-generic-password", account, "-w")
 	if err != nil {
@@ -33,11 +34,13 @@ func (macKeychain) Read(account string) ([]byte, error) {
 	return decoded, nil
 }
 
+// Create adds an entry without replacing an existing value.
 func (macKeychain) Create(account string, data []byte) error {
 	_, err := runKeychain("add-generic-password", account, "-w "+hex.EncodeToString(data))
 	return err
 }
 
+// Remove treats an already absent entry as cleaned up.
 func (macKeychain) Remove(account string) error {
 	_, err := runKeychain("delete-generic-password", account, "")
 	if errors.Is(err, fs.ErrNotExist) {
@@ -52,7 +55,7 @@ func runKeychain(op, account, flags string) ([]byte, error) {
 	// All values are fixed or use only hex, slash and hyphen.
 	line := op + " -s " + macKeychainService + " -a " + account + " " + flags + "\n"
 	if len(line) >= 4096 {
-		return nil, errors.New("credential exceeds the system Keychain command limit; use encrypted_file")
+		return nil, errKeychainEntryTooLarge
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()

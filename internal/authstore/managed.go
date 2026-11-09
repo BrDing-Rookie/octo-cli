@@ -42,6 +42,10 @@ type ProfileSnapshot struct {
 	Profile config.Profile
 	Exists  bool
 
+	baseline *profileBaseline
+}
+
+type profileBaseline struct {
 	dir      string
 	name     string
 	implicit bool
@@ -87,7 +91,10 @@ func (s *ManagedStore) Snapshot(name string, explicit bool) (ProfileSnapshot, er
 	if !explicit && profiles != nil {
 		name = profiles.CurrentProfile
 	}
-	snap := ProfileSnapshot{Name: name, name: name, dir: s.dir, implicit: !explicit}
+	snap := ProfileSnapshot{
+		Name:     name,
+		baseline: &profileBaseline{name: name, dir: s.dir, implicit: !explicit},
+	}
 	if profiles == nil {
 		return snap, nil
 	}
@@ -100,7 +107,7 @@ func (s *ManagedStore) Snapshot(name string, explicit bool) (ProfileSnapshot, er
 	}
 	snap.Exists = true
 	snap.Profile = *cloneProfile(p)
-	snap.original = cloneProfile(p)
+	snap.baseline.original = cloneProfile(p)
 	return snap, nil
 }
 
@@ -125,15 +132,15 @@ func (s *ManagedStore) Import(snap ProfileSnapshot, profile config.Profile, toke
 			return CommitResult{}, err
 		}
 		profile.TokenSource = ref
-		cfg.Profiles[snap.name] = &profile
+		cfg.Profiles[snap.baseline.name] = &profile
 		if cfg.CurrentProfile == "" {
-			cfg.CurrentProfile = snap.name
+			cfg.CurrentProfile = snap.baseline.name
 		}
 		committed, err := s.persist(cfg)
 		if !committed {
 			return CommitResult{}, errors.Join(err, s.removeEntry(ref))
 		}
-		return s.afterCommit(cfg, snap.original, err), nil
+		return s.afterCommit(cfg, snap.baseline.original, err), nil
 	})
 }
 
@@ -162,18 +169,18 @@ func validateImport(profile config.Profile, token, backend string) error {
 // Remove deletes the selected reference before cleaning up its managed entry.
 func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
 	return s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
-		if snap.original == nil {
+		if snap.baseline.original == nil {
 			return CommitResult{}, errors.New("selected profile does not exist")
 		}
-		delete(cfg.Profiles, snap.name)
-		if cfg.CurrentProfile == snap.name {
+		delete(cfg.Profiles, snap.baseline.name)
+		if cfg.CurrentProfile == snap.baseline.name {
 			cfg.CurrentProfile = ""
 		}
 		committed, err := s.persist(cfg)
 		if !committed {
 			return CommitResult{}, err
 		}
-		return s.afterCommit(cfg, snap.original, err), nil
+		return s.afterCommit(cfg, snap.baseline.original, err), nil
 	})
 }
 
@@ -181,7 +188,7 @@ func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
 // origin or Space needs a token verified against that target via Import.
 func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) error {
 	_, err := s.modify(snap, func(_ *config.ProfileConfig) (CommitResult, error) {
-		if snap.original == nil || snap.original.APIBaseURL != apiBaseURL || apiBaseURL == "" {
+		if snap.baseline.original == nil || snap.baseline.original.APIBaseURL != apiBaseURL || apiBaseURL == "" {
 			return CommitResult{}, errors.New("re-import a verified Token to change the API origin")
 		}
 		return CommitResult{}, nil
@@ -190,11 +197,12 @@ func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) er
 }
 
 func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfig) (CommitResult, error)) (CommitResult, error) {
-	if snap.dir != s.dir || snap.name == "" || strings.TrimSpace(snap.name) != snap.name {
+	base := snap.baseline
+	if base == nil || base.dir != s.dir || base.name == "" || strings.TrimSpace(base.name) != base.name {
 		return CommitResult{}, errors.New("a valid target profile is required")
 	}
 	// Check the strict loader before creating a lock in a legacy directory.
-	if _, err := config.LoadProfileConfigIn(s.dir, false); err != nil {
+	if _, err := s.loadWritableConfig(); err != nil {
 		return CommitResult{}, err
 	}
 	if err := ensurePrivateDir(s.dir); err != nil {
@@ -206,19 +214,27 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 	}
 	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
 
-	cfg, err := config.LoadProfileConfigIn(s.dir, false)
+	cfg, err := s.loadWritableConfig()
 	if err != nil {
 		return CommitResult{}, err
 	}
 	if cfg == nil {
 		cfg = &config.ProfileConfig{Version: json.RawMessage("1"), Profiles: map[string]*config.Profile{}}
 	}
-	actual, exists := cfg.Profiles[snap.name]
-	if (snap.implicit && cfg.CurrentProfile != snap.name) ||
-		exists != (snap.original != nil) || !reflect.DeepEqual(actual, snap.original) {
+	actual, exists := cfg.Profiles[base.name]
+	if (base.implicit && cfg.CurrentProfile != base.name) ||
+		exists != (base.original != nil) || !reflect.DeepEqual(actual, base.original) {
 		return CommitResult{}, ErrProfileConflict
 	}
 	return fn(cfg)
+}
+
+func (s *ManagedStore) loadWritableConfig() (*config.ProfileConfig, error) {
+	info, err := os.Lstat(filepath.Join(s.dir, configFile))
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("cannot modify a symlinked profile configuration")
+	}
+	return config.LoadProfileConfigIn(s.dir, false)
 }
 
 func (s *ManagedStore) persist(cfg *config.ProfileConfig) (bool, error) {
@@ -263,7 +279,7 @@ func (s *ManagedStore) stageToken(token, backend string) (*config.TokenSource, e
 		switch {
 		case err == nil:
 			return s.verifyEntry(ref, token)
-		case backend == BackendKeychain || !errors.Is(err, errKeychainUnavailable):
+		case backend == BackendKeychain || (!errors.Is(err, errKeychainUnavailable) && !errors.Is(err, errKeychainEntryTooLarge)):
 			return nil, err
 		}
 	}

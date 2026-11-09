@@ -1138,11 +1138,9 @@ func TestPhaseOneAuthDoesNotFallBackToLegacyCredentials(t *testing.T) {
 			commands := [][]string{
 				{"status"},
 				{"login", "--with-token"},
-				{"update", "--api-base-url", "https://other.example"},
-				{"logout"},
 			}
 			if tc.modeError != "" {
-				commands = append([][]string{{"list"}}, commands...)
+				commands = append(commands, []string{"list"}, []string{"update", "--api-base-url", "https://other.example"}, []string{"logout"})
 			}
 			for _, command := range commands {
 				name := command[0]

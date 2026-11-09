@@ -74,12 +74,15 @@ func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:     "update",
-		Short:   "Update non-secret settings for a stored bot profile",
-		Long:    "Updates the selected profile's API base URL, or clears it with --clear-api-base-url. This local mutation rejects --dry-run.",
-		Args:    cobra.NoArgs,
-		PreRunE: authMutationPreRun(f, "omit --dry-run to update the stored profile"),
+		Use:   "update",
+		Short: "Update non-secret settings for a stored profile",
+		Long:  "Updates the selected legacy profile's API base URL, or clears it with --clear-api-base-url. Re-import a verified Token to change a unified profile's API base URL. This local mutation rejects --dry-run.",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unified, err := authProfileMutationMode(f, cmd.Name())
+			if err != nil {
+				return failErr(f, err)
+			}
 			if clearAPIBaseURL && cmd.Flags().Changed("api-base-url") {
 				return failErr(f, output.ErrValidation(
 					"--api-base-url and --clear-api-base-url are mutually exclusive",
@@ -105,6 +108,9 @@ func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
 				apiBaseURL = normalized
 			}
 
+			if unified {
+				return confirmUnifiedProfileTarget(f, apiBaseURL)
+			}
 			store, err := f.AuthStore()
 			if err != nil {
 				return failErr(f, err)
@@ -311,12 +317,18 @@ func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 
 func newAuthLogoutCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
-		Use:     "logout",
-		Short:   "Remove a stored bot credential",
-		Long:    "Removes the selected local profile. This local mutation rejects --dry-run.",
-		Args:    cobra.NoArgs,
-		PreRunE: authMutationPreRun(f, "omit --dry-run to remove the stored profile"),
+		Use:   "logout",
+		Short: "Remove a stored credential",
+		Long:  "Removes the selected local profile. This local mutation rejects --dry-run.",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unified, err := authProfileMutationMode(f, cmd.Name())
+			if err != nil {
+				return failErr(f, err)
+			}
+			if unified {
+				return logoutUnifiedProfile(f)
+			}
 			store, err := f.AuthStore()
 			if err != nil {
 				return failErr(f, err)

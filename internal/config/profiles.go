@@ -49,9 +49,9 @@ func LoadProfileConfig() (*ProfileConfig, error) {
 }
 
 // ProfileDirectory resolves the same configuration directory for reads and writes.
-func ProfileDirectory() (string, bool, error) {
-	dir := os.Getenv(EnvConfigDir)
-	override := dir != ""
+func ProfileDirectory() (dir string, override bool, err error) {
+	dir = os.Getenv(EnvConfigDir)
+	override = dir != ""
 	if !override {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -59,7 +59,7 @@ func ProfileDirectory() (string, bool, error) {
 		}
 		dir = filepath.Join(home, ".octo", "cli")
 	}
-	dir, err := filepath.Abs(dir)
+	dir, err = filepath.Abs(dir)
 	return dir, override, err
 }
 

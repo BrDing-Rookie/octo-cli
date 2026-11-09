@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 )
 
 const (
@@ -19,7 +18,10 @@ const (
 	keyInFile       = 2
 )
 
-var errKeychainUnavailable = errors.New("system keychain unavailable")
+var (
+	errKeychainUnavailable   = errors.New("system keychain unavailable")
+	errKeychainEntryTooLarge = errors.New("credential exceeds the system Keychain command limit")
+)
 
 // Keychain provides system-backed storage for one OS user.
 type Keychain interface {
@@ -30,9 +32,14 @@ type Keychain interface {
 
 type unavailableKeychain struct{}
 
+// Read reports that no system provider is available.
 func (unavailableKeychain) Read(string) ([]byte, error) { return nil, errKeychainUnavailable }
+
+// Create reports that no system provider is available.
 func (unavailableKeychain) Create(string, []byte) error { return errKeychainUnavailable }
-func (unavailableKeychain) Remove(string) error         { return errKeychainUnavailable }
+
+// Remove reports that no system provider is available.
+func (unavailableKeychain) Remove(string) error { return errKeychainUnavailable }
 
 func (s *ManagedStore) account(entry string) string {
 	digest := sha256.Sum256([]byte(s.dir))
@@ -105,8 +112,8 @@ func (s *ManagedStore) masterKey(location byte) ([32]byte, error) {
 	return [32]byte(raw), nil
 }
 
-func (s *ManagedStore) masterKeyForWrite() ([32]byte, byte, error) {
-	key, err := s.masterKey(keyInKeychain)
+func (s *ManagedStore) masterKeyForWrite() (key [32]byte, location byte, err error) {
+	key, err = s.masterKey(keyInKeychain)
 	switch {
 	case err == nil:
 		return key, keyInKeychain, nil
@@ -142,10 +149,7 @@ func ensurePrivateDir(path string) error {
 	if !info.IsDir() {
 		return errors.New("managed storage path must be a directory")
 	}
-	if runtime.GOOS != "windows" && info.Mode().Perm() != dirPerm {
-		return os.Chmod(path, dirPerm)
-	}
-	return nil
+	return protectManagedPath(path, info, dirPerm)
 }
 
 func readPrivateFile(path string, limit int64) ([]byte, error) {
@@ -153,7 +157,10 @@ func readPrivateFile(path string, limit int64) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := validatePrivateFile(info); err != nil {
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("managed storage requires a regular file")
+	}
+	if err := checkManagedFilePrivacy(path, info); err != nil {
 		return nil, err
 	}
 	file, err := os.Open(path)
@@ -168,20 +175,10 @@ func readPrivateFile(path string, limit int64) ([]byte, error) {
 	return data, errors.Join(readErr, closeErr)
 }
 
-func validatePrivateFile(info os.FileInfo) error {
-	if !info.Mode().IsRegular() {
-		return errors.New("managed storage requires a regular file")
-	}
-	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return errors.New("managed storage file must be private")
-	}
-	return nil
-}
-
 func openManagedLock(path string) (*os.File, error) {
 	if info, err := os.Lstat(path); err == nil {
-		if err := validatePrivateFile(info); err != nil {
-			return nil, err
+		if !info.Mode().IsRegular() {
+			return nil, errors.New("managed lock must be a regular file")
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
@@ -206,12 +203,23 @@ func writeManagedFile(path string, data []byte) (bool, error) {
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }() //nolint:errcheck // no-op after replacement
 
+	if err := secureManagedTemp(tmp); err != nil {
+		return false, errors.Join(err, tmp.Close())
+	}
 	_, err = tmp.Write(data)
 	if err == nil {
 		err = tmp.Sync()
 	}
-	if err = errors.Join(err, tmp.Close()); err != nil {
+	if err := errors.Join(err, tmp.Close()); err != nil {
 		return false, err
 	}
 	return replaceManagedFile(tmp.Name(), path)
+}
+
+func secureManagedTemp(tmp *os.File) error {
+	info, err := tmp.Stat()
+	if err != nil {
+		return err
+	}
+	return protectManagedPath(tmp.Name(), info, secPerm)
 }
