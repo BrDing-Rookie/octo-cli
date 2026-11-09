@@ -251,6 +251,38 @@ func TestUnifiedAuthStatusRedactsBearerInMetadata(t *testing.T) {
 	}
 }
 
+func TestUnifiedAuthStatusRedactsEnvironmentBearerInMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, env, status, source string
+	}{
+		{"readable", config.EnvToken, "readable", "profile:token_file"},
+		{"missing", config.EnvToken, "missing", ""},
+		{"shadowed alias", config.EnvBotToken, "missing", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			const secret = "runtime-fixture-secret"
+			const origin = "https://" + secret + ".example"
+			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+			t.Setenv(config.EnvToken, "other-environment-bearer")
+			t.Setenv(tc.env, " "+secret+"\n")
+			t.Setenv(config.EnvSpaceID, secret)
+			t.Setenv(config.EnvAPIBaseURL, origin)
+			if tc.status == "readable" {
+				phaseOneWrite(t, filepath.Join(dir, "token"), "stored-fixture-token")
+				phaseOneWrite(t, filepath.Join(dir, "config.json"), fmt.Sprintf(
+					`{"version":1,"profiles":{%q:{"api_base_url":%q,"token_source":{"type":"token_file","path":"token"}}}}`, secret, origin))
+			}
+			out, err := phaseOneRun("--format", "json", "--profile", secret, "auth", "status")
+			if strings.Contains(out, secret) {
+				t.Fatal("environment bearer appeared in status output")
+			}
+			const mask = "***REDACTED***"
+			assertUnifiedAuthStatus(t, out, err, tc.status, mask, "https://"+mask+".example", mask, tc.source)
+		})
+	}
+}
+
 func assertUnifiedAuthStatus(t *testing.T, out string, err error, status, profile, origin, space, source string) {
 	t.Helper()
 	var result struct {
