@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -91,7 +92,7 @@ func LoadProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil || cfg == nil {
 		return nil, fmt.Errorf("invalid config.json")
 	}
-	if allowLegacy && cfg.isLegacy() {
+	if allowLegacy && isLegacyProfileConfig(raw) {
 		return nil, nil
 	}
 	if string(cfg.Version) != "1" {
@@ -109,12 +110,25 @@ func (c *ProfileConfig) Directory() string {
 	return c.dir
 }
 
-func (c *ProfileConfig) isLegacy() bool {
-	if len(c.Version) != 0 || c.CurrentProfile != "" || c.Profiles == nil {
+func isLegacyProfileConfig(raw []byte) bool {
+	// Recognize the fields written by the Bot store. A malformed unversioned
+	// versioned-store file must not be interpreted as an absent credential.
+	var legacy struct {
+		Profiles map[string]*struct {
+			APIBaseURL string `json:"api_base_url"`
+			SpaceID    string `json:"space_id"`
+			RobotID    string `json:"robot_id"`
+			BotKind    string `json:"bot_kind"`
+			CreatedAt  string `json:"created_at"`
+		} `json:"profiles"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&legacy); err != nil || legacy.Profiles == nil {
 		return false
 	}
-	for _, p := range c.Profiles {
-		if p != nil && p.TokenSource != nil {
+	for _, p := range legacy.Profiles {
+		if p == nil || (p.RobotID == "" && p.BotKind == "" && p.CreatedAt == "") {
 			return false
 		}
 	}

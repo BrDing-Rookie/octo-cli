@@ -21,17 +21,18 @@ const (
 
 var errKeychainUnavailable = errors.New("system keychain unavailable")
 
-type managedKeychain interface {
-	read(account string) ([]byte, error)
-	create(account string, data []byte) error
-	remove(account string) error
+// Keychain provides system-backed storage for one OS user.
+type Keychain interface {
+	Read(account string) ([]byte, error)
+	Create(account string, data []byte) error
+	Remove(account string) error
 }
 
 type unavailableKeychain struct{}
 
-func (unavailableKeychain) read(string) ([]byte, error) { return nil, errKeychainUnavailable }
-func (unavailableKeychain) create(string, []byte) error { return errKeychainUnavailable }
-func (unavailableKeychain) remove(string) error         { return errKeychainUnavailable }
+func (unavailableKeychain) Read(string) ([]byte, error) { return nil, errKeychainUnavailable }
+func (unavailableKeychain) Create(string, []byte) error { return errKeychainUnavailable }
+func (unavailableKeychain) Remove(string) error         { return errKeychainUnavailable }
 
 func (s *ManagedStore) account(entry string) string {
 	digest := sha256.Sum256([]byte(s.dir))
@@ -89,7 +90,7 @@ func (s *ManagedStore) masterKey(location byte) ([32]byte, error) {
 	var err error
 	switch location {
 	case keyInKeychain:
-		raw, err = s.keychain.read(s.account("master-key"))
+		raw, err = s.keychain.Read(s.account("master-key"))
 	case keyInFile:
 		raw, err = readPrivateFile(s.masterKeyPath(), 32)
 	default:
@@ -113,7 +114,7 @@ func (s *ManagedStore) masterKeyForWrite() ([32]byte, byte, error) {
 		if _, err = rand.Read(key[:]); err != nil {
 			return key, 0, err
 		}
-		err = s.keychain.create(s.account("master-key"), key[:])
+		err = s.keychain.Create(s.account("master-key"), key[:])
 		if err == nil {
 			return key, keyInKeychain, nil
 		}

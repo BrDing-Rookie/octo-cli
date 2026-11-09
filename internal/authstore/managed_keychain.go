@@ -1,5 +1,7 @@
+//go:build !darwin
+
 package authstore
 
-func systemKeychain() managedKeychain {
+func systemKeychain() Keychain {
 	return unavailableKeychain{}
 }

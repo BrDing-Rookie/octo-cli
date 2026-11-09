@@ -31,7 +31,7 @@ var ErrProfileConflict = errors.New("profile changed while validating the creden
 type ManagedStore struct {
 	dir         string
 	allowLegacy bool
-	keychain    managedKeychain
+	keychain    Keychain
 	writeConfig func(string, []byte) (bool, error)
 }
 
@@ -65,7 +65,16 @@ func OpenManaged() (*ManagedStore, error) {
 }
 
 func managedIn(dir string) *ManagedStore {
-	return &ManagedStore{dir: dir, keychain: systemKeychain(), writeConfig: writeManagedFile}
+	return NewManagedStore(dir, systemKeychain())
+}
+
+// NewManagedStore injects a Keychain for an absolute configuration directory.
+// A nil Keychain represents a platform without system storage.
+func NewManagedStore(dir string, keychain Keychain) *ManagedStore {
+	if keychain == nil {
+		keychain = unavailableKeychain{}
+	}
+	return &ManagedStore{dir: dir, keychain: keychain, writeConfig: writeManagedFile}
 }
 
 // Snapshot reads only metadata. A missing target has Exists=false, while an
@@ -250,7 +259,7 @@ func (s *ManagedStore) stageToken(token, backend string) (*config.TokenSource, e
 	ref := &config.TokenSource{Type: "managed_store", Entry: hex.EncodeToString(id[:]), Backend: backend}
 	if backend != BackendEncryptedFile {
 		ref.Backend = BackendKeychain
-		err := s.keychain.create(s.account(ref.Entry), []byte(token))
+		err := s.keychain.Create(s.account(ref.Entry), []byte(token))
 		switch {
 		case err == nil:
 			return s.verifyEntry(ref, token)
@@ -283,7 +292,7 @@ func (s *ManagedStore) readEntry(ref *config.TokenSource) (string, error) {
 		return "", err
 	}
 	if ref.Backend == BackendKeychain {
-		data, err := s.keychain.read(s.account(ref.Entry))
+		data, err := s.keychain.Read(s.account(ref.Entry))
 		return string(data), err
 	}
 	return s.readEncrypted(ref.Entry)
@@ -294,7 +303,7 @@ func (s *ManagedStore) removeEntry(ref *config.TokenSource) error {
 		return err
 	}
 	if ref.Backend == BackendKeychain {
-		return s.keychain.remove(s.account(ref.Entry))
+		return s.keychain.Remove(s.account(ref.Entry))
 	}
 	if err := os.Remove(s.encryptedPath(ref.Entry)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
