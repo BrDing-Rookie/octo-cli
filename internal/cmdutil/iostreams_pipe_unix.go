@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func (w stdoutPipeWriter) Write(data []byte) (int, error) {
+func (w standardPipeWriter) Write(data []byte) (int, error) {
 	file, ok := w.out.(*os.File)
 	if !ok {
 		return w.out.Write(data)

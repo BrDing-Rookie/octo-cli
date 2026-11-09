@@ -165,6 +165,37 @@ func TestUnifiedAuthCurrentBrokenStdoutPreservesCommittedToken(t *testing.T) {
 	}
 }
 
+func TestUnifiedAuthCurrentBrokenStderrPreservesSuccessfulImport(t *testing.T) {
+	dir := phaseOneEnv(t)
+	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+	store := authstore.NewManagedStore(dir, nil)
+	candidate := authCurrentFixtureCandidateToken
+	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
+		candidate: authCurrentFixtureSuccess("candidate-id", "owner", "space"),
+	})
+	originalEntry := seedAuthCurrentProfile(t, store, "target", server.URL, "space", authCurrentFixtureStoredToken)
+	obstructAuthCurrentCleanup(t, dir, originalEntry)
+	reader, stderr := authCurrentTestPipe(t)
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+	defer cancel()
+	proc := exec.CommandContext(ctx, os.Args[0], authCurrentOutputProcessArg, authCurrentRawStdout,
+		"--format", "json", "--profile", "target", "--jq", ".data.profile", "auth", "login", "--with-token")
+	proc.Stdin = strings.NewReader(candidate)
+	proc.Stderr = stderr
+	stdout, err := proc.Output()
+	if err != nil || string(stdout) != "\"target\"\n" {
+		t.Fatalf("expected exit code 0 and complete jq output after broken stderr: %v (%q)", err, stdout)
+	}
+	if len(requests()) != 1 {
+		t.Fatal("expected one candidate verification request")
+	}
+	assertAuthCurrentCommittedToken(t, store, originalEntry, candidate)
+}
+
 func assertAuthCurrentCommittedToken(t *testing.T, store *authstore.ManagedStore, originalEntry, candidate string) {
 	t.Helper()
 	snap, err := store.Snapshot("target", true)

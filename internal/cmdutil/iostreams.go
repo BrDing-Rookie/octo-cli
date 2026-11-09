@@ -29,11 +29,17 @@ func (s *IOStreams) WriteStdout(ctx context.Context, data []byte) error {
 // WriteStdoutAfterCommit also reports a broken standard pipe as a write error
 // on Unix so the caller can report the outcome of a completed mutation.
 func (s *IOStreams) WriteStdoutAfterCommit(ctx context.Context, data []byte) error {
-	_, err := writeStream(ctx, stdoutPipeWriter{out: s.Out}, data, 0)
+	_, err := writeStream(ctx, standardPipeWriter{out: s.Out}, data, 0)
 	return err
 }
 
-type stdoutPipeWriter struct {
+// StderrAfterCommit keeps diagnostics cancellable and reports a broken
+// standard pipe as a write error on Unix.
+func (s *IOStreams) StderrAfterCommit(ctx context.Context) io.Writer {
+	return contextStreamWriter{ctx: ctx, out: standardPipeWriter{out: s.ErrOut}}
+}
+
+type standardPipeWriter struct {
 	out io.Writer
 }
 

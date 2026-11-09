@@ -429,7 +429,7 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 		warning := client.RedactBearer(result.CleanupWarning, token)
 		if filtered {
 			// Cleanup runs after commit, so report its warning outside the jq result.
-			writeUI(f.IOStreams.StderrWithContext(ctx), warning+"\n")
+			writeUI(f.IOStreams.StderrAfterCommit(ctx), warning+"\n")
 		} else {
 			payload["cleanup_warning"] = warning
 		}
