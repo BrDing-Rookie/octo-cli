@@ -45,6 +45,17 @@ type authTokenMetadata struct {
 	CreatedAt  *time.Time                      `json:"created_at"`
 	UpdatedAt  *time.Time                      `json:"updated_at"`
 	LastUsedAt authRequiredNullable[time.Time] `json:"last_used_at"`
+	seen       bool
+}
+
+// UnmarshalJSON rejects another token object instead of merging its fields.
+func (meta *authTokenMetadata) UnmarshalJSON(data []byte) error {
+	if meta.seen {
+		return errors.New("duplicate TokenSelf token field")
+	}
+	meta.seen = true
+	type wireMetadata authTokenMetadata
+	return json.Unmarshal(data, (*wireMetadata)(meta))
 }
 
 // authRequiredNullable distinguishes an omitted field from an explicit null
@@ -227,7 +238,7 @@ func readUnifiedLoginToken(ctx context.Context, stdin io.Reader) (string, error)
 }
 
 func requestAuthCurrent(ctx context.Context, f *cmdutil.Factory, cred *credential.BusinessContext) ([]byte, error) {
-	return f.NewBusinessClient(cred).Do(ctx, &client.Request{
+	return f.NewBusinessClientContext(ctx, cred).Do(ctx, &client.Request{
 		Method: http.MethodGet,
 		Path:   authCurrentPath,
 	})
@@ -367,7 +378,7 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 		warning := client.RedactBearer(result.CleanupWarning, token)
 		if filtered {
 			// Cleanup runs after commit, so report its warning outside the jq result.
-			writeUI(f.IOStreams.ErrOut, warning+"\n")
+			writeUI(f.IOStreams.StderrWithContext(ctx), warning+"\n")
 		} else {
 			payload["cleanup_warning"] = warning
 		}

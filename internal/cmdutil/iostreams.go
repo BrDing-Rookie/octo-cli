@@ -22,12 +22,30 @@ type IOStreams struct {
 // WriteStdout writes a rendered response and lets the CLI exit on cancellation
 // even when an inherited stdout pipe stays blocked.
 func (s *IOStreams) WriteStdout(ctx context.Context, data []byte) error {
-	return writeStream(ctx, s.Out, data, 0)
+	_, err := writeStream(ctx, s.Out, data, 0)
+	return err
 }
 
-func writeStream(ctx context.Context, out io.Writer, data []byte, grace time.Duration) error {
+// StderrWithContext lets best-effort diagnostics stop waiting on cancellation.
+func (s *IOStreams) StderrWithContext(ctx context.Context) io.Writer {
+	if ctx.Done() == nil || s.ErrOut == nil {
+		return s.ErrOut
+	}
+	return contextStreamWriter{ctx: ctx, out: s.ErrOut}
+}
+
+type contextStreamWriter struct {
+	ctx context.Context
+	out io.Writer
+}
+
+func (w contextStreamWriter) Write(data []byte) (int, error) {
+	return writeStream(w.ctx, w.out, data, 0)
+}
+
+func writeStream(ctx context.Context, out io.Writer, data []byte, grace time.Duration) (int, error) {
 	if len(data) == 0 {
-		return nil
+		return 0, nil
 	}
 	writeCtx := ctx
 	if grace > 0 {
@@ -35,17 +53,17 @@ func writeStream(ctx context.Context, out io.Writer, data []byte, grace time.Dur
 		writeCtx = context.WithoutCancel(ctx)
 	}
 	if err := writeCtx.Err(); err != nil {
-		return err
+		return 0, err
 	}
-	write := func(data []byte) error {
+	write := func(data []byte) (int, error) {
 		if err := writeCtx.Err(); err != nil {
-			return err
+			return 0, err
 		}
 		n, err := out.Write(data)
 		if err == nil && n != len(data) {
-			return io.ErrShortWrite
+			return n, io.ErrShortWrite
 		}
-		return err
+		return n, err
 	}
 	if ctx.Done() == nil {
 		return write(data)
@@ -53,26 +71,33 @@ func writeStream(ctx context.Context, out io.Writer, data []byte, grace time.Dur
 	// The underlying writer can still be blocked when this method returns.
 	// Give the write its own copy so the caller may release or reuse its buffer.
 	data = bytes.Clone(data)
-	done := make(chan error, 1)
-	go func() { done <- write(data) }()
+	type writeResult struct {
+		n   int
+		err error
+	}
+	done := make(chan writeResult, 1)
+	go func() {
+		n, err := write(data)
+		done <- writeResult{n: n, err: err}
+	}()
 	select {
-	case err := <-done:
-		return err
+	case result := <-done:
+		return result.n, result.err
 	case <-ctx.Done():
 		if grace > 0 {
 			timer := time.NewTimer(grace)
 			defer timer.Stop()
 			select {
-			case err := <-done:
-				return err
+			case result := <-done:
+				return result.n, result.err
 			case <-timer.C:
 			}
 		}
 		select {
-		case err := <-done:
-			return err
+		case result := <-done:
+			return result.n, result.err
 		default:
-			return ctx.Err()
+			return 0, ctx.Err()
 		}
 	}
 }

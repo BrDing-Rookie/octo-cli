@@ -44,11 +44,15 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 		t.Setenv(config.EnvToken, "wrong-runtime-token")
 		t.Setenv(config.EnvTokenFile, filepath.Join(dir, "does-not-exist"))
 		t.Setenv(config.EnvAPIBaseURL, "https://unused.example.invalid")
-		stdout, stderr, err := runUnifiedAuthCurrent(store, strings.NewReader(candidate+"\n"),
-			"--verbose", "--profile", "target", "--space", "new-space",
+		stdout, stderr, err := runUnifiedAuthCurrentContext(t.Context(), store, strings.NewReader(candidate+"\n"),
+			"--verbose", "--timeout", "invalid-duration", "--profile", "target", "--space", "new-space",
 			"auth", "login", "--api-base-url", server.URL, "--owner-id", "owner", "--with-token")
 		if err != nil || !strings.Contains(stdout, "managed_store") {
 			t.Fatalf("import: %v (%s %s)", err, stdout, stderr)
+		}
+		if !strings.Contains(stderr, "warning: invalid --timeout") || !strings.Contains(stderr, "[octo] GET ") ||
+			!strings.Contains(stderr, "[octo] ← 200") {
+			t.Fatalf("missing request diagnostics on writable stderr: %s", stderr)
 		}
 		assertAuthCurrentRedaction(t, candidate, stdout, stderr)
 	})
@@ -274,6 +278,8 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 	expired.body = strings.Replace(expired.body, `"is_expired":false`, `"is_expired":true`, 1)
 	revoked := active
 	revoked.body = strings.Replace(revoked.body, `"status":"active"`, `"status":"revoked"`, 1)
+	duplicateToken := revoked
+	duplicateToken.body = strings.Replace(duplicateToken.body, authCurrentFixtureTokenEnd, authCurrentFixtureDuplicateToken, 1)
 	missingMetadata := active
 	missingMetadata.body = strings.NewReplacer(
 		`,"version":1`, "",
@@ -298,6 +304,7 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		{"mixed success and error", candidate, "INVALID_TOKEN_SELF", "api_error", active.withEnvelopeError(authCurrentFixtureEnvelopeError), true},
 		{"duplicate error with trailing null", candidate, "INVALID_TOKEN_SELF", "api_error", active.withEnvelopeError(authCurrentFixtureEnvelopeError, "null"), true},
 		{"duplicate null errors", candidate, "INVALID_TOKEN_SELF", "api_error", active.withEnvelopeError("null", "null"), true},
+		{"duplicate token", candidate, "INVALID_TOKEN_SELF", "api_error", duplicateToken, true},
 		{"null action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[null]`), true},
 		{"empty action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[""]`), true},
 		{"blank action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["   "]`), true},
@@ -505,6 +512,7 @@ func TestUnifiedAuthCurrentGetRejectsInvalidTokenSelf(t *testing.T) {
 		{"mixed success and error", `{"data":`, `{"error":` + authCurrentFixtureEnvelopeError + `,"data":`},
 		{"duplicate error with trailing null", `{"data":`, `{"error":` + authCurrentFixtureEnvelopeError + `,"error":null,"data":`},
 		{"duplicate null errors", `{"data":`, `{"error":null,"error":null,"data":`},
+		{"duplicate token", authCurrentFixtureTokenEnd, authCurrentFixtureDuplicateToken},
 		{"null action", `["task:read"]`, `[null]`},
 		{"empty action", `["task:read"]`, `[""]`},
 		{"blank action", `["task:read"]`, `["   "]`},

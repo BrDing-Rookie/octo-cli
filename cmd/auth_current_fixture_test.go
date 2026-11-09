@@ -25,6 +25,11 @@ const (
 	authCurrentFixtureEnvelopeError   = `{"code":"AUTH_REQUIRED","message":"fixture authorization error"}`
 )
 
+const (
+	authCurrentFixtureTokenEnd       = `"last_used_at":null}`
+	authCurrentFixtureDuplicateToken = authCurrentFixtureTokenEnd + `,"token":{"status":"active"}`
+)
+
 type authCurrentFixtureReply struct {
 	status              int
 	body                string

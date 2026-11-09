@@ -25,19 +25,22 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-const authCurrentStdoutProcessArg = "--test-auth-current-stdout"
+const authCurrentOutputProcessArg = "--test-auth-current-output"
 
-func TestUnifiedAuthCurrentCancelWhileWritingStdout(t *testing.T) {
+func TestUnifiedAuthCurrentCancelWhileWritingOutput(t *testing.T) {
 	for _, tc := range []struct {
-		name, code string
-		args       []string
-		wantCalls  int
-		commits    bool
+		name, code, diagnostic string
+		args                   []string
+		wantCalls              int
+		commits                bool
 	}{
-		{"online get", "NETWORK_ERROR", []string{"auth", "get"}, 1, false},
-		{"dry-run get", "NETWORK_ERROR", []string{"--dry-run", "auth", "get"}, 0, false},
-		{"login", "TOKEN_IMPORT_OUTPUT_FAILED", []string{"--profile", "target", "auth", "login", "--with-token"}, 1, true},
-		{"filtered login", "TOKEN_IMPORT_OUTPUT_FAILED", []string{"--profile", "target", "--jq", ".data.profile", "auth", "login", "--with-token"}, 1, true},
+		{"online get", "NETWORK_ERROR", "", []string{"auth", "get"}, 1, false},
+		{"dry-run get", "NETWORK_ERROR", "", []string{"--dry-run", "auth", "get"}, 0, false},
+		{"login", "TOKEN_IMPORT_OUTPUT_FAILED", "", []string{"--profile", "target", "auth", "login", "--with-token"}, 1, true},
+		{"filtered login", "TOKEN_IMPORT_OUTPUT_FAILED", "", []string{"--profile", "target", "--jq", ".data.profile", "auth", "login", "--with-token"}, 1, true},
+		{"verbose trace", "NETWORK_ERROR", "[octo] GET ", []string{"--verbose", "auth", "get"}, 0, false},
+		{"invalid timeout", "NETWORK_ERROR", "warning: invalid --timeout", []string{"--timeout", "invalid-duration", "auth", "get"}, 0, false},
+		{"cleanup warning", "TOKEN_IMPORT_OUTPUT_FAILED", "previous managed credential could not be removed", []string{"--profile", "target", "--jq", ".data.profile", "auth", "login", "--with-token"}, 1, true},
 	} {
 		for _, run := range []struct {
 			sig    syscall.Signal
@@ -46,6 +49,9 @@ func TestUnifiedAuthCurrentCancelWhileWritingStdout(t *testing.T) {
 			{syscall.SIGINT, false}, {syscall.SIGTERM, false},
 			{syscall.SIGINT, true}, {syscall.SIGTERM, true},
 		} {
+			if tc.diagnostic != "" && !tc.commits && !run.merged {
+				continue // These request diagnostics precede the HTTP call.
+			}
 			name := tc.name + "/" + run.sig.String()
 			if run.merged {
 				name += "/merged"
@@ -64,10 +70,24 @@ func TestUnifiedAuthCurrentCancelWhileWritingStdout(t *testing.T) {
 				var originalEntry string
 				if tc.commits {
 					originalEntry = seedAuthCurrentProfile(t, store, "target", server.URL, "space", old)
+					if tc.diagnostic != "" {
+						obstructAuthCurrentCleanup(t, dir, originalEntry)
+					}
 				}
 
-				stderr := cancelAuthCurrentStdoutProcess(t, run.sig, run.merged, candidate, tc.args)
+				var watchDiagnostic string
+				if run.merged {
+					watchDiagnostic = tc.diagnostic
+				}
+				stderr := cancelAuthCurrentOutputProcess(t, run.sig, run.merged, watchDiagnostic, candidate, tc.args)
 				if !run.merged {
+					if tc.diagnostic != "" {
+						warning, envelope, _ := bytes.Cut(stderr, []byte("\n"))
+						if !strings.Contains(string(warning), tc.diagnostic) {
+							t.Fatalf("missing cleanup warning on writable stderr: %s", stderr)
+						}
+						stderr = envelope
+					}
 					var envelope struct {
 						Error struct{ Code string }
 					}
@@ -102,14 +122,29 @@ func TestUnifiedAuthCurrentCancelWhileWritingStdout(t *testing.T) {
 	}
 }
 
-func cancelAuthCurrentStdoutProcess(t *testing.T, sig syscall.Signal, merged bool, stdin string, args []string) []byte {
+func obstructAuthCurrentCleanup(t *testing.T, dir, entry string) {
+	t.Helper()
+	path := filepath.Join(dir, "credentials", entry+".enc")
+	// Only the old entry's removal fails. New encrypted entries can still be staged.
+	if err := os.Rename(path, path+".retained"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(path+".retained", filepath.Join(path, "retained")); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func cancelAuthCurrentOutputProcess(t *testing.T, sig syscall.Signal, merged bool, watchDiagnostic, stdin string, args []string) []byte {
 	t.Helper()
 	_, stdout := authCurrentTestPipe(t)
 	fillAuthCurrentStdoutPipe(t, stdout)
 	ready, notify := authCurrentTestPipe(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
 	defer cancel()
-	childArgs := append([]string{authCurrentStdoutProcessArg, "--format", "json"}, args...)
+	childArgs := append([]string{authCurrentOutputProcessArg, watchDiagnostic, "--format", "json"}, args...)
 	proc := exec.CommandContext(ctx, os.Args[0], childArgs...)
 	proc.Stdout = stdout
 	proc.Stdin = strings.NewReader(stdin)
@@ -136,7 +171,7 @@ func cancelAuthCurrentStdoutProcess(t *testing.T, sig syscall.Signal, merged boo
 	if _, err := io.ReadFull(ready, marker[:]); err != nil {
 		_ = proc.Process.Kill()
 		_ = proc.Wait()
-		t.Fatalf("child did not reach the stdout write: %v (%s)", err, stderr.String())
+		t.Fatalf("child did not reach the expected write: %v (%s)", err, stderr.String())
 	}
 	signalledAt := time.Now()
 	if err := proc.Process.Signal(sig); err != nil {
@@ -187,28 +222,36 @@ func fillAuthCurrentStdoutPipe(t *testing.T, pipe *os.File) {
 }
 
 type authCurrentNotifyingWriter struct {
-	stdout, ready *os.File
+	out, ready *os.File
+	match      string
 }
 
 func (w authCurrentNotifyingWriter) Write(data []byte) (int, error) {
-	if _, err := w.ready.Write([]byte{1}); err != nil {
-		return 0, err
+	if w.match == "" || bytes.Contains(data, []byte(w.match)) {
+		if _, err := w.ready.Write([]byte{1}); err != nil {
+			return 0, err
+		}
 	}
-	return w.stdout.Write(data)
+	return w.out.Write(data)
 }
 
 // The test subprocess uses the fixture environment before TestMain sweeps it.
 func init() {
-	if len(os.Args) < 2 || os.Args[1] != authCurrentStdoutProcessArg {
+	if len(os.Args) < 3 || os.Args[1] != authCurrentOutputProcessArg {
 		return
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	f := cmdutil.NewDefaultFactory()
 	store := authstore.NewManagedStore(os.Getenv("OCTO_CONFIG_DIR"), nil)
 	f.ManagedStoreFunc = func() (*authstore.ManagedStore, error) { return store, nil }
-	f.IOStreams.Out = authCurrentNotifyingWriter{stdout: os.Stdout, ready: os.NewFile(3, "ready")}
+	ready := os.NewFile(3, "ready")
+	if watchDiagnostic := os.Args[2]; watchDiagnostic != "" {
+		f.IOStreams.ErrOut = authCurrentNotifyingWriter{out: os.Stderr, ready: ready, match: watchDiagnostic}
+	} else {
+		f.IOStreams.Out = authCurrentNotifyingWriter{out: os.Stdout, ready: ready}
+	}
 	root := NewRootCmd(f)
-	root.SetArgs(os.Args[2:])
+	root.SetArgs(os.Args[3:])
 	err := root.ExecuteContext(ctx)
 	stop()
 	if err != nil {

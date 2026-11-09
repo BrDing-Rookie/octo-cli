@@ -455,7 +455,14 @@ func (f *Factory) RedactUnifiedBearer(s string) string {
 
 // NewBusinessClient applies the same runtime options to an already selected bearer.
 func (f *Factory) NewBusinessClient(cred *credential.BusinessContext) *client.Client {
-	return client.NewBusiness(cred, f.clientOptions())
+	return f.NewBusinessClientContext(context.Background(), cred)
+}
+
+// NewBusinessClientContext applies ctx to the client's diagnostic writes.
+func (f *Factory) NewBusinessClientContext(ctx context.Context, cred *credential.BusinessContext) *client.Client {
+	opts := f.clientOptions()
+	opts.ErrOut = f.IOStreams.StderrWithContext(ctx)
+	return client.NewBusiness(cred, opts)
 }
 
 func (f *Factory) clientOptions() client.Options {
@@ -773,7 +780,8 @@ func (f *Factory) EmitErrorContext(ctx context.Context, err error) error {
 	if err := output.WriteError(&rendered, wrapped); err != nil {
 		return err
 	}
-	return writeStream(ctx, f.IOStreams.ErrOut, rendered.Bytes(), canceledErrorWriteGrace)
+	_, writeErr := writeStream(ctx, f.IOStreams.ErrOut, rendered.Bytes(), canceledErrorWriteGrace)
+	return writeErr
 }
 
 // --- helpers ---
