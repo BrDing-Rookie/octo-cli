@@ -662,7 +662,7 @@ func (f *Factory) EmitSuccess(raw []byte) error {
 
 // EmitSuccessWithMeta is EmitSuccess plus envelope meta (rate limit, notice).
 func (f *Factory) EmitSuccessWithMeta(raw []byte, meta output.EnvelopeMeta) error {
-	return f.WriteSuccessWithMeta(f.IOStreams.Out, raw, meta)
+	return f.WriteSuccessWithMeta(context.Background(), f.IOStreams.Out, raw, meta)
 }
 
 // identityValue builds the envelope's identity field from the credential
@@ -709,9 +709,9 @@ func (f *Factory) identityValue() any {
 	return id
 }
 
-// WriteSuccessWithMeta renders the success response to w. A mutating command
-// can buffer the response here before committing and write it after commit.
-func (f *Factory) WriteSuccessWithMeta(w io.Writer, raw []byte, meta output.EnvelopeMeta) error {
+// WriteSuccessWithMeta renders the success response to w and uses ctx for jq
+// evaluation. A mutating command can buffer the response before committing.
+func (f *Factory) WriteSuccessWithMeta(ctx context.Context, w io.Writer, raw []byte, meta output.EnvelopeMeta) error {
 	if meta.Identity == nil {
 		meta.Identity = f.identityValue()
 	}
@@ -735,13 +735,15 @@ func (f *Factory) WriteSuccessWithMeta(w io.Writer, raw []byte, meta output.Enve
 	}
 
 	if f.Globals != nil && f.Globals.JQ != "" {
-		var results []any
-		var err error
-		if f.jqProgram != nil && f.jqExpression == f.Globals.JQ {
-			results, err = f.jqProgram.Apply(envelope)
-		} else {
-			results, err = output.ApplyJQ(envelope, f.Globals.JQ)
+		program := f.jqProgram
+		if program == nil || f.jqExpression != f.Globals.JQ {
+			var err error
+			program, err = output.CompileJQ(f.Globals.JQ)
+			if err != nil {
+				return err
+			}
 		}
+		results, err := program.ApplyContext(ctx, envelope)
 		if err != nil {
 			return err
 		}

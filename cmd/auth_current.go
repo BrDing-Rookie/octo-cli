@@ -33,18 +33,36 @@ type authTokenSelf struct {
 }
 
 type authTokenMetadata struct {
-	ID         string     `json:"token_id"`
-	OwnerID    string     `json:"owner_id"`
-	SpaceID    string     `json:"space_id"`
-	Name       *string    `json:"name"`
-	Remark     *string    `json:"remark"`
-	Status     string     `json:"status"`
-	ExpiresAt  *time.Time `json:"expires_at"`
-	IsExpired  *bool      `json:"is_expired"`
-	Version    *int64     `json:"version"`
-	CreatedAt  *time.Time `json:"created_at"`
-	UpdatedAt  *time.Time `json:"updated_at"`
-	LastUsedAt *time.Time `json:"last_used_at"`
+	ID         string                          `json:"token_id"`
+	OwnerID    string                          `json:"owner_id"`
+	SpaceID    string                          `json:"space_id"`
+	Name       *string                         `json:"name"`
+	Remark     authRequiredNullable[string]    `json:"remark"`
+	Status     string                          `json:"status"`
+	ExpiresAt  authRequiredNullable[time.Time] `json:"expires_at"`
+	IsExpired  *bool                           `json:"is_expired"`
+	Version    *int64                          `json:"version"`
+	CreatedAt  *time.Time                      `json:"created_at"`
+	UpdatedAt  *time.Time                      `json:"updated_at"`
+	LastUsedAt authRequiredNullable[time.Time] `json:"last_used_at"`
+}
+
+// authRequiredNullable distinguishes an omitted field from an explicit null
+// while preserving the field's JSON type and output representation.
+type authRequiredNullable[T any] struct {
+	value   *T
+	present bool
+}
+
+// UnmarshalJSON decodes the value and records that the field was present.
+func (field *authRequiredNullable[T]) UnmarshalJSON(data []byte) error {
+	field.present = true
+	return json.Unmarshal(data, &field.value)
+}
+
+// MarshalJSON emits the underlying value, including null.
+func (field authRequiredNullable[T]) MarshalJSON() ([]byte, error) {
+	return json.Marshal(field.value)
 }
 
 type authPermission struct {
@@ -246,7 +264,8 @@ func (s *authTokenSelf) valid() bool {
 func (m *authTokenMetadata) valid() bool {
 	return m.ID != "" && m.OwnerID != "" && m.SpaceID != "" && m.Name != nil &&
 		(m.Status == "active" || m.Status == "revoked") && m.IsExpired != nil &&
-		m.Version != nil && m.CreatedAt != nil && m.UpdatedAt != nil
+		m.Version != nil && m.CreatedAt != nil && m.UpdatedAt != nil &&
+		m.Remark.present && m.ExpiresAt.present && m.LastUsedAt.present
 }
 
 func (p authPermission) valid() bool {
@@ -300,13 +319,16 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 		if err != nil {
 			return err
 		}
-		return f.WriteSuccessWithMeta(w, raw, meta)
+		return f.WriteSuccessWithMeta(ctx, w, raw, meta)
 	}
 
 	filtered := f.Globals.JQ != ""
 	var rendered bytes.Buffer
 	if filtered {
 		if err := render(&rendered); err != nil {
+			if errors.Is(err, ctx.Err()) {
+				return authImportCanceled()
+			}
 			return err
 		}
 	}

@@ -144,6 +144,11 @@ func TestUnifiedAuthCurrentRedactsMetadataScalars(t *testing.T) {
 			if tc.oldJSON != "" {
 				reply.body = strings.Replace(reply.body, tc.oldJSON, tc.newJSON, 1)
 			}
+			reply.body = strings.NewReplacer(
+				`"remark":null`, `"remark":"fixture remark"`,
+				`"expires_at":null`, `"expires_at":"2028-01-23T06:00:00Z"`,
+				`"last_used_at":null`, `"last_used_at":"2026-11-04T06:01:00Z"`,
+			).Replace(reply.body)
 			reply.body = strings.Replace(reply.body, `"bot_name":"Fixture Bot"`, `"bot_name":"Fixture Bot","enabled":false`, 1)
 			server, _ := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{tc.bearer: reply})
 			t.Setenv(config.EnvAPIBaseURL, server.URL)
@@ -163,7 +168,8 @@ func TestUnifiedAuthCurrentRedactsMetadataScalars(t *testing.T) {
 				t.Fatal(err)
 			}
 			for field, want := range map[string]string{
-				"version": "9007199254740993", "status": `"active"`, "is_expired": "false", "expires_at": "null",
+				"version": "9007199254740993", "status": `"active"`, "is_expired": "false",
+				"remark": `"fixture remark"`, "expires_at": `"2028-01-23T06:00:00Z"`, "last_used_at": `"2026-11-04T06:01:00Z"`,
 			} {
 				if field == tc.field {
 					want = `"***REDACTED***"`
@@ -268,6 +274,11 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		`"created_at":"2026-11-04T06:00:00Z"`, `"created_at":null`,
 		`"updated_at":"2026-11-04T06:00:00Z"`, `"updated_at":null`,
 	).Replace(missingMetadata.body)
+	withoutNullableField := func(field string) authCurrentFixtureReply {
+		reply := active
+		reply.body = strings.Replace(reply.body, `,"`+field+`":null`, "", 1)
+		return reply
+	}
 	for _, tc := range []struct {
 		name, token, code, typ string
 		reply                  authCurrentFixtureReply
@@ -283,6 +294,9 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		{"blank action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["   "]`), true},
 		{"unqualified action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["read"]`), true},
 		{"missing required metadata", candidate, "INVALID_TOKEN_SELF", "api_error", missingMetadata, true},
+		{"missing remark", candidate, "INVALID_TOKEN_SELF", "api_error", withoutNullableField("remark"), true},
+		{"missing expiration", candidate, "INVALID_TOKEN_SELF", "api_error", withoutNullableField("expires_at"), true},
+		{"missing last use", candidate, "INVALID_TOKEN_SELF", "api_error", withoutNullableField("last_used_at"), true},
 		{"space", candidate, "VALIDATION_ERROR", "validation", authCurrentFixtureSuccess("id", "owner", "other-space"), true},
 		{"owner", candidate, "VALIDATION_ERROR", "validation", authCurrentFixtureSuccess("id", "other-owner", "space"), true},
 		{"expired", candidate, "TOKEN_EXPIRED", "auth_error", expired, true},
@@ -328,42 +342,74 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 }
 
 func TestUnifiedAuthCurrentJQFailurePreservesProfile(t *testing.T) {
-	dir := phaseOneEnv(t)
-	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
-	store := authstore.NewManagedStore(dir, nil)
-	candidate := authCurrentFixtureCandidateToken
-	old := authCurrentFixtureStoredToken
-	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
-		candidate: authCurrentFixtureSuccess("candidate-id", "owner", "new-space"),
-		old:       authCurrentFixtureSuccess("old-id", "owner", "old-space"),
-	})
-	seedAuthCurrentProfile(t, store, "target", server.URL, "old-space", old)
-	configPath := filepath.Join(dir, "config.json")
-	before, err := os.ReadFile(configPath)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name, query, typ, code string
+		cancelEvaluation       bool
+	}{
+		{"runtime error", ".data.profile | tonumber", "validation", "JQ_RUNTIME_ERROR", false},
+		{"cancel evaluation", "def spin: spin; .data.profile, spin", "network", "NETWORK_ERROR", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+			store := authstore.NewManagedStore(dir, nil)
+			candidate := authCurrentFixtureCandidateToken
+			old := authCurrentFixtureStoredToken
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			reply := authCurrentFixtureSuccess("candidate-id", "owner", "new-space")
+			if tc.cancelEvaluation {
+				reply.beforeReply = func() { time.AfterFunc(500*time.Millisecond, cancel) }
+			}
+			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
+				candidate: reply,
+				old:       authCurrentFixtureSuccess("old-id", "owner", "old-space"),
+			})
+			seedAuthCurrentProfile(t, store, "target", server.URL, "old-space", old)
+			configPath := filepath.Join(dir, "config.json")
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
 
-	stdout, stderr, err := runUnifiedAuthCurrent(store, strings.NewReader(candidate),
-		"--profile", "target", "--space", "new-space", "--jq", ".data.profile | tonumber", "auth", "login", "--with-token")
-	exit := output.AsExitError(err)
-	if exit == nil || exit.Type != "validation" || exit.Code != "JQ_RUNTIME_ERROR" || stdout != "" {
-		t.Errorf("expected JQ_RUNTIME_ERROR with no stdout: %v (%s %s)", err, stdout, stderr)
-	}
-	assertAuthCurrentRedaction(t, candidate, stdout, stderr)
-	after, err := os.ReadFile(configPath)
-	if err != nil || !bytes.Equal(before, after) {
-		t.Errorf("failed import changed the Profile configuration: %v", err)
-	}
+			type commandResult struct {
+				stdout, stderr string
+				err            error
+			}
+			done := make(chan commandResult, 1)
+			go func() {
+				stdout, stderr, err := runUnifiedAuthCurrentContext(ctx, store, strings.NewReader(candidate),
+					"--profile", "target", "--space", "new-space", "--jq", tc.query, "auth", "login", "--with-token")
+				done <- commandResult{stdout: stdout, stderr: stderr, err: err}
+			}()
+			select {
+			case result := <-done:
+				exit := output.AsExitError(result.err)
+				if exit == nil || exit.Type != tc.typ || exit.Code != tc.code || result.stdout != "" {
+					t.Fatalf("expected %s with no stdout: %v (%s %s)", tc.code, result.err, result.stdout, result.stderr)
+				}
+				if tc.cancelEvaluation && exit.Message != "CLI Token import was cancelled" {
+					t.Fatalf("expected cancellation during import, got %v", exit)
+				}
+				assertAuthCurrentRedaction(t, candidate, result.stdout, result.stderr, result.err.Error())
+			case <-time.After(5 * time.Second):
+				t.Fatal("login did not exit while evaluating jq")
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Errorf("failed import changed the Profile configuration: %v", err)
+			}
 
-	stdout, stderr, err = runUnifiedAuthCurrent(store, strings.NewReader(""),
-		"--profile", "target", "--jq", ".data.token.token_id", "auth", "get")
-	if err != nil || strings.TrimSpace(stdout) != `"old-id"` {
-		t.Errorf("expected the previous Token to remain active: %v (%s %s)", err, stdout, stderr)
-	}
-	if calls := requests(); len(calls) != 2 || calls[0].authorization != "Bearer "+candidate ||
-		calls[0].space != "new-space" || calls[1].authorization != "Bearer "+old || calls[1].space != "old-space" {
-		t.Error("expected candidate verification followed by a request with the original Profile and Token")
+			stdout, stderr, err := runUnifiedAuthCurrent(store, strings.NewReader(""),
+				"--profile", "target", "--jq", ".data.token.token_id", "auth", "get")
+			if err != nil || strings.TrimSpace(stdout) != `"old-id"` {
+				t.Errorf("expected the previous Token to remain active: %v (%s %s)", err, stdout, stderr)
+			}
+			if calls := requests(); len(calls) != 2 || calls[0].authorization != "Bearer "+candidate ||
+				calls[0].space != "new-space" || calls[1].authorization != "Bearer "+old || calls[1].space != "old-space" {
+				t.Error("expected candidate verification followed by a request with the original Profile and Token")
+			}
+		})
 	}
 }
 
@@ -465,6 +511,9 @@ func TestUnifiedAuthCurrentGetRejectsInvalidTokenSelf(t *testing.T) {
 		{"null creation time", `"created_at":"2026-11-04T06:00:00Z"`, `"created_at":null`},
 		{"missing update time", `"updated_at":"2026-11-04T06:00:00Z",`, ""},
 		{"null update time", `"updated_at":"2026-11-04T06:00:00Z"`, `"updated_at":null`},
+		{"missing remark", `,"remark":null`, ""},
+		{"missing expiration", `,"expires_at":null`, ""},
+		{"missing last use", `,"last_used_at":null`, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := phaseOneEnv(t)
