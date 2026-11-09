@@ -107,8 +107,8 @@ func (r authCurrentFixtureReply) withVersion(version string) authCurrentFixtureR
 	return r
 }
 
-func (r authCurrentFixtureReply) withEnvelopeError(value string) authCurrentFixtureReply {
-	r.body = strings.Replace(r.body, `{"data":`, `{"error":`+value+`,"data":`, 1)
+func (r authCurrentFixtureReply) withEnvelopeError(values ...string) authCurrentFixtureReply {
+	r.body = strings.Replace(r.body, `{"data":`, `{"error":`+strings.Join(values, `,"error":`)+`,"data":`, 1)
 	return r
 }
 

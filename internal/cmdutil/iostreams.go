@@ -5,7 +5,10 @@ import (
 	"context"
 	"io"
 	"os"
+	"time"
 )
+
+const canceledErrorWriteGrace = 150 * time.Millisecond
 
 // IOStreams groups the three io streams a command uses: stdin (for @- input),
 // stdout (for envelope output), and stderr (for diagnostics / error envelopes).
@@ -19,15 +22,23 @@ type IOStreams struct {
 // WriteStdout writes a rendered response and lets the CLI exit on cancellation
 // even when an inherited stdout pipe stays blocked.
 func (s *IOStreams) WriteStdout(ctx context.Context, data []byte) error {
+	return writeStream(ctx, s.Out, data, 0)
+}
+
+func writeStream(ctx context.Context, out io.Writer, data []byte, grace time.Duration) error {
 	if len(data) == 0 {
 		return nil
 	}
-	if err := ctx.Err(); err != nil {
+	writeCtx := ctx
+	if grace > 0 {
+		// Error envelopes should still reach a writable stderr after cancellation.
+		writeCtx = context.WithoutCancel(ctx)
+	}
+	if err := writeCtx.Err(); err != nil {
 		return err
 	}
-	out := s.Out
 	write := func(data []byte) error {
-		if err := ctx.Err(); err != nil {
+		if err := writeCtx.Err(); err != nil {
 			return err
 		}
 		n, err := out.Write(data)
@@ -48,6 +59,15 @@ func (s *IOStreams) WriteStdout(ctx context.Context, data []byte) error {
 	case err := <-done:
 		return err
 	case <-ctx.Done():
+		if grace > 0 {
+			timer := time.NewTimer(grace)
+			defer timer.Stop()
+			select {
+			case err := <-done:
+				return err
+			case <-timer.C:
+			}
+		}
 		select {
 		case err := <-done:
 			return err

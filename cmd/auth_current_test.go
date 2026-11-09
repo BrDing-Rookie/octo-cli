@@ -296,6 +296,8 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		{"malformed", candidate, "INVALID_TOKEN_SELF", "api_error", authCurrentFixtureReply{status: http.StatusOK, body: `{"data":` + candidate}, true},
 		{"incomplete", candidate, "INVALID_TOKEN_SELF", "api_error", authCurrentFixtureReply{status: http.StatusOK, body: `{"data":{"token":"` + candidate + `"}}`}, true},
 		{"mixed success and error", candidate, "INVALID_TOKEN_SELF", "api_error", active.withEnvelopeError(authCurrentFixtureEnvelopeError), true},
+		{"duplicate error with trailing null", candidate, "INVALID_TOKEN_SELF", "api_error", active.withEnvelopeError(authCurrentFixtureEnvelopeError, "null"), true},
+		{"duplicate null errors", candidate, "INVALID_TOKEN_SELF", "api_error", active.withEnvelopeError("null", "null"), true},
 		{"null action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[null]`), true},
 		{"empty action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[""]`), true},
 		{"blank action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["   "]`), true},
@@ -501,6 +503,8 @@ func TestUnifiedAuthCurrentGetRejectsInvalidTokenSelf(t *testing.T) {
 		name, original, replacement string
 	}{
 		{"mixed success and error", `{"data":`, `{"error":` + authCurrentFixtureEnvelopeError + `,"data":`},
+		{"duplicate error with trailing null", `{"data":`, `{"error":` + authCurrentFixtureEnvelopeError + `,"error":null,"data":`},
+		{"duplicate null errors", `{"data":`, `{"error":null,"error":null,"data":`},
 		{"null action", `["task:read"]`, `[null]`},
 		{"empty action", `["task:read"]`, `[""]`},
 		{"blank action", `["task:read"]`, `["   "]`},

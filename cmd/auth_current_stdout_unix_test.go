@@ -39,8 +39,18 @@ func TestUnifiedAuthCurrentCancelWhileWritingStdout(t *testing.T) {
 		{"login", "TOKEN_IMPORT_OUTPUT_FAILED", []string{"--profile", "target", "auth", "login", "--with-token"}, 1, true},
 		{"filtered login", "TOKEN_IMPORT_OUTPUT_FAILED", []string{"--profile", "target", "--jq", ".data.profile", "auth", "login", "--with-token"}, 1, true},
 	} {
-		for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM} {
-			t.Run(tc.name+"/"+sig.String(), func(t *testing.T) {
+		for _, run := range []struct {
+			sig    syscall.Signal
+			merged bool
+		}{
+			{syscall.SIGINT, false}, {syscall.SIGTERM, false},
+			{syscall.SIGINT, true}, {syscall.SIGTERM, true},
+		} {
+			name := tc.name + "/" + run.sig.String()
+			if run.merged {
+				name += "/merged"
+			}
+			t.Run(name, func(t *testing.T) {
 				dir := phaseOneEnv(t)
 				old, candidate := authCurrentFixtureStoredToken, authCurrentFixtureCandidateToken
 				server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
@@ -56,14 +66,16 @@ func TestUnifiedAuthCurrentCancelWhileWritingStdout(t *testing.T) {
 					originalEntry = seedAuthCurrentProfile(t, store, "target", server.URL, "space", old)
 				}
 
-				stderr := cancelAuthCurrentStdoutProcess(t, sig, candidate, tc.args)
-				var envelope struct {
-					Error struct{ Code string }
+				stderr := cancelAuthCurrentStdoutProcess(t, run.sig, run.merged, candidate, tc.args)
+				if !run.merged {
+					var envelope struct {
+						Error struct{ Code string }
+					}
+					if err := json.Unmarshal(stderr, &envelope); err != nil || envelope.Error.Code != tc.code {
+						t.Fatalf("expected %s after cancellation: %s (%v)", tc.code, stderr, err)
+					}
+					assertAuthCurrentRedaction(t, candidate, string(stderr))
 				}
-				if err := json.Unmarshal(stderr, &envelope); err != nil || envelope.Error.Code != tc.code {
-					t.Fatalf("expected %s after cancellation: %s (%v)", tc.code, stderr, err)
-				}
-				assertAuthCurrentRedaction(t, candidate, string(stderr))
 				if got := len(requests()); got != tc.wantCalls {
 					t.Fatalf("got %d gateway requests, want %d", got, tc.wantCalls)
 				}
@@ -90,7 +102,7 @@ func TestUnifiedAuthCurrentCancelWhileWritingStdout(t *testing.T) {
 	}
 }
 
-func cancelAuthCurrentStdoutProcess(t *testing.T, sig syscall.Signal, stdin string, args []string) []byte {
+func cancelAuthCurrentStdoutProcess(t *testing.T, sig syscall.Signal, merged bool, stdin string, args []string) []byte {
 	t.Helper()
 	_, stdout := authCurrentTestPipe(t)
 	fillAuthCurrentStdoutPipe(t, stdout)
@@ -104,6 +116,9 @@ func cancelAuthCurrentStdoutProcess(t *testing.T, sig syscall.Signal, stdin stri
 	proc.ExtraFiles = []*os.File{notify}
 	var stderr bytes.Buffer
 	proc.Stderr = &stderr
+	if merged {
+		proc.Stderr = stdout
+	}
 	if err := proc.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -123,12 +138,13 @@ func cancelAuthCurrentStdoutProcess(t *testing.T, sig syscall.Signal, stdin stri
 		_ = proc.Wait()
 		t.Fatalf("child did not reach the stdout write: %v (%s)", err, stderr.String())
 	}
+	signalledAt := time.Now()
 	if err := proc.Process.Signal(sig); err != nil {
 		t.Fatal(err)
 	}
 	var exit *exec.ExitError
-	if err := proc.Wait(); !errors.As(err, &exit) || exit.ExitCode() != 1 || ctx.Err() != nil {
-		t.Fatalf("expected a prompt structured error after %s: %v (%s)", sig, err, stderr.String())
+	if err := proc.Wait(); !errors.As(err, &exit) || exit.ExitCode() != 1 || time.Since(signalledAt) > 3*time.Second {
+		t.Fatalf("expected the CLI to exit promptly with code 1 after %s: %v (%s)", sig, err, stderr.String())
 	}
 	return stderr.Bytes()
 }

@@ -64,9 +64,8 @@ type Factory struct {
 	RegistryFunc           func() *registry.Registry
 	ManagedStoreFunc       func() (*authstore.ManagedStore, error)
 
-	// ErrorEmitted is set to true after EmitError writes an envelope to
-	// stderr. The top-level main func checks this to avoid double-emitting
-	// when RunE returns the same error that was already rendered.
+	// ErrorEmitted records an attempted stderr envelope. The top-level main
+	// func checks it to avoid retrying an error already handled by RunE.
 	ErrorEmitted bool
 
 	// Cached resolutions.
@@ -757,14 +756,24 @@ func (f *Factory) WriteSuccessWithMeta(ctx context.Context, w io.Writer, raw []b
 	return output.Format(w, f.Format(), envelope)
 }
 
-// EmitError renders an error envelope to stderr. Non-ExitError values are
-// classified via WrapCLIError before rendering so the envelope always carries
-// a proper taxonomy. Sets ErrorEmitted so the top-level main func can avoid
-// double-emitting. Always returns nil so cobra doesn't print its own error
-// on top of ours; the caller sets the process exit code separately.
+// EmitError renders an error envelope to stderr.
 func (f *Factory) EmitError(err error) error {
+	return f.EmitErrorContext(context.Background(), err)
+}
+
+// EmitErrorContext gives stderr a short grace period after cancellation.
+// Record the attempt so the caller does not retry a blocked write.
+func (f *Factory) EmitErrorContext(ctx context.Context, err error) error {
 	f.ErrorEmitted = true
-	return output.WriteError(f.IOStreams.ErrOut, WrapCLIError(err))
+	wrapped := WrapCLIError(err)
+	if ctx.Done() == nil {
+		return output.WriteError(f.IOStreams.ErrOut, wrapped)
+	}
+	var rendered bytes.Buffer
+	if err := output.WriteError(&rendered, wrapped); err != nil {
+		return err
+	}
+	return writeStream(ctx, f.IOStreams.ErrOut, rendered.Bytes(), canceledErrorWriteGrace)
 }
 
 // --- helpers ---

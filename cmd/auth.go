@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -160,17 +161,18 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 			"This local credential write rejects --dry-run.",
 		Args: cobra.NoArgs,
 		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
 			var err error
 			unified, err = f.UsesUnifiedCredentials()
 			if err != nil {
-				return failErr(f, err)
+				return failErrContext(ctx, f, err)
 			}
 			if f.Globals.DryRun {
-				return failErr(f, output.ErrValidation(
+				return failErrContext(ctx, f, output.ErrValidation(
 					"--dry-run is not supported for auth login", "omit --dry-run to store the credential locally"))
 			}
 			if !unified && cmd.Flags().Changed("owner-id") {
-				return failErr(f, output.ErrValidation(
+				return failErrContext(ctx, f, output.ErrValidation(
 					"--owner-id requires unified credentials", "set OCTO_CREDENTIAL_MODE=unified"))
 			}
 			return nil
@@ -178,7 +180,7 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if unified {
 				if err := runUnifiedAuthLogin(cmd, f, withToken, apiBaseURL, ownerID); err != nil {
-					return failErr(f, err)
+					return failErrContext(cmd.Context(), f, err)
 				}
 				return nil
 			}
@@ -683,11 +685,13 @@ func emitJSON(f *cmdutil.Factory, payload any) error {
 	return f.EmitSuccess(raw)
 }
 
-// failErr writes the error envelope (to stderr, setting ErrorEmitted) and
-// returns the error so main can derive the process exit code. EmitError itself
-// returns nil, so RunE must return the error separately.
+// failErr emits the envelope and returns the original error for the exit code.
 func failErr(f *cmdutil.Factory, err error) error {
-	_ = f.EmitError(err) //nolint:errcheck // envelope write is best-effort
+	return failErrContext(context.Background(), f, err)
+}
+
+func failErrContext(ctx context.Context, f *cmdutil.Factory, err error) error {
+	_ = f.EmitErrorContext(ctx, err) //nolint:errcheck // envelope write is best-effort
 	return err
 }
 

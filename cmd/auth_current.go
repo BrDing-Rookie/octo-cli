@@ -77,7 +77,7 @@ func newAuthGetCmd(f *cmdutil.Factory) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := runAuthGet(cmd.Context(), f); err != nil {
-				return failErr(f, err)
+				return failErrContext(cmd.Context(), f, err)
 			}
 			return nil
 		},
@@ -235,12 +235,12 @@ func requestAuthCurrent(ctx context.Context, f *cmdutil.Factory, cred *credentia
 
 func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
 	var envelope struct {
-		Data  json.RawMessage  `json:"data"`
-		Error *json.RawMessage `json:"error"`
+		Data  json.RawMessage         `json:"data"`
+		Error authTokenSelfErrorField `json:"error"`
 	}
 	var self authTokenSelf
 	invalid := output.ErrAPI("INVALID_TOKEN_SELF", "invalid TokenSelf response from octo-auth", "check the octo-auth gateway and response contract")
-	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Error != nil {
+	if err := json.Unmarshal(raw, &envelope); err != nil {
 		return self, invalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(envelope.Data))
@@ -249,6 +249,19 @@ func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
 		return authTokenSelf{}, invalid
 	}
 	return self, nil
+}
+
+type authTokenSelfErrorField struct {
+	seen bool
+}
+
+// UnmarshalJSON accepts at most one explicit null error in a success envelope.
+func (field *authTokenSelfErrorField) UnmarshalJSON(data []byte) error {
+	if field.seen || string(data) != "null" {
+		return errors.New("invalid TokenSelf error field")
+	}
+	field.seen = true
+	return nil
 }
 
 func (s *authTokenSelf) valid() bool {
