@@ -60,6 +60,15 @@ func managedFixtureProfile() config.Profile {
 	return config.Profile{APIBaseURL: "https://gateway.example", SpaceID: "S1"}
 }
 
+func publishedConfigPath(t *testing.T, dir string) string {
+	t.Helper()
+	cfg, err := config.LoadProfileConfigIn(dir, true)
+	if err != nil || cfg == nil || !cfg.IsPublished() {
+		t.Fatalf("read published configuration: %v", err)
+	}
+	return filepath.Join(dir, cfg.WriteFile())
+}
+
 func TestManagedEncryptedImport(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "cli")
 	s := managedIn(dir)
@@ -84,7 +93,7 @@ func TestManagedEncryptedImport(t *testing.T) {
 	if stored, err := s.readEntry(ref); err != nil || stored != token {
 		t.Fatalf("read managed entry: %v", err)
 	}
-	for _, path := range []string{s.masterKeyPath(), s.encryptedPath(ref.Entry), filepath.Join(dir, config.ManagedProfileFile)} {
+	for _, path := range []string{s.masterKeyPath(), s.encryptedPath(ref.Entry), publishedConfigPath(t, dir)} {
 		content, err := os.ReadFile(path)
 		if err != nil || bytes.Contains(content, []byte(token)) {
 			t.Fatalf("expected readable file with no token plaintext (%s): %v", path, err)
@@ -187,8 +196,11 @@ func TestManagedProfileMigrationPreservesCredential(t *testing.T) {
 		t.Fatal(err)
 	}
 	legacyPath := filepath.Join(dir, configFile)
-	managedPath := filepath.Join(dir, config.ManagedProfileFile)
+	managedPath := publishedConfigPath(t, dir)
 	if err := os.Rename(managedPath, legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Dir(managedPath)); err != nil {
 		t.Fatal(err)
 	}
 	snap, err = store.Snapshot("target", true)
@@ -257,6 +269,8 @@ func TestManagedMigrationPreservesExternalTokenPaths(t *testing.T) {
 	}{
 		{"alternate file already in use", ".octo-unified/profiles.json", ".octo-unified/profiles.json", false},
 		{"dangling link to primary file", "token.link", config.ManagedProfileFile, true},
+		{"candidate itself is a dangling link", config.ManagedProfileFile, "restored-token", true},
+		{"alternate directory is a Token file", ".octo-unified", ".octo-unified", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -298,7 +312,7 @@ func TestManagedMigrationPreservesExternalTokenPaths(t *testing.T) {
 				}
 			}
 			cfg, err := config.LoadProfileConfigIn(dir, false)
-			if err != nil || cfg == nil || cfg.NeedsMigration() || cfg.Profiles["unified"] == nil {
+			if err != nil || cfg == nil || !cfg.IsPublished() || cfg.Profiles["unified"] == nil {
 				t.Fatalf("load migrated configuration after restoring the Token: %v", err)
 			}
 			ref := cfg.Profiles["unified"].TokenSource
@@ -367,6 +381,95 @@ func TestV1RetirementKeepsBotPublishedAfterReadingV1(t *testing.T) {
 	}
 }
 
+func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
+	for _, scenario := range []string{"same inode", "legacy replacement", "older unmarked short write", "unpublished marker"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			store := NewManagedStore(dir, nil)
+			profile := managedFixtureProfile()
+			snap, err := store.Snapshot("target", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Import(snap, profile, "managed-token", BackendEncryptedFile); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, configFile)
+			v1 := []byte(`{"version":1,"profiles":{"old":{"api_base_url":"https://gateway.example"}}}`)
+			if err := os.WriteFile(path, v1, secPerm); err != nil {
+				t.Fatal(err)
+			}
+			file, raw, err := readV1ConfigForRetirement(path)
+			if err != nil || file == nil {
+				t.Fatalf("inspect v1: %v", err)
+			}
+			t.Cleanup(func() { _ = file.Close() })
+			backup, err := writeV1Backup(dir, raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var pending string
+			switch scenario {
+			case "older unmarked short write":
+			case "unpublished marker":
+				pending = backup + retirementStageSuffix
+				if err := os.Link(path, pending); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				pending, err = markV1Retirement(file, backup)
+				if err != nil || pending == "" {
+					t.Fatalf("persist recovery marker: %v", err)
+				}
+			}
+			if scenario != "unpublished marker" {
+				if _, err := file.WriteAt([]byte(`{"profiles":{}}`), 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			legacy := &Store{dir: dir}
+			if _, err := legacy.LoadProfiles(); err == nil {
+				t.Fatal("fixture must require retirement before legacy use")
+			}
+			if scenario == "legacy replacement" {
+				if err := legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			snap, err = store.Snapshot("target", true)
+			if err != nil || !snap.Exists {
+				t.Fatalf("published profile must remain available: %v", err)
+			}
+			result, err := store.ConfirmTarget(snap, profile.APIBaseURL)
+			if scenario == "older unmarked short write" {
+				if err != nil || !strings.Contains(result.CleanupWarning, "backup") {
+					t.Fatalf("unmarked damage must report the need for recovery: %#v, %v", result, err)
+				}
+				if _, err := legacy.LoadProfiles(); err == nil {
+					t.Fatal("unmarked legacy file was overwritten")
+				}
+				return
+			}
+			if err != nil || result.CleanupWarning != "" {
+				t.Fatalf("retry retirement: %#v, %v", result, err)
+			}
+			if got, err := legacy.LoadProfiles(); err != nil || (scenario != "legacy replacement" && len(got) != 0) ||
+				(scenario == "legacy replacement" && (len(got) != 1 || got["bot"].RobotID != "cli_bot")) {
+				t.Fatalf("unexpected legacy profiles after recovery: %#v, %v", got, err)
+			}
+			if _, err := os.Stat(pending); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("completed recovery marker still present: %v", err)
+			}
+			if got, err := os.ReadFile(backup); err != nil || !bytes.Equal(got, v1) {
+				t.Fatalf("original v1 backup changed: %v", err)
+			}
+		})
+	}
+}
+
 func TestV1RetirementLeavesHardLinkedSourceUntouched(t *testing.T) {
 	dir := t.TempDir()
 	active := filepath.Join(dir, configFile)
@@ -407,7 +510,7 @@ func TestManagedRemoveRejectsSymlinkedCredentials(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(filepath.Join(original.dir, config.ManagedProfileFile))
+	raw, err := os.ReadFile(publishedConfigPath(t, original.dir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,7 +760,7 @@ func TestManagedImportRejectsMissingMasterKey(t *testing.T) {
 				t.Fatalf("read first profile: %v", err)
 			}
 			ref := cfg.Profiles["existing"].TokenSource
-			configPath := filepath.Join(store.dir, config.ManagedProfileFile)
+			configPath := filepath.Join(store.dir, cfg.WriteFile())
 			before, err := os.ReadFile(configPath)
 			if err != nil {
 				t.Fatal(err)

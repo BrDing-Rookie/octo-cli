@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +29,6 @@ type ProfileConfig struct {
 	Profiles       map[string]*Profile `json:"profiles"`
 	dir            string
 	file           string
-	writeFile      string
 }
 
 // Profile binds a request target to a credential reference.
@@ -84,94 +82,6 @@ func LoadWritableProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, 
 	return loadProfileConfigIn(dir, allowLegacy, true)
 }
 
-func loadProfileConfigIn(dir string, allowLegacy, writable bool) (*ProfileConfig, error) {
-	cfg, primaryErr, alternateErr := loadDedicatedProfileConfig(dir, writable)
-	if cfg != nil {
-		return cfg, errors.Join(primaryErr, alternateErr)
-	}
-	old, oldErr := loadProfileConfigFile(dir, oldProfileFile, allowLegacy, writable)
-	// A migration may publish the dedicated file while we read config.json.
-	cfg, primaryErr, alternateErr = loadDedicatedProfileConfig(dir, writable)
-	if cfg != nil {
-		return cfg, errors.Join(primaryErr, alternateErr)
-	}
-	if old == nil {
-		return nil, errors.Join(primaryErr, alternateErr, oldErr)
-	}
-	if err := old.selectMigrationPath(primaryErr, alternateErr, writable); err != nil {
-		return nil, err
-	}
-	return old, nil
-}
-
-func (old *ProfileConfig) selectMigrationPath(primaryErr, alternateErr error, writable bool) error {
-	primary := filepath.Join(old.dir, ManagedProfileFile)
-	alternate := filepath.Join(old.dir, alternateProfileFile())
-	primaryReserved, primaryRefErr := old.ReferencesTokenFile(primary)
-	alternateReserved, alternateRefErr := old.ReferencesTokenFile(alternate)
-	if primaryErr != nil && (!primaryReserved || !isOpaqueProfileTokenFile(primary)) {
-		return primaryErr
-	}
-	if alternateErr != nil && (!alternateReserved || !isOpaqueProfileTokenFile(alternate)) {
-		return alternateErr
-	}
-	if writable {
-		if err := errors.Join(primaryRefErr, alternateRefErr); err != nil {
-			return err
-		}
-		if primaryReserved && alternateReserved {
-			return errors.New("both managed configuration paths are reserved by Token files")
-		}
-	}
-	if primaryReserved {
-		old.writeFile = alternateProfileFile()
-	}
-	return nil
-}
-
-func isOpaqueProfileTokenFile(path string) bool {
-	const limit = 64 * 1024
-	info, err := os.Stat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
-		return false
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
-	closeErr := file.Close()
-	if err != nil || closeErr != nil || len(raw) > limit {
-		return false
-	}
-	token := bytes.TrimSpace(raw)
-	// A partial or unsupported JSON config remains a configuration error
-	// even when the old metadata happens to reference its pathname.
-	return len(token) != 0 && token[0] != '{' && token[0] != '[' &&
-		bytes.IndexFunc(token, func(r rune) bool { return r < '!' || r > '~' }) < 0
-}
-
-func alternateProfileFile() string { return filepath.Join(profileCollisionDir, ManagedProfileFile) }
-
-func loadDedicatedProfileConfig(dir string, writable bool) (cfg *ProfileConfig, primaryErr, alternateErr error) {
-	cfg, primaryErr = loadProfileConfigFile(dir, ManagedProfileFile, false, writable)
-	if cfg != nil {
-		return cfg, nil, nil
-	}
-	// A token can also occupy the alternate directory's name. Only a real
-	// directory can contain a dedicated profile configuration there.
-	info, err := os.Lstat(filepath.Join(dir, profileCollisionDir))
-	if err == nil && info.IsDir() {
-		cfg, alternateErr = loadProfileConfigFile(dir, alternateProfileFile(), false, writable)
-		if cfg != nil {
-			return cfg, nil, nil
-		}
-	} else if err != nil && !os.IsNotExist(err) {
-		alternateErr = err
-	}
-	return cfg, primaryErr, alternateErr
-}
-
 func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*ProfileConfig, error) {
 	path := filepath.Join(dir, name)
 	info, err := os.Lstat(path)
@@ -213,7 +123,6 @@ func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*Profi
 	}
 	cfg.dir = dir
 	cfg.file = name
-	cfg.writeFile = name
 	return cfg, nil
 }
 
@@ -225,13 +134,16 @@ func (c *ProfileConfig) Directory() string {
 // NeedsMigration reports whether this v1 configuration came from config.json.
 func (c *ProfileConfig) NeedsMigration() bool { return c.file == oldProfileFile }
 
-// WriteFile returns the dedicated path relative to the profile directory.
-func (c *ProfileConfig) WriteFile() string {
-	if c.writeFile == oldProfileFile || c.writeFile == "" {
-		return ManagedProfileFile
-	}
-	return c.writeFile
+// WriteFile returns the loaded metadata path relative to the store.
+func (c *ProfileConfig) WriteFile() string { return c.file }
+
+// IsPublished reports whether this configuration has an owned location.
+func (c *ProfileConfig) IsPublished() bool {
+	return strings.HasPrefix(filepath.Dir(c.file), OwnedProfileDirPrefix)
 }
+
+// SetPublishedFile records a newly published metadata path for this mutation.
+func (c *ProfileConfig) SetPublishedFile(name string) { c.file = name }
 
 // ReferencesTokenFile checks direct paths, file aliases and missing symlink targets.
 func (c *ProfileConfig) ReferencesTokenFile(path string) (bool, error) {

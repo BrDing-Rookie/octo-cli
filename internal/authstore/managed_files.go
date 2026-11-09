@@ -1,11 +1,9 @@
 package authstore
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,8 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 )
 
 const (
@@ -307,121 +303,6 @@ func openProfileLock(dir string) (*os.File, error) {
 		return nil, errors.Join(err, lock.Close())
 	}
 	return lock, nil
-}
-
-// retireV1Config runs only after the dedicated config has been committed.
-// A v0.19.5 process can replace the old pathname without taking our lock.
-func (s *ManagedStore) retireV1Config(cfg *config.ProfileConfig) string {
-	const warning = "could not retire the previous v1 configuration"
-	active := filepath.Join(s.dir, configFile)
-	file, raw, err := readV1ConfigForRetirement(active)
-	if err != nil {
-		return warning
-	}
-	if file == nil {
-		return ""
-	}
-	defer func() { _ = file.Close() }() //nolint:errcheck // retirement explicitly syncs the open file
-	reserved, err := cfg.ReferencesTokenFile(active)
-	if err != nil {
-		return warning
-	}
-	if reserved {
-		return "previous v1 configuration retained because a profile uses that path as a Token file"
-	}
-	// Also cover a retry after the dedicated rename became visible but its
-	// directory sync failed. Do not retire the v1 file until both paths are durable.
-	dedicatedDir := filepath.Dir(filepath.Join(s.dir, cfg.WriteFile()))
-	if err := syncManagedDirectory(dedicatedDir); err != nil {
-		return warning
-	}
-	if dedicatedDir != s.dir {
-		if err := syncManagedDirectory(s.dir); err != nil {
-			return warning
-		}
-	}
-	return archiveV1Config(file, raw)
-}
-
-func readV1ConfigForRetirement(active string) (*os.File, []byte, error) {
-	info, err := os.Lstat(active)
-	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
-		return nil, nil, nil
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	file, err := openV1ConfigForRetirement(active)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, nil
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	opened, err := file.Stat()
-	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() {
-		return nil, nil, errors.Join(err, file.Close())
-	}
-	raw, err := io.ReadAll(file)
-	if err != nil {
-		return nil, nil, errors.Join(err, file.Close())
-	}
-	var old config.ProfileConfig
-	if json.Unmarshal(raw, &old) != nil || string(old.Version) != "1" || old.Profiles == nil {
-		return nil, nil, file.Close()
-	}
-	return file, raw, nil
-}
-
-func archiveV1Config(active *os.File, raw []byte) string {
-	const warning = "could not retire the previous v1 configuration"
-	backup, err := writeV1Backup(filepath.Dir(active.Name()), raw)
-	if err != nil {
-		if backup == "" {
-			return warning
-		}
-		return "could not sync the v1 configuration backup " + filepath.Base(backup)
-	}
-	if err := clearArchivedV1Config(active, len(raw)); err != nil {
-		return warning + ", original bytes retained in " + filepath.Base(backup)
-	}
-	return ""
-}
-
-func writeV1Backup(dir string, raw []byte) (string, error) {
-	backup, err := os.CreateTemp(dir, "config.v1-*.bak")
-	if err != nil {
-		return "", err
-	}
-	if err := backup.Close(); err != nil {
-		_ = os.Remove(backup.Name()) //nolint:errcheck // preserve the primary error
-		return "", err
-	}
-	visible, err := writeManagedFile(backup.Name(), raw)
-	if !visible {
-		_ = os.Remove(backup.Name()) //nolint:errcheck // only our empty placeholder exists here
-		return "", err
-	}
-	return backup.Name(), err
-}
-
-func clearArchivedV1Config(active *os.File, size int) error {
-	links, err := v1ConfigLinkCount(active)
-	if err != nil || links == 0 {
-		return err
-	}
-	if links > 1 {
-		return errors.New("cannot clear a hard-linked v1 configuration")
-	}
-	// Write only the inode we inspected and backed up. Legacy writers publish
-	// by rename, so a replacement at config.json is never moved or overwritten.
-	// Padding avoids a second truncate operation and leaves valid legacy JSON.
-	retired := bytes.Repeat([]byte{' '}, size)
-	copy(retired, `{"profiles":{}}`)
-	if _, err := active.WriteAt(retired, 0); err != nil {
-		return err
-	}
-	return active.Sync()
 }
 
 // writeManagedFile returns true once replacement is visible, even if a

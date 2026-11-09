@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -198,7 +199,7 @@ func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) (C
 		if currentErr != nil || requestErr != nil || current != requested {
 			return CommitResult{}, ErrProfileOriginChange
 		}
-		if cfg.NeedsMigration() {
+		if !cfg.IsPublished() {
 			committed, err := s.persist(cfg)
 			if !committed {
 				return CommitResult{}, err
@@ -247,27 +248,60 @@ func (s *ManagedStore) persist(cfg *config.ProfileConfig) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	raw = append(raw, '\n')
+	if !cfg.IsPublished() {
+		return s.publishProfileConfig(cfg, raw)
+	}
 	path := filepath.Join(s.dir, cfg.WriteFile())
-	reserved, err := cfg.ReferencesTokenFile(path)
+	if err := checkProfileWritePaths(cfg, path); err != nil {
+		return false, err
+	}
+	return s.writeConfig(path, raw)
+}
+
+func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, data []byte) (bool, error) {
+	dir, err := os.MkdirTemp(s.dir, config.OwnedProfileDirPrefix)
 	if err != nil {
 		return false, err
 	}
-	if reserved {
-		return false, errors.New("managed profile configuration path is reserved by a Token file")
-	}
-	if filepath.Dir(path) != s.dir {
-		if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
-			return false, err
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(dir) //nolint:errcheck // discard only our unpublished staging directory
 		}
-		// The alternate layout uses a child directory. Sync the store as
-		// well as the child before retiring the only active v1 source.
-		committed, err := s.writeConfig(path, append(raw, '\n'))
-		if err == nil && committed {
-			err = syncManagedDirectory(s.dir)
-		}
-		return committed, err
+	}()
+	path := filepath.Join(dir, config.ManagedProfileFile)
+	marker := filepath.Join(dir, config.OwnedProfileMarker)
+	if err := checkProfileWritePaths(cfg, dir, path, marker); err != nil {
+		return false, err
 	}
-	return s.writeConfig(path, append(raw, '\n'))
+	if err := ensurePrivateDir(dir); err != nil {
+		return false, err
+	}
+	if committed, err := s.writeConfig(path, data); !committed || err != nil {
+		return false, err
+	}
+	// The marker is the publication point. A failed write before this leaves
+	// all readers on the previous layout and the staged credential invisible.
+	if err := os.Mkdir(marker, dirPerm); err != nil {
+		return false, err
+	}
+	published = true
+	cfg.SetPublishedFile(filepath.Join(filepath.Base(dir), config.ManagedProfileFile))
+	return true, errors.Join(syncManagedDirectory(dir), syncManagedDirectory(s.dir))
+}
+
+func checkProfileWritePaths(cfg *config.ProfileConfig, paths ...string) error {
+	for _, path := range paths {
+		reserved, err := cfg.ReferencesTokenFile(path)
+		if err != nil {
+			return err
+		}
+		if reserved {
+			return errors.New("managed profile configuration path is reserved by a Token file")
+		}
+	}
+	return nil
 }
 
 func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profile, syncErr error) CommitResult {

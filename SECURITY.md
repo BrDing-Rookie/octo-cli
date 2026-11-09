@@ -64,22 +64,23 @@ with `OCTO_CONFIG_DIR`):
   decrypted on a *different* machine, not that an attacker who has the file
   cannot eventually decrypt it given the same host.
 
-Unified profiles use **`profiles.json`** in the configured CLI directory
-(`~/.octo/cli` by default). If only a v1 `config.json` exists, the CLI can read
-it and migrates it on the next successful unified profile write. To migrate
-before running an older CLI, run `auth update` in unified mode with the selected
-profile's existing `--api-base-url`. If a v1 profile already uses `profiles.json`
-as its Token file, the CLI writes `.octo-unified/profiles.json` and keeps the
-Token at its original path. A Token at the alternate path can coexist with the
-default configuration. If both paths are reserved by Token references, migration
-stops before writing either one. Relative Token paths and managed credential
-references keep their original directory.
+Unified profiles are stored in **`profiles.json`** inside a private directory
+allocated under the configured CLI directory (`~/.octo/cli` by default). A
+publication marker identifies the authoritative directory, including when its
+metadata is unreadable. The CLI can read the original v1 `config.json` and
+earlier dedicated layouts, and publishes them on the next successful unified
+profile write. To migrate before running an older CLI, run `auth update` in
+unified mode with the selected profile's existing `--api-base-url`. Existing
+Token files stay at their paths, including targets that are temporarily missing.
+Relative Token paths and managed credential references keep their original base.
 
 After the unified configuration is durable, the CLI archives the original v1
 metadata as `config.v1-*.bak` before clearing the inspected v1 file into an
 empty Bot store. A legacy writer that has already replaced `config.json`
-keeps its active file. If clearing fails, the backup retains the original bytes
-for recovery.
+keeps its active file. A pending marker pins the inspected file for recovery
+after a partial write. A subsequent unified profile mutation resumes retirement
+only if the active file still matches that marker. The backup retains the
+original bytes for recovery.
 
 **Trust boundary: the OS user account.** Any process running as the same user
 can run `octo-cli` and therefore decrypt the store; the encryption defends against

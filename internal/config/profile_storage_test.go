@@ -53,10 +53,10 @@ func TestProfileConfigDistinguishesTokenFileFromDedicatedStore(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg, err := LoadWritableProfileConfigIn(dir, true)
-	if err != nil || cfg == nil || !cfg.NeedsMigration() || cfg.WriteFile() == ManagedProfileFile {
+	if err != nil || cfg == nil || !cfg.NeedsMigration() {
 		t.Fatalf("referenced token file must remain external: %v", err)
 	}
-	path := filepath.Join(dir, cfg.WriteFile())
+	path := filepath.Join(dir, profileCollisionDir, ManagedProfileFile)
 	if err := os.WriteFile(primary, []byte(`{`), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -101,10 +101,10 @@ func TestDedicatedProfileFileIsAuthoritative(t *testing.T) {
 	}
 }
 
-func TestMigrationRefusesWhenBothDestinationsAreTokenFiles(t *testing.T) {
+func TestV1RemainsReadableWhenBothHistoricalPathsAreTokenFiles(t *testing.T) {
 	dir := t.TempDir()
 	primary := filepath.Join(dir, ManagedProfileFile)
-	alternate := filepath.Join(dir, alternateProfileFile())
+	alternate := filepath.Join(dir, profileCollisionDir, ManagedProfileFile)
 	if err := os.MkdirAll(filepath.Dir(alternate), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,36 @@ func TestMigrationRefusesWhenBothDestinationsAreTokenFiles(t *testing.T) {
 	if cfg, err := LoadProfileConfigIn(dir, true); err != nil || cfg == nil || len(cfg.Profiles) != 2 {
 		t.Fatalf("the original profiles must remain readable: %v", err)
 	}
-	if cfg, err := LoadWritableProfileConfigIn(dir, true); cfg != nil || err == nil || !strings.Contains(err.Error(), "both managed configuration paths") {
-		t.Fatalf("migration must refuse to overwrite either Token file: %v", err)
+	if cfg, err := LoadWritableProfileConfigIn(dir, true); err != nil || cfg == nil || !cfg.NeedsMigration() {
+		t.Fatalf("migration should be able to use an owned location: %v", err)
+	}
+}
+
+func TestHistoricalAlternateUsesArchivedTokenOwnership(t *testing.T) {
+	dir := t.TempDir()
+	primary := filepath.Join(dir, ManagedProfileFile)
+	alternate := filepath.Join(dir, profileCollisionDir, ManagedProfileFile)
+	if err := os.MkdirAll(filepath.Dir(alternate), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		primary:                                 `{"version":1,"profiles":{"work":{"api_base_url":"https://untrusted.example"}}}`,
+		alternate:                               `{"version":1,"profiles":{"work":{"api_base_url":"https://trusted.example","token_source":{"type":"token_file","path":"profiles.json"}}}}`,
+		filepath.Join(dir, "config.v1-123.bak"): `{"version":1,"profiles":{"work":{"token_source":{"type":"token_file","path":"profiles.json"}}}}`,
+	}
+	for name, contents := range files {
+		if err := os.WriteFile(name, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := LoadProfileConfigIn(dir, true)
+	if err != nil || cfg == nil || cfg.Profiles["work"] == nil || cfg.Profiles["work"].APIBaseURL != "https://trusted.example" {
+		t.Fatalf("archived ownership must identify the historical alternate: %v", err)
+	}
+	if err := os.WriteFile(alternate, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := LoadProfileConfigIn(dir, true); cfg != nil || err == nil {
+		t.Fatal("a damaged historical alternate must not fall back to its Token file")
 	}
 }
