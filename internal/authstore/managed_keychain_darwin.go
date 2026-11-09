@@ -8,9 +8,13 @@ import (
 	"fmt"
 	"io/fs"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/unix"
 )
 
 const macKeychainService = "com.octo.cli.managed"
@@ -19,6 +23,26 @@ type macKeychain struct{}
 
 func systemKeychain() Keychain {
 	return macKeychain{}
+}
+
+func canonicalManagedDirectory(dir string) (string, error) {
+	fd, err := unix.Open(dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return "", err
+	}
+	// F_GETPATH returns the spelling of the opened directory, including on
+	// case-insensitive APFS where EvalSymlinks keeps the caller's input case.
+	var path [unix.PathMax]byte
+	// FcntlInt passes the buffer address as an integer to libSystem.
+	var pin runtime.Pinner
+	pin.Pin(&path)
+	defer pin.Unpin()
+	_, err = unix.FcntlInt(uintptr(fd), unix.F_GETPATH, int(uintptr(unsafe.Pointer(&path[0]))))
+	closeErr := unix.Close(fd)
+	if err != nil {
+		return "", errors.Join(err, closeErr)
+	}
+	return unix.ByteSliceToString(path[:]), closeErr
 }
 
 // Read decodes the ASCII hex used for both tokens and binary master keys.

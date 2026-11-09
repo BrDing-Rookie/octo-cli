@@ -44,7 +44,7 @@ func (unavailableKeychain) Remove(string) error { return errKeychainUnavailable 
 func (s *ManagedStore) account(entry string) (string, error) {
 	// The same store may be reached through a symlinked parent, such as
 	// /tmp and /private/tmp on macOS. Keep those aliases in one namespace.
-	dir, err := filepath.EvalSymlinks(s.dir)
+	dir, err := canonicalManagedDirectory(s.dir)
 	if err != nil {
 		return "", fmt.Errorf("resolve managed credential directory: %w", err)
 	}

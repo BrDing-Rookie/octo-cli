@@ -174,36 +174,41 @@ func TestManagedKeychainEntriesUseCanonicalDirectory(t *testing.T) {
 				}
 				t.Fatal(err)
 			}
-			keychain := &fixtureKeychain{entries: map[string][]byte{}}
-			original := NewManagedStore(filepath.Join(parent, "store"), keychain)
-			aliased := NewManagedStore(filepath.Join(alias, "store"), keychain)
-			baseline, err := original.Snapshot("target", true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			const token = "keychain-fixture-bearer"
-			if _, err := original.Import(baseline, managedFixtureProfile(), token, backend); err != nil {
-				t.Fatal(err)
-			}
-			selected, err := aliased.Snapshot("target", true)
-			if err != nil || !selected.Exists {
-				t.Fatalf("alias did not select the stored profile: %v", err)
-			}
-			ref := selected.Profile.TokenSource
-			if stored, err := aliased.readEntry(ref); err != nil || stored != token {
-				t.Fatalf("alias could not read the stored token: %v", err)
-			}
-			result, err := aliased.Remove(selected)
-			if err != nil || result.CleanupWarning != "" {
-				t.Fatalf("alias could not remove the original entry: %#v, %v", result, err)
-			}
-			if _, err := original.readEntry(ref); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("entry still readable from the original path: %v", err)
-			}
-			if backend == BackendKeychain && len(keychain.entries) != 0 {
-				t.Fatal("removing through the alias left behind a Keychain token")
-			}
+			assertManagedKeychainDirectoryAlias(t, backend, filepath.Join(parent, "store"), filepath.Join(alias, "store"))
 		})
+	}
+}
+
+func assertManagedKeychainDirectoryAlias(t *testing.T, backend, dir, alias string) {
+	t.Helper()
+	keychain := &fixtureKeychain{entries: map[string][]byte{}}
+	original := NewManagedStore(dir, keychain)
+	aliased := NewManagedStore(alias, keychain)
+	baseline, err := original.Snapshot("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const token = "keychain-fixture-bearer"
+	if _, err := original.Import(baseline, managedFixtureProfile(), token, backend); err != nil {
+		t.Fatal(err)
+	}
+	selected, err := aliased.Snapshot("target", true)
+	if err != nil || !selected.Exists {
+		t.Fatalf("alias did not select the stored profile: %v", err)
+	}
+	ref := selected.Profile.TokenSource
+	if stored, err := aliased.readEntry(ref); err != nil || stored != token {
+		t.Fatalf("alias could not read the stored token: %v", err)
+	}
+	result, err := aliased.Remove(selected)
+	if err != nil || result.CleanupWarning != "" {
+		t.Fatalf("alias could not remove the original entry: %#v, %v", result, err)
+	}
+	if _, err := original.readEntry(ref); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("entry still readable from the original path: %v", err)
+	}
+	if backend == BackendKeychain && len(keychain.entries) != 0 {
+		t.Fatal("removing through the alias left behind a Keychain token")
 	}
 }
 
