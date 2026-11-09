@@ -1,15 +1,19 @@
 package cmd
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
+	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
+	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
@@ -117,6 +121,74 @@ func TestUnifiedAuthStatusReadsManagedEntry(t *testing.T) {
 	phaseOneWrite(t, entryPath, string(raw))
 	out, err = phaseOneRun("--format", "json", "auth", "status")
 	assertUnifiedAuthStatusError(t, out, err, "cannot read credential", 3)
+}
+
+func TestUnifiedAuthStatusReloadsReplacedManagedEntry(t *testing.T) {
+	dir := phaseOneEnv(t)
+	t.Setenv("OCTO_PROFILE", "selected")
+	store := authstore.NewManagedStore(dir, nil)
+	before, err := store.Snapshot("selected", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldProfile := config.Profile{APIBaseURL: "https://old.example", SpaceID: "old-space"}
+	if _, err := store.Import(before, oldProfile, "old-fixture-token", authstore.BackendEncryptedFile); err != nil {
+		t.Fatal(err)
+	}
+	old, err := store.Snapshot("selected", true)
+	if err != nil || !old.Exists {
+		t.Fatalf("cannot load original profile: %v", err)
+	}
+	newProfile := config.Profile{APIBaseURL: "https://new.example", SpaceID: "new-space"}
+	f := cmdutil.NewDefaultFactory()
+	var out bytes.Buffer
+	f.IOStreams.Out, f.IOStreams.ErrOut = &out, &out
+	err = runUnifiedAuthStatus(f, func(profiles *config.ProfileConfig, ref *config.TokenSource) (string, string, error) {
+		if *ref == *old.Profile.TokenSource {
+			// Commit the replacement after status has selected the old reference.
+			result, err := store.Import(old, newProfile, "new-fixture-token", authstore.BackendEncryptedFile)
+			if err != nil || result.CleanupWarning != "" {
+				t.Fatalf("replace managed credential: %v %s", err, result.CleanupWarning)
+			}
+		}
+		return credential.ReadProfileToken(profiles, ref)
+	})
+	assertUnifiedAuthStatus(t, out.String(), err, "readable", "selected", newProfile.APIBaseURL, newProfile.SpaceID, "profile:managed_store")
+}
+
+func TestUnifiedAuthStatusDistinguishesMissingDirectoriesFromBrokenSymlinks(t *testing.T) {
+	dir := phaseOneEnv(t)
+	t.Setenv("OCTO_PROFILE", "selected")
+	missing := filepath.Join(dir, "missing")
+	broken := filepath.Join(dir, "broken")
+	valid := filepath.Join(dir, "valid")
+	for link, target := range map[string]string{broken: missing, valid: dir} {
+		if err := os.Symlink(target, link); err != nil {
+			if runtime.GOOS == "windows" {
+				t.Skipf("cannot create a Windows directory symlink: %v", err)
+			}
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name, path string
+		broken     bool
+	}{
+		{"absent directory", filepath.Join(missing, "store"), false},
+		{"valid directory symlink", filepath.Join(valid, "store"), false},
+		{"dangling directory symlink", broken, true},
+		{"dangling ancestor symlink", filepath.Join(broken, "store"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("OCTO_CONFIG_DIR", tc.path)
+			out, err := phaseOneRun("--format", "json", "auth", "status")
+			if tc.broken {
+				assertUnifiedAuthStatusError(t, out, err, "cannot read config.json", 2)
+				return
+			}
+			assertUnifiedAuthStatus(t, out, err, "missing", "selected", config.LoadRuntime().APIBaseURL, "", "")
+		})
+	}
 }
 
 func TestUnifiedAuthStatusRejectsUnreadableConfiguration(t *testing.T) {

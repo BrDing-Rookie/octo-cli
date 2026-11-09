@@ -260,7 +260,7 @@ func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 				return failErr(f, err)
 			}
 			if unified {
-				return runUnifiedAuthStatus(f)
+				return runUnifiedAuthStatus(f, credential.ReadProfileToken)
 			}
 			// Report the same credential an ordinary request would use. In
 			// particular, environment credentials must bypass the local store.

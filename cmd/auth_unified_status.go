@@ -10,7 +10,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-func runUnifiedAuthStatus(f *cmdutil.Factory) error {
+func runUnifiedAuthStatus(f *cmdutil.Factory, readToken func(*config.ProfileConfig, *config.TokenSource) (string, string, error)) error {
 	if f.Globals.BotIDSet || f.Globals.BotID != "" {
 		return failErr(f, output.ErrValidation("--bot-id cannot be used with unified credentials", "select a Profile with --profile or OCTO_PROFILE"))
 	}
@@ -18,28 +18,41 @@ func runUnifiedAuthStatus(f *cmdutil.Factory) error {
 	if err != nil {
 		return failErr(f, err)
 	}
-	var target config.Profile
-	if profile != nil {
-		if profile.APIBaseURL == "" {
-			return failErr(f, output.ErrValidation("profile token_source requires api_base_url", "set the API origin in the selected profile"))
-		}
-		target = *profile
-	}
-	runtime := config.LoadRuntime()
-	if err := runtime.ApplyProfile(target, f.Globals.Space); err != nil {
-		return failErr(f, output.ErrValidation(err.Error(), "check the profile, OCTO_API_BASE_URL and Space settings"))
-	}
-
+	var runtime *config.Config
 	status := "missing"
 	var source, token string
-	if profile != nil {
+	const maxAttempts = 3
+	for attempt := 1; ; attempt++ {
+		var target config.Profile
+		if profile != nil {
+			if profile.APIBaseURL == "" {
+				return failErr(f, output.ErrValidation("profile token_source requires api_base_url", "set the API origin in the selected profile"))
+			}
+			target = *profile
+		}
+		runtime = config.LoadRuntime()
+		if err := runtime.ApplyProfile(target, f.Globals.Space); err != nil {
+			return failErr(f, output.ErrValidation(err.Error(), "check the profile, OCTO_API_BASE_URL and Space settings"))
+		}
+		if profile == nil {
+			break
+		}
+
 		// Read only the selected reference. Runtime credentials cannot establish
 		// that a stored Profile is usable.
-		source, token, err = credential.ReadProfileToken(profiles, profile.TokenSource)
+		ref := profile.TokenSource
+		source, token, err = readToken(profiles, ref)
+		if err == nil {
+			status = "readable"
+			break
+		}
+		if attempt == maxAttempts {
+			return failErr(f, err)
+		}
+		profiles, profile, err = reloadUnifiedStatusProfile(f, name, ref, err)
 		if err != nil {
 			return failErr(f, err)
 		}
-		status = "readable"
 	}
 
 	payload := map[string]any{
@@ -51,6 +64,22 @@ func runUnifiedAuthStatus(f *cmdutil.Factory) error {
 	putIfSet(payload, "space_id", client.RedactBearer(runtime.SpaceID, token))
 	putIfSet(payload, "source", source)
 	return emitJSON(f, payload)
+}
+
+func reloadUnifiedStatusProfile(f *cmdutil.Factory, name string, ref *config.TokenSource, readErr error) (*config.ProfileConfig, *config.Profile, error) {
+	if ref == nil || ref.Type != "managed_store" {
+		return nil, nil, readErr
+	}
+	// Replacement publishes the new reference before removing the old entry.
+	// Retry from the new snapshot only if the same Profile has a new reference.
+	nextName, profiles, profile, err := selectUnifiedStatusProfile(f)
+	if err != nil {
+		return nil, nil, err
+	}
+	if nextName != name || profile == nil || profile.TokenSource == nil || *profile.TokenSource == *ref {
+		return nil, nil, readErr
+	}
+	return profiles, profile, nil
 }
 
 func selectUnifiedStatusProfile(f *cmdutil.Factory) (string, *config.ProfileConfig, *config.Profile, error) {

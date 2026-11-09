@@ -411,11 +411,11 @@ OCTO_CONFIG_DIR="$profile_dir" OCTO_CREDENTIAL_MODE=unified \
   selector or configuration, a broken credential reference, a read error,
   or a target conflict. Automatic provisioning requires the missing result.
 
-The success data includes the Profile name, API origin, and Space when set.
-The command reads the stored Profile source and works offline. Before reusing
-a readable Profile, compare its returned API origin and Space with the
-expected values. The caller verifies account ownership when it establishes
-the binding.
+The command works offline. The success data includes the Profile name, API
+origin, and effective `space_id` when set. A stored Profile Space supplies
+`space_id` when present. Otherwise, `--space` or `OCTO_SPACE_ID` supplies the
+request target only. Before reuse, compare the stored API origin and the
+previously verified account and Space binding with the intended session.
 
 ### API Base URL
 
