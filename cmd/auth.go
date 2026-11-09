@@ -53,21 +53,6 @@ func rejectUnifiedCredentialCommand(f *cmdutil.Factory, name string) error {
 	return nil
 }
 
-func authMutationPreRun(f *cmdutil.Factory, hint string) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, _ []string) error {
-		if err := rejectUnifiedCredentialCommand(f, "auth "+cmd.Name()); err != nil {
-			return err
-		}
-		if !f.Globals.DryRun {
-			return nil
-		}
-		return failErr(f, output.ErrValidation(
-			"--dry-run is not supported for auth "+cmd.Name(),
-			hint,
-		))
-	}
-}
-
 func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
 	var (
 		apiBaseURL      string
@@ -197,74 +182,7 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 				}
 				return nil
 			}
-			botID := f.Globals.BotID
-			name := f.Globals.Profile
-
-			if botID == "" && name == "" {
-				id, perr := promptBotID(f)
-				if perr != nil {
-					return failErr(f, output.ErrValidation(fmt.Sprintf("read bot id: %v", perr), ""))
-				}
-				botID = id
-			}
-			if name == "" {
-				name = botID // profile name defaults to the robot id
-			}
-			if name == "" {
-				return failErr(f, output.ErrValidation(
-					"no profile identifier given",
-					"pass --bot-id <robot_id> (recommended) and/or --profile <name>"))
-			}
-
-			token, err := readToken(f, withToken, tokenFile)
-			if err != nil {
-				return failErr(f, err)
-			}
-			if token == "" {
-				return failErr(f, output.ErrValidation(
-					"empty token", "provide a non-empty Octo or Loop bearer credential"))
-			}
-
-			store, err := f.AuthStore()
-			if err != nil {
-				return failErr(f, err)
-			}
-			if err := assertBotIDFree(store, botID, name); err != nil {
-				return failErr(f, err)
-			}
-			if apiBaseURL != "" {
-				apiBaseURL, err = config.NormalizeAPIBaseURL(apiBaseURL)
-				if err != nil {
-					return failErr(f, output.ErrValidation(err.Error(), "pass only the Octo gateway base URL, without a service path"))
-				}
-			}
-			meta := authstore.ProfileMeta{
-				APIBaseURL: apiBaseURL,
-				SpaceID:    f.Globals.Space,
-				BotKind:    credential.TokenKind(token),
-				RobotID:    botID,
-				CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-			}
-			if err := store.SaveProfile(name, &meta, token); err != nil {
-				return failErr(f, err)
-			}
-
-			count, _ := store.Count() //nolint:errcheck // advisory count for the hint only
-			payload := map[string]any{
-				"profile":       name,
-				"bot_kind":      credential.TokenKind(token),
-				"bot_token":     credential.MaskToken(token),
-				"profile_count": count,
-			}
-			putIfSet(payload, "robot_id", botID)
-			if count >= 2 {
-				payload["hint"] = "multiple profiles stored; pass --bot-id or --profile on subsequent commands"
-			}
-			raw, err := json.Marshal(payload)
-			if err != nil {
-				return failErr(f, err)
-			}
-			return f.EmitSuccess(raw)
+			return runLegacyAuthLogin(f, withToken, tokenFile, apiBaseURL)
 		},
 	}
 	cmd.Flags().BoolVar(&withToken, "with-token", false, "read the token from stdin instead of a prompt")
@@ -273,6 +191,73 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	cmd.Flags().StringVar(&ownerID, "owner-id", "", "verify the expected owner ID when importing a unified CLI Token")
 	cmd.MarkFlagsMutuallyExclusive("with-token", "token-file")
 	return cmd
+}
+
+func runLegacyAuthLogin(f *cmdutil.Factory, withToken bool, tokenFile, apiBaseURL string) error {
+	botID := f.Globals.BotID
+	name := f.Globals.Profile
+
+	if botID == "" && name == "" {
+		id, perr := promptBotID(f)
+		if perr != nil {
+			return failErr(f, output.ErrValidation(fmt.Sprintf("read bot id: %v", perr), ""))
+		}
+		botID = id
+	}
+	if name == "" {
+		name = botID // profile name defaults to the robot id
+	}
+	if name == "" {
+		return failErr(f, output.ErrValidation(
+			"no profile identifier given",
+			"pass --bot-id <robot_id> (recommended) and/or --profile <name>"))
+	}
+
+	token, err := readToken(f, withToken, tokenFile)
+	if err != nil {
+		return failErr(f, err)
+	}
+	if token == "" {
+		return failErr(f, output.ErrValidation(
+			"empty token", "provide a non-empty Octo or Loop bearer credential"))
+	}
+
+	store, err := f.AuthStore()
+	if err != nil {
+		return failErr(f, err)
+	}
+	if err := assertBotIDFree(store, botID, name); err != nil {
+		return failErr(f, err)
+	}
+	if apiBaseURL != "" {
+		apiBaseURL, err = config.NormalizeAPIBaseURL(apiBaseURL)
+		if err != nil {
+			return failErr(f, output.ErrValidation(err.Error(), "pass only the Octo gateway base URL, without a service path"))
+		}
+	}
+	meta := authstore.ProfileMeta{
+		APIBaseURL: apiBaseURL,
+		SpaceID:    f.Globals.Space,
+		BotKind:    credential.TokenKind(token),
+		RobotID:    botID,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := store.SaveProfile(name, &meta, token); err != nil {
+		return failErr(f, err)
+	}
+
+	count, _ := store.Count() //nolint:errcheck // advisory count for the hint only
+	payload := map[string]any{
+		"profile":       name,
+		"bot_kind":      credential.TokenKind(token),
+		"bot_token":     credential.MaskToken(token),
+		"profile_count": count,
+	}
+	putIfSet(payload, "robot_id", botID)
+	if count >= 2 {
+		payload["hint"] = "multiple profiles stored; pass --bot-id or --profile on subsequent commands"
+	}
+	return emitJSON(f, payload)
 }
 
 func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
