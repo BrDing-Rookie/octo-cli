@@ -597,6 +597,74 @@ func TestUnifiedAuthCurrentGetModeAndDryRun(t *testing.T) {
 	assertAuthCurrentRedaction(t, candidate, stdout, stderr, err.Error())
 }
 
+func TestUnifiedAuthCurrentGetJQ(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, want string
+		dryRun            bool
+		wantRequests      int
+	}{
+		{"online", ".data.token.token_id", `"fixture-id"`, false, 3},
+		{"dry run", ".data.method", `"GET"`, true, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			phaseOneEnv(t)
+			token := authCurrentFixtureStoredToken
+			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
+				token: authCurrentFixtureSuccess("fixture-id", "owner", "space"),
+			})
+			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+			t.Setenv(config.EnvToken, token)
+			t.Setenv(config.EnvAPIBaseURL, server.URL)
+			run := func(ctx context.Context, query string) (string, string, error) {
+				args := []string{"auth", "get", "--jq", query}
+				if tc.dryRun {
+					args = append(args, "--dry-run")
+				}
+				return runUnifiedAuthCurrentContext(ctx, nil, strings.NewReader(""), args...)
+			}
+
+			stdout, stderr, err := run(t.Context(), tc.query)
+			if err != nil || strings.TrimSpace(stdout) != tc.want {
+				t.Fatalf("unexpected jq output: %v (%s %s)", err, stdout, stderr)
+			}
+			assertAuthCurrentRedaction(t, token, stdout, stderr)
+
+			stdout, stderr, err = run(t.Context(), tc.query+" | tonumber")
+			exit := output.AsExitError(err)
+			if exit == nil || exit.Type != "validation" || exit.Code != "JQ_RUNTIME_ERROR" || stdout != "" {
+				t.Fatalf("expected a jq runtime error: %v (%s %s)", err, stdout, stderr)
+			}
+			assertAuthCurrentRedaction(t, token, stderr, err.Error())
+
+			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+			defer cancel()
+			type commandResult struct {
+				stdout, stderr string
+				err            error
+			}
+			done := make(chan commandResult, 1)
+			go func() {
+				stdout, stderr, err := run(ctx, "def spin: spin; "+tc.query+", spin")
+				done <- commandResult{stdout: stdout, stderr: stderr, err: err}
+			}()
+			select {
+			case result := <-done:
+				exit := output.AsExitError(result.err)
+				if exit == nil || exit.Type != "network" || exit.Code != "NETWORK_ERROR" ||
+					exit.Message != "CLI Token self-check was cancelled" || result.stdout != "" {
+					t.Fatalf("expected jq cancellation with no stdout: %v (%s %s)", result.err, result.stdout, result.stderr)
+				}
+				assertAuthCurrentRedaction(t, token, result.stderr, result.err.Error())
+			case <-time.After(4 * time.Second):
+				t.Fatal("auth get did not exit while evaluating jq")
+			}
+			if got := len(requests()); got != tc.wantRequests {
+				t.Fatalf("got %d gateway requests, want %d", got, tc.wantRequests)
+			}
+		})
+	}
+}
+
 func runUnifiedAuthCurrent(store *authstore.ManagedStore, stdin io.Reader, args ...string) (stdout, stderr string, err error) {
 	return runUnifiedAuthCurrentContext(context.Background(), store, stdin, args...)
 }

@@ -96,18 +96,21 @@ func runAuthGet(ctx context.Context, f *cmdutil.Factory) error {
 	if err != nil {
 		return err
 	}
-	if f.Globals.DryRun {
-		return f.EmitSuccess(raw)
+	if !f.Globals.DryRun {
+		self, err := decodeAuthTokenSelf(raw)
+		if err != nil {
+			return err
+		}
+		raw, err = self.redactedPayload(active.Token)
+		if err != nil {
+			return err
+		}
 	}
-	self, err := decodeAuthTokenSelf(raw)
-	if err != nil {
-		return err
+	err = f.WriteSuccessWithMeta(ctx, f.Out(), raw, output.EnvelopeMeta{})
+	if err != nil && errors.Is(err, ctx.Err()) {
+		return output.ErrNetwork("CLI Token self-check was cancelled", "retry the self-check")
 	}
-	payload, err := self.redactedPayload(active.Token)
-	if err != nil {
-		return err
-	}
-	return f.EmitSuccess(payload)
+	return err
 }
 
 func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL, ownerID string) error {
