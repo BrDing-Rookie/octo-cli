@@ -40,19 +40,49 @@ type TokenSource struct {
 // LoadProfileConfig reads metadata only. An unversioned config in an
 // explicitly supplied directory may belong to the legacy Bot CLI.
 func LoadProfileConfig() (*ProfileConfig, error) {
+	dir, override, err := ProfileDirectory()
+	if err != nil {
+		return nil, err
+	}
+	return LoadProfileConfigIn(dir, override)
+}
+
+// ProfileDirectory resolves the same configuration directory for reads and writes.
+func ProfileDirectory() (string, bool, error) {
 	dir := os.Getenv(EnvConfigDir)
 	override := dir != ""
 	if !override {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return nil, fmt.Errorf("resolve home directory: %w", err)
+			return "", false, fmt.Errorf("resolve home directory: %w", err)
 		}
 		dir = filepath.Join(home, ".octo", "cli")
 	}
-	raw, err := os.ReadFile(filepath.Join(dir, "config.json"))
+	dir, err := filepath.Abs(dir)
+	return dir, override, err
+}
+
+// LoadProfileConfigIn reads a pinned directory. Writes must set allowLegacy
+// to false so an existing unversioned configuration cannot be replaced.
+func LoadProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, error) {
+	path := filepath.Join(dir, "config.json")
+	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		info, err = os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("config.json must be a regular file")
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +91,7 @@ func LoadProfileConfig() (*ProfileConfig, error) {
 	if err := json.Unmarshal(raw, &cfg); err != nil || cfg == nil {
 		return nil, fmt.Errorf("invalid config.json")
 	}
-	if override && cfg.isLegacy() {
+	if allowLegacy && cfg.isLegacy() {
 		return nil, nil
 	}
 	if string(cfg.Version) != "1" {
@@ -72,6 +102,11 @@ func LoadProfileConfig() (*ProfileConfig, error) {
 	}
 	cfg.dir = dir
 	return cfg, nil
+}
+
+// Directory returns the directory from which this profile config was loaded.
+func (c *ProfileConfig) Directory() string {
+	return c.dir
 }
 
 func (c *ProfileConfig) isLegacy() bool {

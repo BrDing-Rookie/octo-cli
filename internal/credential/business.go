@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
@@ -95,20 +96,29 @@ func resolveBusinessToken(opts BusinessOptions, envToken string, tokenSet bool, 
 	case tokenFileSet:
 		source, token, err = fileToken("env:"+config.EnvTokenFile, tokenFile)
 	default:
-		source, token, err = profileToken(profiles, ref)
+		return ReadProfileToken(profiles, ref)
 	}
 	if err != nil {
 		return "", "", err
 	}
 	token = strings.TrimSpace(token)
+	if err := ValidateBusinessToken(token, source); err != nil {
+		return "", "", err
+	}
+	return source, token, nil
+}
+
+// ValidateBusinessToken applies the unified credential format guard to an
+// already-trimmed token. Source must be a fixed diagnostic label.
+func ValidateBusinessToken(token, source string) error {
 	if !validBusinessToken(token) {
-		return "", "", output.ErrAuth("invalid unified Token from "+source, "provide a non-empty Token without whitespace")
+		return output.ErrAuth("invalid unified Token from "+source, "provide a non-empty Token without whitespace")
 	}
 	// Legacy formats are rejected after selecting unified mode and its source.
 	if TokenKind(token) != "unknown" || strings.HasPrefix(token, "omb_") {
-		return "", "", output.ErrAuth("legacy Token from "+source+" cannot be used with unified credentials", "provide a unified Token or use the legacy credential mode")
+		return output.ErrAuth("legacy Token from "+source+" cannot be used with unified credentials", "provide a unified Token or use the legacy credential mode")
 	}
-	return source, token, nil
+	return nil
 }
 
 // ProfileConfigError reports a metadata error without echoing file contents.
@@ -121,17 +131,31 @@ func ProfileConfigError(err error) error {
 	return output.ErrValidation(message, "check the CLI profile directory and config.json")
 }
 
-func profileToken(profiles *config.ProfileConfig, ref *config.TokenSource) (source, token string, err error) {
+// ReadProfileToken reads and validates the Profile source without applying
+// environment or flag overrides. A broken configured reference is an error.
+func ReadProfileToken(profiles *config.ProfileConfig, ref *config.TokenSource) (source, token string, err error) {
 	switch {
 	case ref == nil:
 		return "", "", output.ErrAuth("no unified credential configured", "set OCTO_TOKEN or OCTO_TOKEN_FILE, or select a configured profile")
 	case ref.Type == "token_file" && ref.Backend == "" && ref.Entry == "":
-		return fileToken("profile:token_file", profiles.TokenFilePath(ref.Path))
+		source, token, err = fileToken("profile:token_file", profiles.TokenFilePath(ref.Path))
 	case ref.Type == "managed_store":
-		return "", "", output.ErrAuth("managed credential storage is unavailable", "use an external Token file or environment credential")
+		source = "profile:managed_store"
+		token, err = authstore.ReadManagedToken(profiles, ref)
+		if err != nil {
+			return "", "", output.ErrAuth("cannot read credential from "+source, "check the selected profile and managed credential store")
+		}
 	default:
 		return "", "", output.ErrValidation("invalid profile token_source", "check the type and reference in config.json")
 	}
+	if err != nil {
+		return "", "", err
+	}
+	token = strings.TrimSpace(token)
+	if err := ValidateBusinessToken(token, source); err != nil {
+		return "", "", err
+	}
+	return source, token, nil
 }
 
 func fileToken(source, path string) (selectedSource, token string, err error) {
