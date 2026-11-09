@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,8 @@ const (
 	oldProfileFile      = "config.json"
 )
 
+var errLegacyProfileConfig = errors.New("unsupported config.json version (expected 1)")
+
 // ProfileConfig is the versioned, non-secret business configuration.
 type ProfileConfig struct {
 	Version        json.RawMessage     `json:"version"`
@@ -31,6 +34,8 @@ type ProfileConfig struct {
 	Profiles       map[string]*Profile `json:"profiles"`
 	dir            string
 	file           string
+	v1Info         os.FileInfo
+	v1Digest       [sha256.Size]byte
 }
 
 // Profile binds a request target to a credential reference.
@@ -109,13 +114,29 @@ func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*Profi
 	if err != nil {
 		return nil, err
 	}
+	cfg, err := decodeProfileConfig(name, raw, allowLegacy)
+	if cfg == nil || err != nil {
+		return cfg, err
+	}
+	cfg.dir = dir
+	cfg.file = name
+	if name == oldProfileFile {
+		cfg.v1Info = info
+		cfg.v1Digest = sha256.Sum256(raw)
+	}
+	return cfg, nil
+}
 
+func decodeProfileConfig(name string, raw []byte, allowLegacy bool) (*ProfileConfig, error) {
 	var cfg *ProfileConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil || cfg == nil {
 		return nil, fmt.Errorf("invalid %s", name)
 	}
-	if allowLegacy && isLegacyProfileConfig(raw) {
-		return nil, nil
+	if name == oldProfileFile && isLegacyProfileConfig(raw) {
+		if allowLegacy {
+			return nil, nil
+		}
+		return nil, errLegacyProfileConfig
 	}
 	if string(cfg.Version) != "1" {
 		return nil, fmt.Errorf("unsupported %s version (expected 1)", name)
@@ -123,8 +144,6 @@ func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*Profi
 	if cfg.Profiles == nil {
 		return nil, fmt.Errorf("%s must contain a profiles object", name)
 	}
-	cfg.dir = dir
-	cfg.file = name
 	return cfg, nil
 }
 
@@ -135,6 +154,12 @@ func (c *ProfileConfig) Directory() string {
 
 // NeedsMigration reports whether this v1 configuration came from config.json.
 func (c *ProfileConfig) NeedsMigration() bool { return c.file == oldProfileFile }
+
+// MatchesV1Source verifies that a migration still has the v1 file it loaded.
+func (c *ProfileConfig) MatchesV1Source(info os.FileInfo, raw []byte) bool {
+	return c.NeedsMigration() && c.v1Info != nil &&
+		os.SameFile(c.v1Info, info) && c.v1Digest == sha256.Sum256(raw)
+}
 
 // WriteFile returns the loaded metadata path relative to the store.
 func (c *ProfileConfig) WriteFile() string { return c.file }

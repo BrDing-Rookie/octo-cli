@@ -19,7 +19,7 @@ func lockManagedFile(f *os.File) error {
 	}
 }
 
-func openV1ConfigForRetirement(path string) (*os.File, error) {
+func openExistingManagedFile(path string) (*os.File, error) {
 	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, err
@@ -27,7 +27,7 @@ func openV1ConfigForRetirement(path string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
-func v1ConfigLinkCount(file *os.File) (uint64, error) {
+func managedFileLinkCount(file *os.File) (uint64, error) {
 	var info unix.Stat_t
 	err := unix.Fstat(int(file.Fd()), &info)
 	return uint64(info.Nlink), err

@@ -29,6 +29,9 @@ var ErrProfileConflict = errors.New("profile changed while validating the creden
 // ErrProfileOriginChange means a new origin requires a verified Token import.
 var ErrProfileOriginChange = errors.New("cannot change the API origin of a unified profile with auth update")
 
+// ErrProfileLockToken means a profile may reference the shared lock as a Token.
+var ErrProfileLockToken = errors.New("managed lock path is reserved by a Token file")
+
 // ManagedStore owns the versioned configuration and its managed entries.
 type ManagedStore struct {
 	dir         string
@@ -57,6 +60,12 @@ type profileBaseline struct {
 // CommitResult reports work remaining after a successful reference change.
 type CommitResult struct {
 	CleanupWarning string
+}
+
+type profileWrite struct {
+	committed         bool
+	err               error
+	retirementWarning string
 }
 
 // OpenManaged resolves the configuration directory without creating any files.
@@ -138,11 +147,11 @@ func (s *ManagedStore) Import(snap ProfileSnapshot, profile config.Profile, toke
 		if cfg.CurrentProfile == "" {
 			cfg.CurrentProfile = snap.baseline.name
 		}
-		committed, err := s.persist(cfg)
-		if !committed {
-			return CommitResult{}, errors.Join(err, s.removeEntry(ref))
+		write := s.persist(cfg, snap.baseline.original)
+		if !write.committed {
+			return CommitResult{}, errors.Join(write.err, s.removeEntry(ref))
 		}
-		return s.afterCommit(cfg, snap.baseline.original, err), nil
+		return s.afterCommit(cfg, snap.baseline.original, write), nil
 	})
 }
 
@@ -178,11 +187,11 @@ func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
 		if cfg.CurrentProfile == snap.baseline.name {
 			cfg.CurrentProfile = ""
 		}
-		committed, err := s.persist(cfg)
-		if !committed {
-			return CommitResult{}, err
+		write := s.persist(cfg, snap.baseline.original)
+		if !write.committed {
+			return CommitResult{}, write.err
 		}
-		return s.afterCommit(cfg, snap.baseline.original, err), nil
+		return s.afterCommit(cfg, snap.baseline.original, write), nil
 	})
 }
 
@@ -200,13 +209,13 @@ func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) (C
 			return CommitResult{}, ErrProfileOriginChange
 		}
 		if !cfg.IsPublished() {
-			committed, err := s.persist(cfg)
-			if !committed {
-				return CommitResult{}, err
+			write := s.persist(cfg, nil)
+			if !write.committed {
+				return CommitResult{}, write.err
 			}
-			return s.afterCommit(cfg, nil, err), nil
+			return s.afterCommit(cfg, nil, write), nil
 		}
-		return s.afterCommit(cfg, nil, nil), nil
+		return s.afterCommit(cfg, nil, profileWrite{}), nil
 	})
 }
 
@@ -243,26 +252,27 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 	return fn(cfg)
 }
 
-func (s *ManagedStore) persist(cfg *config.ProfileConfig) (bool, error) {
+func (s *ManagedStore) persist(cfg *config.ProfileConfig, previous *config.Profile) profileWrite {
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
-		return false, err
+		return profileWrite{err: err}
 	}
 	raw = append(raw, '\n')
 	if !cfg.IsPublished() {
-		return s.publishProfileConfig(cfg, raw)
+		return s.publishProfileConfig(cfg, previous, raw)
 	}
 	path := filepath.Join(s.dir, cfg.WriteFile())
 	if err := checkProfileWritePaths(cfg, path); err != nil {
-		return false, err
+		return profileWrite{err: err}
 	}
-	return s.writeConfig(path, raw)
+	committed, err := s.writeConfig(path, raw)
+	return profileWrite{committed: committed, err: err}
 }
 
-func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, data []byte) (bool, error) {
+func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous *config.Profile, data []byte) profileWrite {
 	dir, err := os.MkdirTemp(s.dir, config.OwnedProfileDirPrefix)
 	if err != nil {
-		return false, err
+		return profileWrite{err: err}
 	}
 	published := false
 	defer func() {
@@ -273,22 +283,31 @@ func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, data []by
 	path := filepath.Join(dir, config.ManagedProfileFile)
 	marker := filepath.Join(dir, config.OwnedProfileMarker)
 	if err := checkProfileWritePaths(cfg, dir, path, marker); err != nil {
-		return false, err
+		return profileWrite{err: err}
 	}
 	if err := ensurePrivateDir(dir); err != nil {
-		return false, err
+		return profileWrite{err: err}
 	}
 	if committed, err := s.writeConfig(path, data); !committed || err != nil {
-		return false, err
+		return profileWrite{err: err}
 	}
-	// The marker is the publication point. A failed write before this leaves
-	// all readers on the previous layout and the staged credential invisible.
-	if err := os.Mkdir(marker, dirPerm); err != nil {
-		return false, err
+	staged, err := os.MkdirTemp(dir, ".publication-")
+	if err != nil {
+		return profileWrite{err: err}
 	}
-	published = true
+	journal := v1RetirementJournal{
+		active: filepath.Join(s.dir, configFile), owned: staged,
+		profiles: cfg, previous: previous,
+	}
+	warning := journal.prepareMigration(marker)
+	// Publishing the directory makes the metadata and its recovery intent
+	// visible together. Only a published journal may change config.json.
+	published, err = replaceManagedFile(staged, marker)
+	if !published {
+		return profileWrite{err: err}
+	}
 	cfg.SetPublishedFile(filepath.Join(filepath.Base(dir), config.ManagedProfileFile))
-	return true, errors.Join(syncManagedDirectory(dir), syncManagedDirectory(s.dir))
+	return profileWrite{committed: true, err: errors.Join(err, syncManagedDirectory(s.dir)), retirementWarning: warning}
 }
 
 func checkProfileWritePaths(cfg *config.ProfileConfig, paths ...string) error {
@@ -304,13 +323,20 @@ func checkProfileWritePaths(cfg *config.ProfileConfig, paths ...string) error {
 	return nil
 }
 
-func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profile, syncErr error) CommitResult {
-	if syncErr != nil {
+func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profile, write profileWrite) CommitResult {
+	if write.err != nil {
 		// If the rename is visible but its durability is uncertain, keep the
 		// old entry in case the filesystem recovers the previous config.
 		return CommitResult{CleanupWarning: "profile changed but directory sync failed; previous credential retained"}
 	}
-	result := CommitResult{CleanupWarning: s.retireV1Config(cfg, old)}
+	var warnings []string
+	if write.retirementWarning != "" {
+		warnings = append(warnings, write.retirementWarning)
+	}
+	if warning := s.retireV1Config(cfg, old); warning != "" {
+		warnings = append(warnings, warning)
+	}
+	result := CommitResult{CleanupWarning: strings.Join(warnings, ". ")}
 	if old == nil || old.TokenSource == nil || old.TokenSource.Type != "managed_store" {
 		return result
 	}

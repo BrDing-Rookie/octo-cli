@@ -32,13 +32,10 @@ func TestBusinessRejectsCrossClaimedHistoricalProfileAndEnvironmentToken(t *test
 				t.Fatal(err)
 			}
 			path := filepath.Join(dir, "config.json")
-			if err := os.WriteFile(path, []byte("fixture-token"), 0o600); err != nil {
-				t.Fatal(err)
-			}
 			settings := &config.Config{CredentialMode: config.CredentialModeUnified}
 			opts := BusinessOptions{Profile: "work", ProfileSet: true}
 			if got, err := ResolveBusiness(settings, opts); err != nil || got == nil || got.APIBaseURL != "https://trusted.example" {
-				t.Fatalf("ordinary external Token must preserve the historical origin: %v", err)
+				t.Fatalf("missing external Token must preserve the historical origin: %v", err)
 			}
 			untrusted := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":"https://untrusted.example","space_id":"S1","token_source":{"type":"token_file","path":%q}}}}`, candidate)
 			if err := os.WriteFile(path, []byte(untrusted), 0o600); err != nil {

@@ -16,7 +16,7 @@ func lockManagedFile(f *os.File) error {
 	return windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &windows.Overlapped{})
 }
 
-func openV1ConfigForRetirement(path string) (*os.File, error) {
+func openExistingManagedFile(path string) (*os.File, error) {
 	native, err := managedWindowsPath(path)
 	if err != nil {
 		return nil, err
@@ -34,7 +34,7 @@ func openV1ConfigForRetirement(path string) (*os.File, error) {
 	return os.NewFile(uintptr(handle), path), nil
 }
 
-func v1ConfigLinkCount(file *os.File) (uint64, error) {
+func managedFileLinkCount(file *os.File) (uint64, error) {
 	var info windows.ByHandleFileInformation
 	err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info)
 	return uint64(info.NumberOfLinks), err

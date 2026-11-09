@@ -16,6 +16,7 @@ import (
 const (
 	retirementSuffix      = ".pending"
 	retirementStageSuffix = retirementSuffix + "-stage"
+	retirementWarning     = "could not retire the previous v1 configuration"
 )
 
 type v1RetirementJournal struct {
@@ -32,42 +33,28 @@ func (j v1RetirementJournal) protects(path string) (bool, error) {
 // retireV1Config runs only after the dedicated config has been committed.
 // A v0.19.5 process can replace the old pathname without taking our lock.
 func (s *ManagedStore) retireV1Config(cfg *config.ProfileConfig, previous *config.Profile) string {
-	const warning = "could not retire the previous v1 configuration"
 	active := filepath.Join(s.dir, configFile)
 	dedicatedDir := filepath.Dir(filepath.Join(s.dir, cfg.WriteFile()))
 	journal := v1RetirementJournal{
 		active: active, owned: filepath.Join(dedicatedDir, config.OwnedProfileMarker),
 		profiles: cfg, previous: previous,
 	}
-	if err := journal.resume(); err != nil {
-		return warning + ", recovery is pending"
-	}
 	reserved, err := journal.protects(active)
 	if err != nil {
-		return warning
+		return retirementWarning
 	}
 	if reserved {
 		return "previous configuration path retained because a profile uses it as a Token file"
 	}
-	file, raw, err := readV1ConfigForRetirement(active)
-	if err != nil {
-		return warning + ", inspect config.json and any v1 backup before using the legacy CLI"
+	// Also cover a retry after publication became visible but its directory
+	// sync failed. The journal must be durable before it can change config.json.
+	if err := errors.Join(syncManagedDirectory(dedicatedDir), syncManagedDirectory(s.dir)); err != nil {
+		return retirementWarning
 	}
-	if file == nil {
-		return ""
+	if err := journal.resume(); err != nil {
+		return retirementWarning + ", recovery is pending"
 	}
-	defer func() { _ = file.Close() }() //nolint:errcheck // retirement explicitly syncs the open file
-	// Also cover a retry after the dedicated rename became visible but its
-	// directory sync failed. Do not retire the v1 file until both paths are durable.
-	if err := syncManagedDirectory(dedicatedDir); err != nil {
-		return warning
-	}
-	if dedicatedDir != s.dir {
-		if err := syncManagedDirectory(s.dir); err != nil {
-			return warning
-		}
-	}
-	return journal.archive(file, raw)
+	return ""
 }
 
 func readV1ConfigForRetirement(active string) (*os.File, []byte, error) {
@@ -97,7 +84,7 @@ func openInspectedConfigFile(active string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	file, err := openV1ConfigForRetirement(active)
+	file, err := openExistingManagedFile(active)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, nil
 	}
@@ -111,21 +98,44 @@ func openInspectedConfigFile(active string) (*os.File, error) {
 	return file, nil
 }
 
-func (j v1RetirementJournal) archive(active *os.File, raw []byte) string {
-	const warning = "could not retire the previous v1 configuration"
-	backup, err := writeV1Backup(filepath.Dir(active.Name()), raw)
+// prepareMigration records retirement intent only for the authoritative v1
+// file loaded for this mutation. A later write cannot infer ownership from
+// the contents of config.json, which may have been an external Token.
+func (j v1RetirementJournal) prepareMigration(publishAt string) string {
+	if !j.profiles.NeedsMigration() {
+		return ""
+	}
+	reserved, err := j.protects(j.active)
+	if err != nil || reserved {
+		// The post-commit check reports the preserved Token path.
+		return ""
+	}
+	active, raw, err := readV1ConfigForRetirement(j.active)
+	if err != nil {
+		return retirementWarning + ", inspect config.json before using the legacy CLI"
+	}
+	if active == nil {
+		return ""
+	}
+	defer func() { _ = active.Close() }() //nolint:errcheck // preparing the journal only reads the active file
+	info, err := active.Stat()
+	if err != nil || !j.profiles.MatchesV1Source(info, raw) {
+		return retirementWarning + ", the migration source changed"
+	}
+	backup, err := writeV1Backup(filepath.Dir(j.active), raw)
 	if err != nil {
 		if backup == "" {
-			return warning
+			return retirementWarning
 		}
 		return "could not sync the v1 configuration backup " + filepath.Base(backup)
 	}
-	pending, err := j.mark(active, backup)
-	if err == nil && pending != "" {
-		err = finishV1Retirement(active, pending, raw)
+	for _, suffix := range []string{retirementSuffix, retirementStageSuffix} {
+		if reserved, err := j.protects(filepath.Join(publishAt, filepath.Base(backup)+suffix)); err != nil || reserved {
+			return retirementWarning + ", original bytes retained in " + filepath.Base(backup)
+		}
 	}
-	if err != nil {
-		return warning + ", original bytes retained in " + filepath.Base(backup)
+	if _, err := j.mark(active, backup); err != nil {
+		return retirementWarning + ", original bytes retained in " + filepath.Base(backup)
 	}
 	return ""
 }
@@ -150,7 +160,7 @@ func writeV1Backup(dir string, raw []byte) (string, error) {
 // mark pins the inspected inode across process exits. A link made
 // during a legacy rename is checked before it can become a recovery marker.
 func (j v1RetirementJournal) mark(active *os.File, backup string) (string, error) {
-	links, err := v1ConfigLinkCount(active)
+	links, err := managedFileLinkCount(active)
 	if err != nil || links == 0 {
 		return "", err
 	}
@@ -247,11 +257,12 @@ func (j v1RetirementJournal) resumeMarker(marker, suffix string) error {
 	if err != nil {
 		return err
 	}
+	// A staged link was made before clearing could begin, so it must
+	// still match the original backup byte for byte.
 	if suffix == retirementStageSuffix {
-		if err := checkRetirementBytes(active, raw, retiredV1Bytes(raw)); err != nil {
+		if err := checkRetirementBytes(active, raw, raw); err != nil {
 			return err
 		}
-		return removeRetirementMarker(marker)
 	}
 	if reserved, err := j.protects(j.active); err != nil || reserved {
 		return errors.New("retirement target may be a referenced Token file")
@@ -337,7 +348,7 @@ func clearArchivedV1Config(active *os.File, raw []byte) error {
 	if err := checkRetirementBytes(active, raw, retired); err != nil {
 		return err
 	}
-	links, err := v1ConfigLinkCount(active)
+	links, err := managedFileLinkCount(active)
 	if err != nil || links < 2 {
 		return err
 	}

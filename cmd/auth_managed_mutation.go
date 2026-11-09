@@ -91,5 +91,8 @@ func managedProfileMutationError(err error) error {
 	if errors.Is(err, authstore.ErrProfileOriginChange) {
 		return output.ErrValidation(err.Error(), "re-import a Token verified for the target API origin")
 	}
+	if errors.Is(err, authstore.ErrProfileLockToken) {
+		return output.ErrValidation(err.Error(), "configure the Token provider and profile to use a separate file")
+	}
 	return output.ErrValidation("cannot modify the unified profile", "check the configuration directory and its permissions")
 }

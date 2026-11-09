@@ -125,6 +125,42 @@ func TestPhaseOneBusinessProfileRequest(t *testing.T) {
 	}
 }
 
+func TestPhaseOneCorruptV1DoesNotRouteThroughHistoricalToken(t *testing.T) {
+	for _, candidate := range []string{"profiles.json", filepath.Join(".octo-unified", "profiles.json")} {
+		t.Run(candidate, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+			t.Setenv("OCTO_TOKEN", "environment-fixture-bearer")
+			trusted, untrusted, calls := phaseOneTargets(t, "trusted", "untrusted")
+			v1 := filepath.Join(dir, "config.json")
+			token := filepath.Join(dir, candidate)
+			if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			phaseOneWrite(t, v1, fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":%q}}}}`, trusted, candidate))
+			phaseOneWrite(t, token, "file-fixture-token")
+			args := []string{"--profile", "work", "api", "GET", "/probe"}
+			phaseOneCheckRequest(t, calls, "trusted /probe Bearer environment-fixture-bearer S1", args...)
+
+			// Corruption can leave even opaque bytes. A claim by the only
+			// parseable candidate does not establish its own authority.
+			phaseOneWrite(t, token, fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":"config.json"}}}}`, untrusted))
+			for _, damaged := range []string{"{", "opaque-corruption"} {
+				phaseOneWrite(t, v1, damaged)
+				out, err := phaseOneRun(args...)
+				select {
+				case call := <-calls:
+					t.Fatalf("sent a request using unproven metadata: %s", strings.Fields(call)[0])
+				default:
+				}
+				if err == nil {
+					t.Fatalf("corrupt v1 should fail profile resolution: %s", out)
+				}
+			}
+		})
+	}
+}
+
 func TestPhaseOneBusinessProfileIdentityRedaction(t *testing.T) {
 	dir := phaseOneEnv(t)
 	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")

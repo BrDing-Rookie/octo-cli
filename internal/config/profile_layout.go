@@ -73,6 +73,12 @@ type historicalProfileFile struct {
 
 func loadUnownedProfiles(dir string, allowLegacy, writable bool) (*ProfileConfig, error) {
 	old, oldErr := loadProfileConfigFile(dir, oldProfileFile, allowLegacy, writable)
+	// An unmarked dedicated file may be a Token referenced by the old
+	// configuration. If that configuration is unreadable, neither the
+	// candidate's contents nor its filename can establish its authority.
+	if oldErr != nil && !errors.Is(oldErr, errLegacyProfileConfig) {
+		return nil, oldErr
+	}
 	files := []historicalProfileFile{inspectHistoricalFile(dir, ManagedProfileFile)}
 	// A regular Token or symlink at the old alternate directory is not a
 	// configuration candidate. Do not probe children through that pathname.

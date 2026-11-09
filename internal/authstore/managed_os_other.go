@@ -9,11 +9,11 @@ import (
 
 func syncManagedDirectory(string) error { return nil }
 
-func openV1ConfigForRetirement(string) (*os.File, error) {
+func openExistingManagedFile(string) (*os.File, error) {
 	return nil, errors.New("managed credential writes are unavailable on this platform")
 }
 
-func v1ConfigLinkCount(*os.File) (uint64, error) {
+func managedFileLinkCount(*os.File) (uint64, error) {
 	return 0, errors.New("managed credential writes are unavailable on this platform")
 }
 

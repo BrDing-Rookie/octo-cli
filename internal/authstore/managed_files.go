@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 )
 
 const (
@@ -285,24 +287,70 @@ func readPrivateFile(root *os.Root, name string, limit int64) ([]byte, error) {
 	return data, errors.Join(readErr, closeErr)
 }
 
-// openProfileLock serializes profile writes and v1 migration.
+// openProfileLock serializes both Bot and unified profile writes.
 func openProfileLock(dir string) (*os.File, error) {
-	path := filepath.Join(dir, ".managed.lock")
-	if info, err := os.Lstat(path); err == nil {
-		if !info.Mode().IsRegular() {
-			return nil, errors.New("managed lock must be a regular file")
-		}
-	} else if !errors.Is(err, fs.ErrNotExist) {
-		return nil, err
-	}
-	lock, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, secPerm)
+	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
+	}
+	path := filepath.Join(dir, ".managed.lock")
+	if err := checkLockTokenReference(dir, path); err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, secPerm)
+	if errors.Is(err, fs.ErrExist) {
+		info, statErr := os.Lstat(path)
+		if statErr != nil {
+			return nil, statErr
+		}
+		if !info.Mode().IsRegular() || info.Size() != 0 {
+			return nil, errors.New("managed lock must be an empty regular file")
+		}
+		lock, err = openExistingManagedFile(path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := checkLockFile(lock); err != nil {
+		return nil, errors.Join(err, lock.Close())
 	}
 	if err := lockManagedFile(lock); err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
+	if err := checkLockFile(lock); err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
+	if err := checkLockTokenReference(dir, path); err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
 	return lock, nil
+}
+
+func checkLockFile(lock *os.File) error {
+	info, err := lock.Stat()
+	if err != nil {
+		return err
+	}
+	same, sameErr := sameOpenFile(lock, lock.Name())
+	links, linksErr := managedFileLinkCount(lock)
+	if err := errors.Join(sameErr, linksErr); err != nil {
+		return err
+	}
+	if !same || !info.Mode().IsRegular() || info.Size() != 0 || links != 1 {
+		return errors.New("managed lock was replaced or is not a private lock file")
+	}
+	return nil
+}
+
+func checkLockTokenReference(dir, path string) error {
+	cfg, err := config.LoadProfileConfigIn(dir, true)
+	if err != nil || cfg == nil {
+		return err
+	}
+	if reserved, err := cfg.ReferencesTokenFile(path); err != nil || reserved {
+		return ErrProfileLockToken
+	}
+	return nil
 }
 
 // writeManagedFile returns true once replacement is visible, even if a
