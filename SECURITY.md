@@ -69,18 +69,22 @@ allocated under the configured CLI directory (`~/.octo/cli` by default). A
 publication marker identifies the authoritative directory, including when its
 metadata is unreadable. The CLI can read the original v1 `config.json` and
 earlier dedicated layouts, and publishes them on the next successful unified
-profile write. To migrate before running an older CLI, run `auth update` in
-unified mode with the selected profile's existing `--api-base-url`. Existing
+profile write. Conflicting Token ownership claims between historical metadata
+files stop profile resolution. To migrate before running an older CLI, run
+`auth update` in unified mode with the selected profile's existing `--api-base-url`. Existing
 Token files stay at their paths, including targets that are temporarily missing.
 Relative Token paths and managed credential references keep their original base.
 
 After the unified configuration is durable, the CLI archives the original v1
 metadata as `config.v1-*.bak` before clearing the inspected v1 file into an
 empty Bot store. A legacy writer that has already replaced `config.json`
-keeps its active file. A pending marker pins the inspected file for recovery
-after a partial write. A subsequent unified profile mutation resumes retirement
-only if the active file still matches that marker. The backup retains the
-original bytes for recovery.
+keeps its active file. New pending markers live inside the published store and
+pin the inspected file for recovery after a partial write. A subsequent unified
+profile mutation resumes retirement only if the active file still matches that
+marker and a valid backup is present. Detached files stay in place, including
+older root-level markers whose ownership can no longer be verified. Files
+referenced as Tokens before or after the mutation are preserved. The backup
+retains the original bytes for recovery.
 
 **Trust boundary: the OS user account.** Any process running as the same user
 can run `octo-cli` and therefore decrypt the store; the encryption defends against

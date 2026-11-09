@@ -18,13 +18,36 @@ const (
 	retirementStageSuffix = retirementSuffix + "-stage"
 )
 
+type v1RetirementJournal struct {
+	active   string
+	owned    string
+	profiles *config.ProfileConfig
+	previous *config.Profile
+}
+
+func (j v1RetirementJournal) protects(path string) (bool, error) {
+	return j.profiles.ReferencesTokenFile(path, j.previous)
+}
+
 // retireV1Config runs only after the dedicated config has been committed.
 // A v0.19.5 process can replace the old pathname without taking our lock.
-func (s *ManagedStore) retireV1Config(cfg *config.ProfileConfig) string {
+func (s *ManagedStore) retireV1Config(cfg *config.ProfileConfig, previous *config.Profile) string {
 	const warning = "could not retire the previous v1 configuration"
 	active := filepath.Join(s.dir, configFile)
-	if err := resumeV1Retirements(active, cfg); err != nil {
+	dedicatedDir := filepath.Dir(filepath.Join(s.dir, cfg.WriteFile()))
+	journal := v1RetirementJournal{
+		active: active, owned: filepath.Join(dedicatedDir, config.OwnedProfileMarker),
+		profiles: cfg, previous: previous,
+	}
+	if err := journal.resume(); err != nil {
 		return warning + ", recovery is pending"
+	}
+	reserved, err := journal.protects(active)
+	if err != nil {
+		return warning
+	}
+	if reserved {
+		return "previous configuration path retained because a profile uses it as a Token file"
 	}
 	file, raw, err := readV1ConfigForRetirement(active)
 	if err != nil {
@@ -34,16 +57,8 @@ func (s *ManagedStore) retireV1Config(cfg *config.ProfileConfig) string {
 		return ""
 	}
 	defer func() { _ = file.Close() }() //nolint:errcheck // retirement explicitly syncs the open file
-	reserved, err := cfg.ReferencesTokenFile(active)
-	if err != nil {
-		return warning
-	}
-	if reserved {
-		return "previous v1 configuration retained because a profile uses that path as a Token file"
-	}
 	// Also cover a retry after the dedicated rename became visible but its
 	// directory sync failed. Do not retire the v1 file until both paths are durable.
-	dedicatedDir := filepath.Dir(filepath.Join(s.dir, cfg.WriteFile()))
 	if err := syncManagedDirectory(dedicatedDir); err != nil {
 		return warning
 	}
@@ -52,7 +67,7 @@ func (s *ManagedStore) retireV1Config(cfg *config.ProfileConfig) string {
 			return warning
 		}
 	}
-	return archiveV1Config(file, raw)
+	return journal.archive(file, raw)
 }
 
 func readV1ConfigForRetirement(active string) (*os.File, []byte, error) {
@@ -96,7 +111,7 @@ func openInspectedConfigFile(active string) (*os.File, error) {
 	return file, nil
 }
 
-func archiveV1Config(active *os.File, raw []byte) string {
+func (j v1RetirementJournal) archive(active *os.File, raw []byte) string {
 	const warning = "could not retire the previous v1 configuration"
 	backup, err := writeV1Backup(filepath.Dir(active.Name()), raw)
 	if err != nil {
@@ -105,7 +120,7 @@ func archiveV1Config(active *os.File, raw []byte) string {
 		}
 		return "could not sync the v1 configuration backup " + filepath.Base(backup)
 	}
-	pending, err := markV1Retirement(active, backup)
+	pending, err := j.mark(active, backup)
 	if err == nil && pending != "" {
 		err = finishV1Retirement(active, pending, raw)
 	}
@@ -132,9 +147,9 @@ func writeV1Backup(dir string, raw []byte) (string, error) {
 	return backup.Name(), err
 }
 
-// markV1Retirement pins the inspected inode across process exits. A link made
+// mark pins the inspected inode across process exits. A link made
 // during a legacy rename is checked before it can become a recovery marker.
-func markV1Retirement(active *os.File, backup string) (string, error) {
+func (j v1RetirementJournal) mark(active *os.File, backup string) (string, error) {
 	links, err := v1ConfigLinkCount(active)
 	if err != nil || links == 0 {
 		return "", err
@@ -142,8 +157,16 @@ func markV1Retirement(active *os.File, backup string) (string, error) {
 	if links > 1 {
 		return "", errors.New("cannot clear a hard-linked v1 configuration")
 	}
-	pending := backup + retirementSuffix
-	stage := backup + retirementStageSuffix
+	pending := filepath.Join(j.owned, filepath.Base(backup)+retirementSuffix)
+	stage := pending + "-stage"
+	for _, path := range []string{pending, stage} {
+		if reserved, err := j.protects(path); err != nil || reserved {
+			return "", errors.New("retirement marker path may be a referenced Token file")
+		}
+	}
+	if _, err := os.Lstat(pending); !errors.Is(err, fs.ErrNotExist) {
+		return "", errors.New("retirement marker path is already occupied or inaccessible")
+	}
 	if err := os.Link(active.Name(), stage); err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			return "", nil
@@ -160,82 +183,105 @@ func markV1Retirement(active *os.File, backup string) (string, error) {
 	return pending, nil
 }
 
-func resumeV1Retirements(active string, cfg *config.ProfileConfig) error {
-	dir := filepath.Dir(active)
+func (j v1RetirementJournal) resume() error {
+	info, err := os.Lstat(j.owned)
+	if err != nil || !info.IsDir() {
+		return errors.New("managed retirement directory is unavailable")
+	}
+	if err := j.resumeDirectory(j.owned, true); err != nil {
+		return err
+	}
+	return j.resumeDirectory(filepath.Dir(j.active), false)
+}
+
+func (j v1RetirementJournal) resumeDirectory(dir string, owned bool) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
 		name := entry.Name()
-		if strings.HasPrefix(name, "config.v1-") && strings.HasSuffix(name, ".bak"+retirementStageSuffix) {
-			if err := discardUnpublishedV1Marker(active, filepath.Join(dir, name), cfg); err != nil {
-				return err
-			}
+		suffix := retirementMarkerSuffix(name)
+		if suffix == "" || !entry.Type().IsRegular() {
 			continue
 		}
-		if !strings.HasPrefix(name, "config.v1-") || !strings.HasSuffix(name, ".bak"+retirementSuffix) {
+		marker := filepath.Join(dir, name)
+		reserved, err := j.protects(marker)
+		if err != nil && owned {
+			return err
+		}
+		if reserved || err != nil {
 			continue
 		}
-		if !entry.Type().IsRegular() {
-			return errors.New("invalid v1 retirement marker")
-		}
-		if err := resumeV1Retirement(active, filepath.Join(dir, name), cfg); err != nil {
+		if err := j.resumeMarker(marker, suffix); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// An exit before publication can leave a staging link on the active inode.
-// Remove that extra link so a retry can inspect and archive the file again.
-func discardUnpublishedV1Marker(active, stage string, cfg *config.ProfileConfig) error {
-	current, err := os.Lstat(active)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
+func retirementMarkerSuffix(name string) string {
+	if strings.HasPrefix(name, "config.v1-") {
+		for _, suffix := range []string{retirementSuffix, retirementStageSuffix} {
+			if strings.HasSuffix(name, ".bak"+suffix) {
+				return suffix
+			}
+		}
 	}
-	if err != nil {
-		return err
-	}
-	link, err := os.Lstat(stage)
-	if err != nil {
-		return err
-	}
-	if !current.Mode().IsRegular() || !link.Mode().IsRegular() || !os.SameFile(current, link) {
-		return nil
-	}
-	if _, err := readV1Backup(strings.TrimSuffix(stage, retirementStageSuffix)); err != nil {
-		return err
-	}
-	if reserved, err := cfg.ReferencesTokenFile(stage); reserved || err != nil {
-		return errors.New("unpublished retirement marker may be a referenced Token file")
-	}
-	return removeRetirementMarker(stage)
+	return ""
 }
 
-func resumeV1Retirement(path, pending string, cfg *config.ProfileConfig) error {
-	active, err := openInspectedConfigFile(path)
+func (j v1RetirementJournal) resumeMarker(marker, suffix string) error {
+	active, err := openMatchingRetirementFile(j.active, marker)
 	if err != nil {
 		return err
 	}
+	// A detached link cannot prove that it pinned the inspected active file.
+	// Retain it even in the owned directory rather than guessing from its name.
 	if active == nil {
-		return removeRetirementMarker(pending)
+		return nil
 	}
 	defer func() { _ = active.Close() }() //nolint:errcheck // retirement syncs before cleanup
-	if same, err := sameOpenFile(active, pending); err != nil || !same {
-		if err != nil {
-			return err
-		}
-		return removeRetirementMarker(pending)
-	}
-	if reserved, err := cfg.ReferencesTokenFile(path); err != nil || reserved {
-		return errors.New("retirement target may be a referenced Token file")
-	}
-	raw, err := readV1Backup(strings.TrimSuffix(pending, retirementSuffix))
+	backup := filepath.Join(filepath.Dir(j.active), strings.TrimSuffix(filepath.Base(marker), suffix))
+	raw, err := readV1Backup(backup)
 	if err != nil {
 		return err
 	}
-	return finishV1Retirement(active, pending, raw)
+	if suffix == retirementStageSuffix {
+		if err := checkRetirementBytes(active, raw, retiredV1Bytes(raw)); err != nil {
+			return err
+		}
+		return removeRetirementMarker(marker)
+	}
+	if reserved, err := j.protects(j.active); err != nil || reserved {
+		return errors.New("retirement target may be a referenced Token file")
+	}
+	return finishV1Retirement(active, marker, raw)
+}
+
+func openMatchingRetirementFile(active, marker string) (*os.File, error) {
+	info, err := os.Lstat(active)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	link, err := os.Lstat(marker)
+	if err != nil {
+		return nil, err
+	}
+	if !link.Mode().IsRegular() || !os.SameFile(info, link) {
+		return nil, nil
+	}
+	file, err := openInspectedConfigFile(active)
+	if err != nil || file == nil {
+		return nil, err
+	}
+	if same, err := sameOpenFile(file, marker); err != nil || !same {
+		return nil, errors.Join(err, file.Close())
+	}
+	return file, nil
 }
 
 func readV1Backup(backup string) ([]byte, error) {
@@ -271,10 +317,7 @@ func sameOpenFile(active *os.File, path string) (bool, error) {
 
 func finishV1Retirement(active *os.File, pending string, raw []byte) error {
 	if same, err := sameOpenFile(active, active.Name()); err != nil || !same {
-		if err != nil {
-			return err
-		}
-		return removeRetirementMarker(pending)
+		return err
 	}
 	if err := clearArchivedV1Config(active, raw); err != nil {
 		return err
@@ -290,6 +333,10 @@ func removeRetirementMarker(pending string) error {
 }
 
 func clearArchivedV1Config(active *os.File, raw []byte) error {
+	retired := retiredV1Bytes(raw)
+	if err := checkRetirementBytes(active, raw, retired); err != nil {
+		return err
+	}
 	links, err := v1ConfigLinkCount(active)
 	if err != nil || links < 2 {
 		return err
@@ -300,8 +347,19 @@ func clearArchivedV1Config(active *os.File, raw []byte) error {
 	// Write only the inode we inspected and backed up. Legacy writers publish
 	// by rename, so a replacement at config.json is never moved or overwritten.
 	// Padding avoids a second truncate operation and leaves valid legacy JSON.
+	if _, err := active.WriteAt(retired, 0); err != nil {
+		return err
+	}
+	return active.Sync()
+}
+
+func retiredV1Bytes(raw []byte) []byte {
 	retired := bytes.Repeat([]byte{' '}, len(raw))
 	copy(retired, `{"profiles":{}}`)
+	return retired
+}
+
+func checkRetirementBytes(active *os.File, raw, retired []byte) error {
 	current, err := io.ReadAll(io.NewSectionReader(active, 0, int64(len(raw))+1))
 	if err != nil {
 		return err
@@ -314,8 +372,5 @@ func clearArchivedV1Config(active *os.File, raw []byte) error {
 			return errors.New("v1 configuration contents changed during retirement")
 		}
 	}
-	if _, err := active.WriteAt(retired, 0); err != nil {
-		return err
-	}
-	return active.Sync()
+	return nil
 }

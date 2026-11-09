@@ -310,7 +310,7 @@ func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profil
 		// old entry in case the filesystem recovers the previous config.
 		return CommitResult{CleanupWarning: "profile changed but directory sync failed; previous credential retained"}
 	}
-	result := CommitResult{CleanupWarning: s.retireV1Config(cfg)}
+	result := CommitResult{CleanupWarning: s.retireV1Config(cfg, old)}
 	if old == nil || old.TokenSource == nil || old.TokenSource.Type != "managed_store" {
 		return result
 	}

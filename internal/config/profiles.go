@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -145,12 +147,14 @@ func (c *ProfileConfig) IsPublished() bool {
 // SetPublishedFile records a newly published metadata path for this mutation.
 func (c *ProfileConfig) SetPublishedFile(name string) { c.file = name }
 
-// ReferencesTokenFile checks direct paths, file aliases and missing symlink targets.
-func (c *ProfileConfig) ReferencesTokenFile(path string) (bool, error) {
+// ReferencesTokenFile checks direct paths, file aliases and missing symlink
+// targets. Previous profiles can be included when checking mutation cleanup.
+func (c *ProfileConfig) ReferencesTokenFile(path string, previous ...*Profile) (bool, error) {
 	const unknownAlias = "cannot determine whether a Token file aliases the managed configuration"
 	target, targetErr := os.Stat(path)
 	var unresolved error
-	for _, p := range c.Profiles {
+	profiles := slices.AppendSeq(slices.Clone(previous), maps.Values(c.Profiles))
+	for _, p := range profiles {
 		if p == nil || p.TokenSource == nil || p.TokenSource.Type != "token_file" || p.TokenSource.Path == "" {
 			continue
 		}

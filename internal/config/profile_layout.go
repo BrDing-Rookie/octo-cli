@@ -81,6 +81,9 @@ func loadUnownedProfiles(dir string, allowLegacy, writable bool) (*ProfileConfig
 	} else if err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
+	if err := checkHistoricalClaims(dir, old, files); err != nil {
+		return nil, err
+	}
 	var evidence []*ProfileConfig
 	if old != nil {
 		evidence = []*ProfileConfig{old}
@@ -92,6 +95,34 @@ func loadUnownedProfiles(dir string, allowLegacy, writable bool) (*ProfileConfig
 		return cfg, err
 	}
 	return old, oldErr
+}
+
+// A parseable Token must not get to decide which other parseable file is
+// configuration. In particular, config.json may itself be a Token of a
+// historical dedicated profile, so check both directions before using it.
+func checkHistoricalClaims(dir string, old *ProfileConfig, files []historicalProfileFile) error {
+	var candidates []*ProfileConfig
+	if old != nil {
+		candidates = append(candidates, old)
+	}
+	for _, file := range files {
+		if file.cfg != nil {
+			candidates = append(candidates, file.cfg)
+		}
+	}
+	for i, left := range candidates {
+		for _, right := range candidates[i+1:] {
+			leftClaims, leftErr := left.ReferencesTokenFile(filepath.Join(dir, right.file))
+			rightClaims, rightErr := right.ReferencesTokenFile(filepath.Join(dir, left.file))
+			if err := errors.Join(leftErr, rightErr); err != nil {
+				return err
+			}
+			if leftClaims && rightClaims || (left == old && (leftClaims || rightClaims)) {
+				return errors.New("ambiguous previous managed profile configuration and Token ownership")
+			}
+		}
+	}
+	return nil
 }
 
 func inspectHistoricalFile(dir, name string) historicalProfileFile {
@@ -107,6 +138,7 @@ func selectHistoricalProfiles(dir string, files []historicalProfileFile, evidenc
 	var selected *ProfileConfig
 	var broken, linked error
 	var external bool
+	var excludedConfigs []string
 	for _, file := range files {
 		if file.cfg == nil && file.err == nil {
 			continue
@@ -117,6 +149,9 @@ func selectHistoricalProfiles(dir string, files []historicalProfileFile, evidenc
 		}
 		if reserved {
 			external = true
+			if file.cfg != nil {
+				excludedConfigs = append(excludedConfigs, filepath.Join(dir, file.name))
+			}
 			continue
 		}
 		if file.link {
@@ -136,7 +171,7 @@ func selectHistoricalProfiles(dir string, files []historicalProfileFile, evidenc
 		return nil, broken
 	}
 	if selected != nil {
-		return selected, nil
+		return corroborateHistoricalOwnership(selected, excludedConfigs)
 	}
 	if linked != nil {
 		return nil, linked
@@ -145,6 +180,15 @@ func selectHistoricalProfiles(dir string, files []historicalProfileFile, evidenc
 		return nil, errors.New("previous managed profile configuration is missing")
 	}
 	return nil, nil
+}
+
+func corroborateHistoricalOwnership(selected *ProfileConfig, excludedConfigs []string) (*ProfileConfig, error) {
+	for _, path := range excludedConfigs {
+		if reserved, err := selected.ReferencesTokenFile(path); err != nil || !reserved {
+			return nil, errors.New("ambiguous previous managed profile configuration and Token ownership")
+		}
+	}
+	return selected, nil
 }
 
 func historicalFileIsToken(dir string, file historicalProfileFile, evidence []*ProfileConfig, activeV1 bool) (bool, error) {

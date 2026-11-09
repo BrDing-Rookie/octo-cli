@@ -2,14 +2,54 @@ package credential
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 )
+
+func TestBusinessRejectsCrossClaimedHistoricalProfileAndEnvironmentToken(t *testing.T) {
+	for _, candidate := range []string{config.ManagedProfileFile, filepath.Join(".octo-unified", config.ManagedProfileFile)} {
+		t.Run(candidate, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Setenv(config.EnvConfigDir, dir)
+			t.Setenv(config.EnvToken, "environment-fixture-bearer")
+			t.Setenv(config.EnvTokenFile, "")
+			if err := os.Unsetenv(config.EnvTokenFile); err != nil {
+				t.Fatal(err)
+			}
+			historical := filepath.Join(dir, candidate)
+			if err := os.MkdirAll(filepath.Dir(historical), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			trusted := `{"version":1,"profiles":{"work":{"api_base_url":"https://trusted.example","space_id":"S1","token_source":{"type":"token_file","path":"config.json"}}}}`
+			if err := os.WriteFile(historical, []byte(trusted), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(dir, "config.json")
+			if err := os.WriteFile(path, []byte("fixture-token"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			settings := &config.Config{CredentialMode: config.CredentialModeUnified}
+			opts := BusinessOptions{Profile: "work", ProfileSet: true}
+			if got, err := ResolveBusiness(settings, opts); err != nil || got == nil || got.APIBaseURL != "https://trusted.example" {
+				t.Fatalf("ordinary external Token must preserve the historical origin: %v", err)
+			}
+			untrusted := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":"https://untrusted.example","space_id":"S1","token_source":{"type":"token_file","path":%q}}}}`, candidate)
+			if err := os.WriteFile(path, []byte(untrusted), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := ResolveBusiness(settings, opts); got != nil || err == nil || !strings.Contains(err.Error(), "ambiguous") {
+				t.Fatalf("cross-claimed configs must fail before selecting a bearer target: %v", err)
+			}
+		})
+	}
+}
 
 func TestBusinessOriginUsesPublishedProfileDespiteExternalJSON(t *testing.T) {
 	dir := t.TempDir()

@@ -361,8 +361,11 @@ func TestV1RetirementKeepsBotPublishedAfterReadingV1(t *testing.T) {
 				if err := file.Close(); err != nil {
 					t.Fatal(err)
 				}
-			} else if warning := archiveV1Config(file, raw); warning != "" {
-				t.Fatalf("retire the inspected file: %s", warning)
+			} else {
+				journal := v1RetirementJournal{owned: t.TempDir(), profiles: &config.ProfileConfig{}}
+				if warning := journal.archive(file, raw); warning != "" {
+					t.Fatalf("retire the inspected file: %s", warning)
+				}
 			}
 			if after, err := os.Stat(active); err != nil || !os.SameFile(after, published) {
 				t.Fatalf("concurrent legacy inode changed: %v", err)
@@ -382,7 +385,7 @@ func TestV1RetirementKeepsBotPublishedAfterReadingV1(t *testing.T) {
 }
 
 func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
-	for _, scenario := range []string{"same inode", "legacy replacement", "older unmarked short write", "unpublished marker"} {
+	for _, scenario := range []string{"same inode", "legacy replacement", "active file removed", "older unmarked short write", "unpublished marker", "older root marker"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
 			store := NewManagedStore(dir, nil)
@@ -393,6 +396,10 @@ func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
 			}
 			if _, err := store.Import(snap, profile, "managed-token", BackendEncryptedFile); err != nil {
 				t.Fatal(err)
+			}
+			journal := v1RetirementJournal{
+				owned:    filepath.Join(filepath.Dir(publishedConfigPath(t, dir)), config.OwnedProfileMarker),
+				profiles: &config.ProfileConfig{},
 			}
 			path := filepath.Join(dir, configFile)
 			v1 := []byte(`{"version":1,"profiles":{"old":{"api_base_url":"https://gateway.example"}}}`)
@@ -412,12 +419,17 @@ func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
 			switch scenario {
 			case "older unmarked short write":
 			case "unpublished marker":
-				pending = backup + retirementStageSuffix
+				pending = filepath.Join(journal.owned, filepath.Base(backup)+retirementStageSuffix)
+				if err := os.Link(path, pending); err != nil {
+					t.Fatal(err)
+				}
+			case "older root marker":
+				pending = backup + retirementSuffix
 				if err := os.Link(path, pending); err != nil {
 					t.Fatal(err)
 				}
 			default:
-				pending, err = markV1Retirement(file, backup)
+				pending, err = journal.mark(file, backup)
 				if err != nil || pending == "" {
 					t.Fatalf("persist recovery marker: %v", err)
 				}
@@ -436,6 +448,11 @@ func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
 			}
 			if scenario == "legacy replacement" {
 				if err := legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "active file removed" {
+				if err := os.Remove(path); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -460,8 +477,13 @@ func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
 				(scenario == "legacy replacement" && (len(got) != 1 || got["bot"].RobotID != "cli_bot")) {
 				t.Fatalf("unexpected legacy profiles after recovery: %#v, %v", got, err)
 			}
-			if _, err := os.Stat(pending); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("completed recovery marker still present: %v", err)
+			_, markerErr := os.Stat(pending)
+			if scenario == "legacy replacement" || scenario == "active file removed" {
+				if markerErr != nil {
+					t.Fatalf("detached marker should be retained: %v", markerErr)
+				}
+			} else if !errors.Is(markerErr, os.ErrNotExist) {
+				t.Fatalf("completed recovery marker still present: %v", markerErr)
 			}
 			if got, err := os.ReadFile(backup); err != nil || !bytes.Equal(got, v1) {
 				t.Fatalf("original v1 backup changed: %v", err)
@@ -486,11 +508,115 @@ func TestV1RetirementLeavesHardLinkedSourceUntouched(t *testing.T) {
 		t.Fatalf("inspect the v1 inode: %v", err)
 	}
 	t.Cleanup(func() { _ = file.Close() })
-	if warning := archiveV1Config(file, raw); !strings.Contains(warning, "retained") {
+	journal := v1RetirementJournal{owned: t.TempDir(), profiles: &config.ProfileConfig{}}
+	if warning := journal.archive(file, raw); !strings.Contains(warning, "retained") {
 		t.Fatalf("hard-linked v1 config must retain a recovery file: %s", warning)
 	}
 	if got, err := os.ReadFile(alias); err != nil || !bytes.Equal(got, v1) {
 		t.Fatalf("hard link was modified: %v", err)
+	}
+}
+
+func TestManagedMutationKeepsExternalTokenNamedLikeRetirementMarker(t *testing.T) {
+	for _, active := range []string{"missing", "different inode"} {
+		for _, operation := range []string{"update", "logout"} {
+			t.Run(active+"/"+operation, func(t *testing.T) {
+				dir := t.TempDir()
+				const name = "config.v1-123.bak.pending"
+				tokenFile := filepath.Join(dir, name)
+				const token = "external-fixture-token"
+				if err := os.WriteFile(tokenFile, []byte(token), secPerm); err != nil {
+					t.Fatal(err)
+				}
+				// Even a valid-looking backup beside an arbitrary file does not
+				// prove that the other file is a retirement marker.
+				if err := os.WriteFile(filepath.Join(dir, "config.v1-123.bak"), []byte(`{"version":1,"profiles":{}}`), secPerm); err != nil {
+					t.Fatal(err)
+				}
+				raw := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":"https://gateway.example","token_source":{"type":"token_file","path":%q}}}}`, name)
+				if err := os.WriteFile(filepath.Join(dir, config.ManagedProfileFile), []byte(raw), secPerm); err != nil {
+					t.Fatal(err)
+				}
+				legacy := &Store{dir: dir}
+				if active == "different inode" {
+					if err := legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				store := NewManagedStore(dir, nil)
+				snap, err := store.Snapshot("work", true)
+				if err != nil || !snap.Exists {
+					t.Fatalf("select existing profile: %v", err)
+				}
+				var result CommitResult
+				if operation == "update" {
+					result, err = store.ConfirmTarget(snap, "https://gateway.example")
+				} else {
+					result, err = store.Remove(snap)
+				}
+				if err != nil || result.CleanupWarning != "" {
+					t.Fatalf("mutate profile: %#v, %v", result, err)
+				}
+				if got, err := os.ReadFile(tokenFile); err != nil || string(got) != token {
+					t.Fatalf("external Token was lost: %v", err)
+				}
+				if active == "different inode" {
+					if got, err := legacy.LoadProfiles(); err != nil || got["bot"].RobotID != "cli_bot" {
+						t.Fatalf("active Bot config was changed: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestManagedLogoutProtectsPreviouslyReferencedOwnedMarkerPath(t *testing.T) {
+	dir := t.TempDir()
+	store := NewManagedStore(dir, nil)
+	profile := managedFixtureProfile()
+	snap, err := store.Snapshot("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Import(snap, profile, "managed-token", BackendEncryptedFile); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadProfileConfigIn(dir, true)
+	if err != nil || cfg == nil {
+		t.Fatalf("read owned config: %v", err)
+	}
+	v1 := []byte(`{"version":1,"profiles":{}}`)
+	backup, err := writeV1Backup(dir, v1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(filepath.Dir(cfg.WriteFile()), config.OwnedProfileMarker, filepath.Base(backup)+retirementSuffix)
+	active := filepath.Join(dir, configFile)
+	if err := os.WriteFile(active, v1, secPerm); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(active, filepath.Join(dir, marker)); err != nil {
+		t.Fatal(err)
+	}
+	cfg.Profiles["target"].TokenSource = &config.TokenSource{Type: "token_file", Path: marker}
+	if committed, err := store.persist(cfg); !committed || err != nil {
+		t.Fatalf("seed external reference: %v", err)
+	}
+	snap, err = store.Snapshot("target", true)
+	if err != nil || !snap.Exists {
+		t.Fatalf("select profile to log out: %v", err)
+	}
+	if result, err := store.Remove(snap); err != nil || !strings.Contains(result.CleanupWarning, "Token file") {
+		t.Fatalf("remove external reference: %#v, %v", result, err)
+	}
+	if after, err := store.Snapshot("target", true); err != nil || after.Exists {
+		t.Fatalf("logout did not remove the reference: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, marker)); err != nil || !bytes.Equal(got, v1) {
+		t.Fatalf("logout removed the previously referenced file: %v", err)
+	}
+	if got, err := os.ReadFile(active); err != nil || !bytes.Equal(got, v1) {
+		t.Fatalf("logout modified the previously referenced inode: %v", err)
 	}
 }
 
