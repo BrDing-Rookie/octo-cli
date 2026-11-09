@@ -3,10 +3,12 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Environment variables for versioned profile and file selection.
@@ -83,27 +85,48 @@ func LoadWritableProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, 
 }
 
 func loadProfileConfigIn(dir string, allowLegacy, writable bool) (*ProfileConfig, error) {
-	cfg, err, alternate := loadDedicatedProfileConfig(dir, writable)
-	if cfg != nil || alternate {
-		return cfg, err
+	cfg, primaryErr, alternateErr := loadDedicatedProfileConfig(dir, writable)
+	if cfg != nil {
+		return cfg, errors.Join(primaryErr, alternateErr)
 	}
 	old, oldErr := loadProfileConfigFile(dir, oldProfileFile, allowLegacy, writable)
 	// A migration may publish the dedicated file while we read config.json.
-	cfg, err, alternate = loadDedicatedProfileConfig(dir, writable)
-	if cfg != nil || alternate {
-		return cfg, err
+	cfg, primaryErr, alternateErr = loadDedicatedProfileConfig(dir, writable)
+	if cfg != nil {
+		return cfg, errors.Join(primaryErr, alternateErr)
 	}
-	primary := filepath.Join(dir, ManagedProfileFile)
-	if old != nil && old.ReferencesTokenFile(primary) && (err == nil || isOpaqueProfileTokenFile(primary)) {
-		// This path is an input to the v1 configuration. Keep it reserved
-		// even if the external file is missing or is replaced later.
-		old.writeFile = filepath.Join(profileCollisionDir, ManagedProfileFile)
-		return old, nil
+	if old == nil {
+		return nil, errors.Join(primaryErr, alternateErr, oldErr)
 	}
-	if err != nil {
+	if err := old.selectMigrationPath(primaryErr, alternateErr, writable); err != nil {
 		return nil, err
 	}
-	return old, oldErr
+	return old, nil
+}
+
+func (old *ProfileConfig) selectMigrationPath(primaryErr, alternateErr error, writable bool) error {
+	primary := filepath.Join(old.dir, ManagedProfileFile)
+	alternate := filepath.Join(old.dir, alternateProfileFile())
+	primaryReserved, primaryRefErr := old.ReferencesTokenFile(primary)
+	alternateReserved, alternateRefErr := old.ReferencesTokenFile(alternate)
+	if primaryErr != nil && (!primaryReserved || !isOpaqueProfileTokenFile(primary)) {
+		return primaryErr
+	}
+	if alternateErr != nil && (!alternateReserved || !isOpaqueProfileTokenFile(alternate)) {
+		return alternateErr
+	}
+	if writable {
+		if err := errors.Join(primaryRefErr, alternateRefErr); err != nil {
+			return err
+		}
+		if primaryReserved && alternateReserved {
+			return errors.New("both managed configuration paths are reserved by Token files")
+		}
+	}
+	if primaryReserved {
+		old.writeFile = alternateProfileFile()
+	}
+	return nil
 }
 
 func isOpaqueProfileTokenFile(path string) bool {
@@ -128,21 +151,25 @@ func isOpaqueProfileTokenFile(path string) bool {
 		bytes.IndexFunc(token, func(r rune) bool { return r < '!' || r > '~' }) < 0
 }
 
-func loadDedicatedProfileConfig(dir string, writable bool) (cfg *ProfileConfig, err error, alternate bool) {
+func alternateProfileFile() string { return filepath.Join(profileCollisionDir, ManagedProfileFile) }
+
+func loadDedicatedProfileConfig(dir string, writable bool) (cfg *ProfileConfig, primaryErr, alternateErr error) {
+	cfg, primaryErr = loadProfileConfigFile(dir, ManagedProfileFile, false, writable)
+	if cfg != nil {
+		return cfg, nil, nil
+	}
 	// A token can also occupy the alternate directory's name. Only a real
 	// directory can contain a dedicated profile configuration there.
 	info, err := os.Lstat(filepath.Join(dir, profileCollisionDir))
 	if err == nil && info.IsDir() {
-		name := filepath.Join(profileCollisionDir, ManagedProfileFile)
-		cfg, err := loadProfileConfigFile(dir, name, false, writable)
-		if cfg != nil || err != nil {
-			return cfg, err, true
+		cfg, alternateErr = loadProfileConfigFile(dir, alternateProfileFile(), false, writable)
+		if cfg != nil {
+			return cfg, nil, nil
 		}
 	} else if err != nil && !os.IsNotExist(err) {
-		return nil, err, true
+		alternateErr = err
 	}
-	cfg, err = loadProfileConfigFile(dir, ManagedProfileFile, false, writable)
-	return cfg, err, false
+	return cfg, primaryErr, alternateErr
 }
 
 func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*ProfileConfig, error) {
@@ -206,24 +233,91 @@ func (c *ProfileConfig) WriteFile() string {
 	return c.writeFile
 }
 
-// ReferencesTokenFile checks both direct paths and aliases of an existing file.
-func (c *ProfileConfig) ReferencesTokenFile(path string) bool {
+// ReferencesTokenFile checks direct paths, file aliases and missing symlink targets.
+func (c *ProfileConfig) ReferencesTokenFile(path string) (bool, error) {
+	const unknownAlias = "cannot determine whether a Token file aliases the managed configuration"
 	target, targetErr := os.Stat(path)
+	var unresolved error
 	for _, p := range c.Profiles {
 		if p == nil || p.TokenSource == nil || p.TokenSource.Type != "token_file" || p.TokenSource.Path == "" {
 			continue
 		}
-		candidate := filepath.Clean(c.TokenFilePath(p.TokenSource.Path))
-		if candidate == path {
-			return true
+		candidate := c.TokenFilePath(p.TokenSource.Path)
+		if filepath.Clean(candidate) == filepath.Clean(path) {
+			return true, nil
 		}
-		if targetErr == nil {
-			if info, err := os.Stat(candidate); err == nil && os.SameFile(target, info) {
-				return true
+		if info, err := os.Stat(candidate); err == nil && targetErr == nil {
+			if os.SameFile(target, info) {
+				return true, nil
 			}
+			continue
+		}
+		if strings.Contains(filepath.ToSlash(candidate)+"/", "/../") {
+			unresolved = errors.New(unknownAlias)
+			continue
+		}
+		resolved, err := resolveMissingTokenPath(candidate)
+		destination, destinationErr := resolveMissingTokenPath(path)
+		if err != nil || destinationErr != nil {
+			unresolved = errors.New(unknownAlias)
+			continue
+		}
+		// Be conservative on case-insensitive volumes when an inode is missing.
+		if strings.EqualFold(resolved, destination) {
+			return true, nil
 		}
 	}
-	return false
+	return false, unresolved
+}
+
+// resolveMissingTokenPath follows the nearest existing prefix when the final
+// target is missing. Lstat can still find and follow a dangling link itself.
+func resolveMissingTokenPath(path string) (string, error) {
+	for range 40 {
+		prefix, tail, link, err := tokenPathPrefix(path)
+		if err != nil || !link {
+			return filepath.Join(prefix, tail), err
+		}
+		path = filepath.Join(prefix, tail)
+	}
+	return "", errors.New("too many Token file symlinks")
+}
+
+func tokenPathPrefix(path string) (resolved, tail string, link bool, err error) {
+	for prefix := path; ; prefix = filepath.Dir(prefix) {
+		info, err := os.Lstat(prefix)
+		if err == nil && info.Mode()&os.ModeSymlink != 0 {
+			target, err := os.Readlink(prefix)
+			if err != nil {
+				return "", "", false, err
+			}
+			// Leading .. components are relative to the real parent. A ..
+			// after another component could cross a link we cannot resolve.
+			rest := filepath.ToSlash(target)
+			for strings.HasPrefix(rest, "../") {
+				rest = strings.TrimPrefix(rest, "../")
+			}
+			if strings.Contains(rest+"/", "/../") {
+				return "", "", false, errors.New("ambiguous parent in Token file symlink")
+			}
+			if !filepath.IsAbs(target) {
+				parent, err := filepath.EvalSymlinks(filepath.Dir(prefix))
+				if err != nil {
+					return "", "", false, err
+				}
+				target = filepath.Join(parent, target)
+			}
+			return target, tail, true, nil
+		}
+		if err == nil {
+			resolved, err := filepath.EvalSymlinks(prefix)
+			return resolved, tail, false, err
+		}
+		if !os.IsNotExist(err) || filepath.Dir(prefix) == prefix {
+			return "", "", false, err
+		}
+		tail = filepath.Join(filepath.Base(prefix), tail)
+	}
 }
 
 func isLegacyProfileConfig(raw []byte) bool {

@@ -70,13 +70,16 @@ it and migrates it on the next successful unified profile write. To migrate
 before running an older CLI, run `auth update` in unified mode with the selected
 profile's existing `--api-base-url`. If a v1 profile already uses `profiles.json`
 as its Token file, the CLI writes `.octo-unified/profiles.json` and keeps the
-Token at its original path. Relative Token paths and managed credential
+Token at its original path. A Token at the alternate path can coexist with the
+default configuration. If both paths are reserved by Token references, migration
+stops before writing either one. Relative Token paths and managed credential
 references keep their original directory.
 
 After the unified configuration is durable, the CLI archives the original v1
-metadata as `config.v1-*.bak`. The legacy CLI can then use `config.json` for Bot
-profiles. A migration that captures a concurrent legacy write restores it only
-if the active path is vacant and retains the captured file for recovery.
+metadata as `config.v1-*.bak` before clearing the inspected v1 file into an
+empty Bot store. A legacy writer that has already replaced `config.json`
+keeps its active file. If clearing fails, the backup retains the original bytes
+for recovery.
 
 **Trust boundary: the OS user account.** Any process running as the same user
 can run `octo-cli` and therefore decrypt the store; the encryption defends against

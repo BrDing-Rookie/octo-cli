@@ -56,8 +56,8 @@ func TestManagedAuthMutationKeepsVerifiedTarget(t *testing.T) {
 	if err != nil || strings.Contains(out, "cleanup_warning") {
 		t.Fatalf("migrate the same origin: %v (%s)", err, out)
 	}
-	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("original v1 path remains active: %v", err)
+	if got, err := os.ReadFile(path); err != nil || strings.TrimSpace(string(got)) != `{"profiles":{}}` {
+		t.Fatalf("expected an empty legacy store after retirement: %v", err)
 	}
 	backups, err := filepath.Glob(filepath.Join(dir, "config.v1-*.bak"))
 	if err != nil || len(backups) != 1 {

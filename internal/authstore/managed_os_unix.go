@@ -19,6 +19,20 @@ func lockManagedFile(f *os.File) error {
 	}
 }
 
+func openV1ConfigForRetirement(path string) (*os.File, error) {
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), path), nil
+}
+
+func v1ConfigLinkCount(file *os.File) (uint64, error) {
+	var info unix.Stat_t
+	err := unix.Fstat(int(file.Fd()), &info)
+	return uint64(info.Nlink), err
+}
+
 func replaceManagedFile(from, to string) (bool, error) {
 	if err := os.Rename(from, to); err != nil {
 		return false, err

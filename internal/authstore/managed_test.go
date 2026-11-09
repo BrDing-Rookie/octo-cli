@@ -202,8 +202,8 @@ func TestManagedProfileMigrationPreservesCredential(t *testing.T) {
 	if result, err := store.ConfirmTarget(snap, profile.APIBaseURL); err != nil || result.CleanupWarning != "" {
 		t.Fatalf("migrate v1 profile: %#v, %v", result, err)
 	}
-	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("original v1 path is still active: %v", err)
+	if profiles, err := (&Store{dir: dir}).LoadProfiles(); err != nil || len(profiles) != 0 {
+		t.Fatalf("expected an empty legacy store after retirement: %v", err)
 	}
 	// Simulate a published CLI rewriting the old filename as an unversioned
 	// Bot store, even when the friendly name matches the unified profile.
@@ -250,34 +250,144 @@ func TestManagedMigrationPreservesConcurrentLegacyWrite(t *testing.T) {
 	}
 }
 
-func TestFinishV1RetirementRestoresWithoutReplacing(t *testing.T) {
-	for _, activeExists := range []bool{false, true} {
-		t.Run(fmt.Sprintf("active_exists=%t", activeExists), func(t *testing.T) {
+func TestManagedMigrationPreservesExternalTokenPaths(t *testing.T) {
+	for _, tc := range []struct {
+		name, reference, target string
+		dangling                bool
+	}{
+		{"alternate file already in use", ".octo-unified/profiles.json", ".octo-unified/profiles.json", false},
+		{"dangling link to primary file", "token.link", config.ManagedProfileFile, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
-			active := filepath.Join(dir, configFile)
-			backup := filepath.Join(dir, "config.v1-fixture.bak")
-			captured := []byte(`{"profiles":{"first":{"robot_id":"cli_first"}}}`)
-			if err := os.WriteFile(backup, captured, secPerm); err != nil {
-				t.Fatal(err)
-			}
-			want := captured
-			if activeExists {
-				want = []byte(`{"profiles":{"second":{"robot_id":"cli_second"}}}`)
-				if err := os.WriteFile(active, want, secPerm); err != nil {
+			const token = "external-fixture-token"
+			target := filepath.Join(dir, tc.target)
+			if tc.dangling {
+				if err := os.Symlink(tc.target, filepath.Join(dir, tc.reference)); err != nil {
+					if runtime.GOOS == "windows" {
+						t.Skipf("cannot create a Windows file symlink: %v", err)
+					}
+					t.Fatal(err)
+				}
+			} else {
+				if err := os.MkdirAll(filepath.Dir(target), dirPerm); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(target, []byte(token), secPerm); err != nil {
 					t.Fatal(err)
 				}
 			}
-			warning := finishV1Retirement(active, backup, []byte(`{"version":1,"profiles":{}}`), nil)
-			if (warning != "") != activeExists {
-				t.Fatalf("unexpected recovery warning: %q", warning)
+			v1 := fmt.Sprintf(`{"version":1,"profiles":{"unified":{"api_base_url":"https://gateway.example","token_source":{"type":"token_file","path":%q}}}}`, tc.reference)
+			if err := os.WriteFile(filepath.Join(dir, configFile), []byte(v1), secPerm); err != nil {
+				t.Fatal(err)
 			}
-			if raw, err := os.ReadFile(active); err != nil || !bytes.Equal(raw, want) {
-				t.Fatalf("wrong active legacy configuration: %v", err)
+			store := NewManagedStore(dir, nil)
+			snap, err := store.Snapshot("unified", true)
+			if err != nil || !snap.Exists || snap.Profile.TokenSource == nil || snap.Profile.TokenSource.Path != tc.reference {
+				t.Fatalf("read original profile and Token reference: %v", err)
 			}
-			if raw, err := os.ReadFile(backup); err != nil || !bytes.Equal(raw, captured) {
-				t.Fatalf("captured legacy configuration was not retained: %v", err)
+			if result, err := store.ConfirmTarget(snap, "https://gateway.example"); err != nil || result.CleanupWarning != "" {
+				t.Fatalf("migrate while retaining the Token path: %#v, %v", result, err)
+			}
+			if tc.dangling {
+				if _, err := os.Stat(target); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("migration wrote to the missing Token target: %v", err)
+				}
+				if err := os.WriteFile(target, []byte(token), secPerm); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := config.LoadProfileConfigIn(dir, false)
+			if err != nil || cfg == nil || cfg.NeedsMigration() || cfg.Profiles["unified"] == nil {
+				t.Fatalf("load migrated configuration after restoring the Token: %v", err)
+			}
+			ref := cfg.Profiles["unified"].TokenSource
+			if ref == nil || ref.Path != tc.reference {
+				t.Fatalf("external Token reference changed: %#v", ref)
+			}
+			if got, err := os.ReadFile(cfg.TokenFilePath(ref.Path)); err != nil || string(got) != token {
+				t.Fatalf("read original external Token: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, cfg.WriteFile()), []byte(`{`), secPerm); err != nil {
+				t.Fatal(err)
+			}
+			if cfg, err := config.LoadProfileConfigIn(dir, true); cfg != nil || err == nil {
+				t.Fatalf("damaged dedicated configuration must fail closed: %v", err)
 			}
 		})
+	}
+}
+
+func TestV1RetirementKeepsBotPublishedAfterReadingV1(t *testing.T) {
+	for _, phase := range []string{"complete retirement", "interrupted after backup"} {
+		t.Run(phase, func(t *testing.T) {
+			dir := t.TempDir()
+			active := filepath.Join(dir, configFile)
+			v1 := []byte(`{"version":1,"profiles":{"unified":{"api_base_url":"https://gateway.example"}}}`)
+			if err := os.WriteFile(active, v1, secPerm); err != nil {
+				t.Fatal(err)
+			}
+			file, raw, err := readV1ConfigForRetirement(active)
+			if err != nil || file == nil || !bytes.Equal(raw, v1) {
+				t.Fatalf("inspect the v1 inode: %v", err)
+			}
+			t.Cleanup(func() { _ = file.Close() })
+			legacy := &Store{dir: dir}
+			if err := legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}}); err != nil {
+				t.Fatal(err)
+			}
+			published, err := os.Stat(active)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if phase == "interrupted after backup" {
+				if _, err := writeV1Backup(dir, raw); err != nil {
+					t.Fatal(err)
+				}
+				if err := file.Close(); err != nil {
+					t.Fatal(err)
+				}
+			} else if warning := archiveV1Config(file, raw); warning != "" {
+				t.Fatalf("retire the inspected file: %s", warning)
+			}
+			if after, err := os.Stat(active); err != nil || !os.SameFile(after, published) {
+				t.Fatalf("concurrent legacy inode changed: %v", err)
+			}
+			if profiles, err := legacy.LoadProfiles(); err != nil || len(profiles) != 1 || profiles["bot"].RobotID != "cli_bot" {
+				t.Fatalf("concurrent legacy contents changed: %v", err)
+			}
+			backups, err := filepath.Glob(filepath.Join(dir, "config.v1-*.bak"))
+			if err != nil || len(backups) != 1 {
+				t.Fatalf("expected one recovery file: %v, %v", backups, err)
+			}
+			if backup, err := os.ReadFile(backups[0]); err != nil || !bytes.Equal(backup, v1) {
+				t.Fatalf("archive must contain the inspected v1 bytes: %v", err)
+			}
+		})
+	}
+}
+
+func TestV1RetirementLeavesHardLinkedSourceUntouched(t *testing.T) {
+	dir := t.TempDir()
+	active := filepath.Join(dir, configFile)
+	v1 := []byte(`{"version":1,"profiles":{}}`)
+	if err := os.WriteFile(active, v1, secPerm); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Link(active, alias); err != nil {
+		t.Fatal(err)
+	}
+	file, raw, err := readV1ConfigForRetirement(active)
+	if err != nil || file == nil {
+		t.Fatalf("inspect the v1 inode: %v", err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	if warning := archiveV1Config(file, raw); !strings.Contains(warning, "retained") {
+		t.Fatalf("hard-linked v1 config must retain a recovery file: %s", warning)
+	}
+	if got, err := os.ReadFile(alias); err != nil || !bytes.Equal(got, v1) {
+		t.Fatalf("hard link was modified: %v", err)
 	}
 }
 

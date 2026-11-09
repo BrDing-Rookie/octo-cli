@@ -248,7 +248,11 @@ func (s *ManagedStore) persist(cfg *config.ProfileConfig) (bool, error) {
 		return false, err
 	}
 	path := filepath.Join(s.dir, cfg.WriteFile())
-	if cfg.ReferencesTokenFile(path) {
+	reserved, err := cfg.ReferencesTokenFile(path)
+	if err != nil {
+		return false, err
+	}
+	if reserved {
 		return false, errors.New("managed profile configuration path is reserved by a Token file")
 	}
 	if filepath.Dir(path) != s.dir {

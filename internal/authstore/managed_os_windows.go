@@ -16,6 +16,30 @@ func lockManagedFile(f *os.File) error {
 	return windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &windows.Overlapped{})
 }
 
+func openV1ConfigForRetirement(path string) (*os.File, error) {
+	native, err := managedWindowsPath(path)
+	if err != nil {
+		return nil, err
+	}
+	name, err := windows.UTF16PtrFromString(native)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(handle), path), nil
+}
+
+func v1ConfigLinkCount(file *os.File) (uint64, error) {
+	var info windows.ByHandleFileInformation
+	err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &info)
+	return uint64(info.NumberOfLinks), err
+}
+
 // managedWindowsPath applies Go's conservative long-path threshold to calls
 // made directly to Win32. Extended paths must be absolute and normalized.
 func managedWindowsPath(path string) (string, error) {

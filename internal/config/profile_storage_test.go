@@ -100,3 +100,27 @@ func TestDedicatedProfileFileIsAuthoritative(t *testing.T) {
 		t.Fatalf("invalid dedicated file must not fall back: %#v, %v", cfg, err)
 	}
 }
+
+func TestMigrationRefusesWhenBothDestinationsAreTokenFiles(t *testing.T) {
+	dir := t.TempDir()
+	primary := filepath.Join(dir, ManagedProfileFile)
+	alternate := filepath.Join(dir, alternateProfileFile())
+	if err := os.MkdirAll(filepath.Dir(alternate), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{primary, alternate} {
+		if err := os.WriteFile(path, []byte("fixture-token"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	v1 := fmt.Sprintf(`{"version":1,"profiles":{"one":{"token_source":{"type":"token_file","path":%q}},"two":{"token_source":{"type":"token_file","path":%q}}}}`, primary, alternate)
+	if err := os.WriteFile(filepath.Join(dir, oldProfileFile), []byte(v1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := LoadProfileConfigIn(dir, true); err != nil || cfg == nil || len(cfg.Profiles) != 2 {
+		t.Fatalf("the original profiles must remain readable: %v", err)
+	}
+	if cfg, err := LoadWritableProfileConfigIn(dir, true); cfg != nil || err == nil || !strings.Contains(err.Error(), "both managed configuration paths") {
+		t.Fatalf("migration must refuse to overwrite either Token file: %v", err)
+	}
+}
