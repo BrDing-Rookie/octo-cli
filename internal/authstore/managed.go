@@ -138,7 +138,7 @@ func (s *ManagedStore) Import(snap ProfileSnapshot, profile config.Profile, toke
 		return CommitResult{}, err
 	}
 	return s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
-		ref, err := s.stageToken(token, backend)
+		ref, err := s.stageToken(cfg, token, backend)
 		if err != nil {
 			return CommitResult{}, err
 		}
@@ -149,7 +149,7 @@ func (s *ManagedStore) Import(snap ProfileSnapshot, profile config.Profile, toke
 		}
 		write := s.persist(cfg, snap.baseline.original)
 		if !write.committed {
-			return CommitResult{}, errors.Join(write.err, s.removeEntry(ref))
+			return CommitResult{}, errors.Join(write.err, s.removeEntry(cfg, ref))
 		}
 		return s.afterCommit(cfg, snap.baseline.original, write), nil
 	})
@@ -291,7 +291,7 @@ func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous 
 	if committed, err := s.writeConfig(path, data); !committed || err != nil {
 		return profileWrite{err: err}
 	}
-	staged, err := os.MkdirTemp(dir, ".publication-")
+	staged, err := os.MkdirTemp(dir, publicationStagePrefix)
 	if err != nil {
 		return profileWrite{err: err}
 	}
@@ -317,7 +317,7 @@ func checkProfileWritePaths(cfg *config.ProfileConfig, paths ...string) error {
 			return err
 		}
 		if reserved {
-			return errors.New("managed profile configuration path is reserved by a Token file")
+			return errors.New("storage path is reserved by a Token file")
 		}
 	}
 	return nil
@@ -347,7 +347,7 @@ func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profil
 			return result
 		}
 	}
-	if err := s.removeEntry(ref); err != nil {
+	if err := s.removeEntry(cfg, ref); err != nil {
 		if result.CleanupWarning != "" {
 			result.CleanupWarning += ". "
 		}
@@ -356,7 +356,7 @@ func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profil
 	return result
 }
 
-func (s *ManagedStore) stageToken(token, backend string) (*config.TokenSource, error) {
+func (s *ManagedStore) stageToken(cfg *config.ProfileConfig, token, backend string) (*config.TokenSource, error) {
 	var id [16]byte
 	if _, err := rand.Read(id[:]); err != nil {
 		return nil, fmt.Errorf("generate managed credential ID: %w", err)
@@ -367,22 +367,22 @@ func (s *ManagedStore) stageToken(token, backend string) (*config.TokenSource, e
 		err := s.createKeychain(ref.Entry, []byte(token))
 		switch {
 		case err == nil:
-			return s.verifyEntry(ref, token)
+			return s.verifyEntry(cfg, ref, token)
 		case backend == BackendKeychain || (!errors.Is(err, errKeychainUnavailable) && !errors.Is(err, errKeychainEntryTooLarge)):
 			return nil, err
 		}
 	}
 	ref.Backend = BackendEncryptedFile
-	if err := s.writeEncrypted(ref.Entry, token); err != nil {
+	if err := s.writeEncrypted(cfg, ref.Entry, token); err != nil {
 		return nil, err
 	}
-	return s.verifyEntry(ref, token)
+	return s.verifyEntry(cfg, ref, token)
 }
 
-func (s *ManagedStore) verifyEntry(ref *config.TokenSource, token string) (*config.TokenSource, error) {
+func (s *ManagedStore) verifyEntry(cfg *config.ProfileConfig, ref *config.TokenSource, token string) (*config.TokenSource, error) {
 	stored, err := s.readEntry(ref)
 	if err != nil || stored != token {
-		return nil, errors.Join(errors.New("new managed credential could not be verified"), err, s.removeEntry(ref))
+		return nil, errors.Join(errors.New("new managed credential could not be verified"), err, s.removeEntry(cfg, ref))
 	}
 	return ref, nil
 }
@@ -403,7 +403,7 @@ func (s *ManagedStore) readEntry(ref *config.TokenSource) (string, error) {
 	return s.readEncrypted(ref.Entry)
 }
 
-func (s *ManagedStore) removeEntry(ref *config.TokenSource) error {
+func (s *ManagedStore) removeEntry(cfg *config.ProfileConfig, ref *config.TokenSource) error {
 	if err := validateManagedRef(ref); err != nil {
 		return err
 	}
@@ -413,6 +413,9 @@ func (s *ManagedStore) removeEntry(ref *config.TokenSource) error {
 			return err
 		}
 		return s.keychain.Remove(account)
+	}
+	if err := checkProfileWritePaths(cfg, s.encryptedPath(ref.Entry)); err != nil {
+		return err
 	}
 	return s.removeEncrypted(ref.Entry)
 }

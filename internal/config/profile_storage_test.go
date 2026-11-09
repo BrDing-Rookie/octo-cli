@@ -132,10 +132,11 @@ func TestHistoricalAlternateUsesArchivedTokenOwnership(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(alternate), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	const owned = `{"version":1,"profiles":{"work":{"api_base_url":"https://trusted.example","token_source":{"type":"token_file","path":"profiles.json"}}}}`
 	files := map[string]string{
 		primary:                                 `{"version":1,"profiles":{"work":{"api_base_url":"https://untrusted.example"}}}`,
-		alternate:                               `{"version":1,"profiles":{"work":{"api_base_url":"https://trusted.example","token_source":{"type":"token_file","path":"profiles.json"}}}}`,
-		filepath.Join(dir, "config.v1-123.bak"): `{"version":1,"profiles":{"work":{"token_source":{"type":"token_file","path":"profiles.json"}}}}`,
+		alternate:                               owned,
+		filepath.Join(dir, "config.v1-123.bak"): owned,
 	}
 	for name, contents := range files {
 		if err := os.WriteFile(name, []byte(contents), 0o600); err != nil {
@@ -151,5 +152,19 @@ func TestHistoricalAlternateUsesArchivedTokenOwnership(t *testing.T) {
 	}
 	if cfg, err := LoadProfileConfigIn(dir, true); cfg != nil || err == nil {
 		t.Fatal("a damaged historical alternate must not fall back to its Token file")
+	}
+}
+
+func TestHistoricalProfileRejectsHardLinkedArchive(t *testing.T) {
+	dir := t.TempDir()
+	candidate := filepath.Join(dir, ManagedProfileFile)
+	if err := os.WriteFile(candidate, []byte(`{"version":1,"profiles":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(candidate, filepath.Join(dir, "config.v1-1.bak")); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := LoadProfileConfigIn(dir, true); cfg != nil || err == nil {
+		t.Fatal("a second path to the candidate inode is not independent evidence")
 	}
 }

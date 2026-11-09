@@ -31,6 +31,9 @@ func TestBusinessRejectsCrossClaimedHistoricalProfileAndEnvironmentToken(t *test
 			if err := os.WriteFile(historical, []byte(trusted), 0o600); err != nil {
 				t.Fatal(err)
 			}
+			if err := os.WriteFile(filepath.Join(dir, "config.v1-1.bak"), []byte(trusted), 0o600); err != nil {
+				t.Fatal(err)
+			}
 			path := filepath.Join(dir, "config.json")
 			settings := &config.Config{CredentialMode: config.CredentialModeUnified}
 			opts := BusinessOptions{Profile: "work", ProfileSet: true}
@@ -70,8 +73,11 @@ func TestBusinessOriginUsesPublishedProfileDespiteExternalJSON(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(previous), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(previous, []byte(`{"version":1,"profiles":{"work":{"api_base_url":"https://trusted.example","space_id":"S1","token_source":{"type":"token_file","path":"profiles.json"}}}}`), 0o600); err != nil {
-		t.Fatal(err)
+	const historical = `{"version":1,"profiles":{"work":{"api_base_url":"https://trusted.example","space_id":"S1","token_source":{"type":"token_file","path":"profiles.json"}}}}`
+	for _, path := range []string{previous, filepath.Join(dir, "config.v1-1.bak")} {
+		if err := os.WriteFile(path, []byte(historical), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	opts := BusinessOptions{Profile: "work", ProfileSet: true}
 	settings := &config.Config{CredentialMode: config.CredentialModeUnified}

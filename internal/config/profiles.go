@@ -34,7 +34,7 @@ type ProfileConfig struct {
 	Profiles       map[string]*Profile `json:"profiles"`
 	dir            string
 	file           string
-	v1Info         os.FileInfo
+	fileInfo       os.FileInfo
 	v1Digest       [sha256.Size]byte
 }
 
@@ -120,8 +120,8 @@ func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*Profi
 	}
 	cfg.dir = dir
 	cfg.file = name
+	cfg.fileInfo = info
 	if name == oldProfileFile {
-		cfg.v1Info = info
 		cfg.v1Digest = sha256.Sum256(raw)
 	}
 	return cfg, nil
@@ -157,8 +157,8 @@ func (c *ProfileConfig) NeedsMigration() bool { return c.file == oldProfileFile 
 
 // MatchesV1Source verifies that a migration still has the v1 file it loaded.
 func (c *ProfileConfig) MatchesV1Source(info os.FileInfo, raw []byte) bool {
-	return c.NeedsMigration() && c.v1Info != nil &&
-		os.SameFile(c.v1Info, info) && c.v1Digest == sha256.Sum256(raw)
+	return c.NeedsMigration() && c.fileInfo != nil &&
+		os.SameFile(c.fileInfo, info) && c.v1Digest == sha256.Sum256(raw)
 }
 
 // WriteFile returns the loaded metadata path relative to the store.

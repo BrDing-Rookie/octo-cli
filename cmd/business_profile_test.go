@@ -125,7 +125,7 @@ func TestPhaseOneBusinessProfileRequest(t *testing.T) {
 	}
 }
 
-func TestPhaseOneCorruptV1DoesNotRouteThroughHistoricalToken(t *testing.T) {
+func TestPhaseOneUnavailableV1DoesNotRouteThroughHistoricalToken(t *testing.T) {
 	for _, candidate := range []string{"profiles.json", filepath.Join(".octo-unified", "profiles.json")} {
 		t.Run(candidate, func(t *testing.T) {
 			dir := phaseOneEnv(t)
@@ -145,8 +145,15 @@ func TestPhaseOneCorruptV1DoesNotRouteThroughHistoricalToken(t *testing.T) {
 			// Corruption can leave even opaque bytes. A claim by the only
 			// parseable candidate does not establish its own authority.
 			phaseOneWrite(t, token, fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":"config.json"}}}}`, untrusted))
-			for _, damaged := range []string{"{", "opaque-corruption"} {
-				phaseOneWrite(t, v1, damaged)
+			for _, damaged := range []string{"{", "opaque-corruption", ""} {
+				if damaged == "" {
+					if err := os.Remove(v1); err != nil {
+						t.Fatal(err)
+					}
+					phaseOneWrite(t, filepath.Join(dir, "config.v1-1.bak"), "{")
+				} else {
+					phaseOneWrite(t, v1, damaged)
+				}
 				out, err := phaseOneRun(args...)
 				select {
 				case call := <-calls:
@@ -154,9 +161,22 @@ func TestPhaseOneCorruptV1DoesNotRouteThroughHistoricalToken(t *testing.T) {
 				default:
 				}
 				if err == nil {
-					t.Fatalf("corrupt v1 should fail profile resolution: %s", out)
+					t.Fatalf("unavailable v1 should fail profile resolution: %s", out)
 				}
 			}
+			archive := filepath.Join(dir, "config.v1-1.bak")
+			archived := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1"}}}`, trusted)
+			phaseOneWrite(t, archive, archived)
+			if out, err := phaseOneRun(args...); err == nil {
+				t.Fatalf("an unrelated archive must not authorize a new binding: %s", out)
+			}
+			select {
+			case call := <-calls:
+				t.Fatalf("sent a request using a mismatched archive: %s", strings.Fields(call)[0])
+			default:
+			}
+			phaseOneWrite(t, token, archived)
+			phaseOneCheckRequest(t, calls, "trusted /probe Bearer environment-fixture-bearer S1", args...)
 		})
 	}
 }

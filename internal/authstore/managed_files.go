@@ -86,11 +86,14 @@ func (s *ManagedStore) masterKeyPath() string {
 	return filepath.Join(s.dir, credentialsDir, masterKeyFile)
 }
 
-func (s *ManagedStore) writeEncrypted(entry, token string) error {
+func (s *ManagedStore) writeEncrypted(cfg *config.ProfileConfig, entry, token string) error {
+	if err := checkProfileWritePaths(cfg, filepath.Join(s.dir, credentialsDir), s.encryptedPath(entry)); err != nil {
+		return err
+	}
 	if err := ensurePrivateDir(filepath.Join(s.dir, credentialsDir)); err != nil {
 		return err
 	}
-	key, location, err := s.masterKeyForWrite()
+	key, location, err := s.masterKeyForWrite(cfg)
 	if err != nil {
 		return err
 	}
@@ -178,8 +181,12 @@ func (s *ManagedStore) masterKey(location byte) ([32]byte, error) {
 	return [32]byte(raw), nil
 }
 
-func (s *ManagedStore) masterKeyForWrite() (key [32]byte, location byte, err error) {
-	fileKey, fileErr := s.masterKey(keyInFile)
+func (s *ManagedStore) masterKeyForWrite(cfg *config.ProfileConfig) (key [32]byte, location byte, err error) {
+	var fileKey [32]byte
+	fileErr := checkProfileWritePaths(cfg, s.masterKeyPath())
+	if fileErr == nil {
+		fileKey, fileErr = s.masterKey(keyInFile)
+	}
 	key, err = s.masterKey(keyInKeychain)
 	fileMissing := errors.Is(fileErr, fs.ErrNotExist)
 	keychainMissing := errors.Is(err, fs.ErrNotExist)

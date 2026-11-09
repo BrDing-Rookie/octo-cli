@@ -222,6 +222,7 @@ func TestProfileWritesRejectLockTokenCollisions(t *testing.T) {
 			if err := os.WriteFile(path, []byte(raw), secPerm); err != nil {
 				t.Fatal(err)
 			}
+			writeOwnershipFixture(t, filepath.Join(dir, "config.v1-1.bak"), []byte(raw))
 			managed := NewManagedStore(dir, nil)
 			snap, err := managed.Snapshot("work", true)
 			if err != nil || !snap.Exists {
@@ -603,6 +604,18 @@ func TestV1RetirementLeavesHardLinkedSourceUntouched(t *testing.T) {
 	if err := os.Link(active, alias); err != nil {
 		t.Fatal(err)
 	}
+	parent := filepath.Join(dir, config.OwnedProfileDirPrefix+"unproven")
+	writeOwnershipFixture(t, filepath.Join(parent, config.ManagedProfileFile), v1)
+	stage := filepath.Join(parent, publicationStagePrefix+"unproven")
+	if err := os.Mkdir(stage, dirPerm); err != nil {
+		t.Fatal(err)
+	}
+	const backupName = "config.v1-1.bak"
+	writeOwnershipFixture(t, filepath.Join(dir, backupName), []byte(`{"version":1,"profiles":{"different":{}}}`))
+	marker := filepath.Join(stage, backupName+retirementSuffix)
+	if err := os.Link(active, marker); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := config.LoadWritableProfileConfigIn(dir, true)
 	if err != nil || cfg == nil {
 		t.Fatalf("load v1 profiles: %v", err)
@@ -614,6 +627,7 @@ func TestV1RetirementLeavesHardLinkedSourceUntouched(t *testing.T) {
 	if got, err := os.ReadFile(alias); err != nil || !bytes.Equal(got, v1) {
 		t.Fatalf("hard link was modified: %v", err)
 	}
+	assertOwnershipFixture(t, marker, v1)
 }
 
 func TestManagedMutationKeepsExternalTokenNamedLikeRetirementMarker(t *testing.T) {
@@ -636,6 +650,7 @@ func TestManagedMutationKeepsExternalTokenNamedLikeRetirementMarker(t *testing.T
 				if err := os.WriteFile(filepath.Join(dir, config.ManagedProfileFile), []byte(raw), secPerm); err != nil {
 					t.Fatal(err)
 				}
+				writeOwnershipFixture(t, filepath.Join(dir, "config.v1-456.bak"), []byte(raw))
 				legacy := &Store{dir: dir}
 				if active == "different inode" {
 					if err := legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}}); err != nil {
@@ -787,13 +802,16 @@ func TestManagedRemoveRejectsSymlinkedCredentials(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(publishedConfigPath(t, original.dir))
+	originalConfig := publishedConfigPath(t, original.dir)
+	raw, err := os.ReadFile(originalConfig)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(copyStore.dir, config.ManagedProfileFile), raw, secPerm); err != nil {
+	copied := filepath.Join(copyStore.dir, filepath.Base(filepath.Dir(originalConfig)))
+	if err := os.MkdirAll(filepath.Join(copied, config.OwnedProfileMarker), dirPerm); err != nil {
 		t.Fatal(err)
 	}
+	writeOwnershipFixture(t, filepath.Join(copied, config.ManagedProfileFile), raw)
 	snap, err = copyStore.Snapshot("target", true)
 	if err != nil || !snap.Exists {
 		t.Fatalf("select copied profile: %v", err)

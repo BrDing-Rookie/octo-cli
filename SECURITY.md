@@ -70,24 +70,30 @@ publication marker identifies the authoritative directory, including when its
 metadata is unreadable. The CLI can read the original v1 `config.json` and
 earlier dedicated layouts, and publishes them on the next successful unified
 profile write. Conflicting Token ownership claims or an unreadable original
-`config.json` stop resolution of unmarked historical layouts. An existing
-published configuration retains authority in either case. To migrate before
-running an older CLI, run `auth update` in unified mode with the selected
+`config.json` stop resolution of unmarked historical layouts. When the original
+file is missing or contains Bot metadata, a separate archive must corroborate
+the complete profile bindings and default selection. An existing published
+configuration retains authority. To migrate before running an older CLI, run
+`auth update` in unified mode with the selected
 profile's existing `--api-base-url`. Existing Token files stay at their paths,
 including targets that are temporarily missing. Relative Token paths and
 managed credential references keep their original base.
 
-Unified and current Bot profile writes share `.managed.lock`. Both refuse a
-write if a profile can use that file or an alias as a Token path.
+Unified and current Bot profile writes share `.managed.lock`. Both protect
+referenced Token paths and aliases from conflicting writes. The encrypted-file
+backend leaves an external `master.key` alone, and managed credential cleanup
+preserves any entry path still referenced as an external Token.
 
 When migrating directly from the original v1 configuration, the CLI verifies
 the source inode and bytes, archives them as `config.v1-*.bak`, and publishes
 the new configuration together with the recovery marker. Once the publication
 is durable, the CLI clears the verified v1 file into an empty Bot store.
 A legacy writer that replaces `config.json` keeps its active file. Recovery
-requires a matching active inode and a valid paired backup. Detached markers
-and unmarked `config.json` files remain in place after publication, including
-files whose Token reference was previously removed. An older migration that
+requires a matching active inode and a valid paired backup. A retry after
+interrupted staging removes an old pin only when it still links to the
+verified migration source and its backup matches the source bytes. Detached
+markers and unmarked `config.json` files remain in place after publication,
+including files whose Token reference was previously removed. An older migration that
 left an unmarked v1 file may require manual recovery before using the Bot CLI.
 
 **Trust boundary: the OS user account.** Any process running as the same user

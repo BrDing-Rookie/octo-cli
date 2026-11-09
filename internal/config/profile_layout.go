@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -97,10 +98,33 @@ func loadUnownedProfiles(dir string, allowLegacy, writable bool) (*ProfileConfig
 		evidence = archivedV1Profiles(dir)
 	}
 	cfg, err := selectHistoricalProfiles(dir, files, evidence, old != nil)
-	if cfg != nil || err != nil {
+	if err != nil {
 		return cfg, err
 	}
+	if cfg != nil {
+		if old == nil && !hasArchivedProfileEvidence(cfg, evidence) {
+			return nil, errors.New("previous managed profile configuration has no independent ownership evidence")
+		}
+		return cfg, nil
+	}
 	return old, oldErr
+}
+
+// Without the original configuration, an archive must independently confirm
+// all bindings. A stale backup that merely mentions a different Token path
+// cannot authorize the origin or credential references in this candidate.
+func hasArchivedProfileEvidence(candidate *ProfileConfig, archives []*ProfileConfig) bool {
+	for _, archive := range archives {
+		if os.SameFile(candidate.fileInfo, archive.fileInfo) ||
+			candidate.CurrentProfile != archive.CurrentProfile || !reflect.DeepEqual(candidate.Profiles, archive.Profiles) {
+			continue
+		}
+		reserved, err := candidate.ReferencesTokenFile(filepath.Join(archive.dir, archive.file))
+		if err == nil && !reserved {
+			return true
+		}
+	}
+	return false
 }
 
 // A parseable Token must not get to decide which other parseable file is

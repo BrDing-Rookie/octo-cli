@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	retirementSuffix      = ".pending"
-	retirementStageSuffix = retirementSuffix + "-stage"
-	retirementWarning     = "could not retire the previous v1 configuration"
+	publicationStagePrefix = ".publication-"
+	retirementSuffix       = ".pending"
+	retirementStageSuffix  = retirementSuffix + "-stage"
+	retirementWarning      = "could not retire the previous v1 configuration"
 )
 
 type v1RetirementJournal struct {
@@ -122,6 +123,9 @@ func (j v1RetirementJournal) prepareMigration(publishAt string) string {
 	if err != nil || !j.profiles.MatchesV1Source(info, raw) {
 		return retirementWarning + ", the migration source changed"
 	}
+	if err := j.discardAbandonedPins(active, raw); err != nil {
+		return retirementWarning + ", could not inspect a previous migration"
+	}
 	backup, err := writeV1Backup(filepath.Dir(j.active), raw)
 	if err != nil {
 		if backup == "" {
@@ -138,6 +142,84 @@ func (j v1RetirementJournal) prepareMigration(publishAt string) string {
 		return retirementWarning + ", original bytes retained in " + filepath.Base(backup)
 	}
 	return ""
+}
+
+// A process can exit after pinning the source and before publishing its
+// journal. Only remove a stale pin when the next migration has independently
+// loaded the same active v1 metadata. A retry can then stage a fresh journal.
+func (j v1RetirementJournal) discardAbandonedPins(active *os.File, raw []byte) error {
+	links, err := managedFileLinkCount(active)
+	if err != nil || links <= 1 {
+		return err
+	}
+	dir := filepath.Dir(j.active)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), config.OwnedProfileDirPrefix) {
+			continue
+		}
+		parent := filepath.Join(dir, entry.Name())
+		if _, err := os.Lstat(filepath.Join(parent, config.OwnedProfileMarker)); !errors.Is(err, fs.ErrNotExist) {
+			continue
+		}
+		if _, err := readV1Backup(filepath.Join(parent, config.ManagedProfileFile)); err != nil {
+			continue
+		}
+		stages, err := os.ReadDir(parent)
+		if err != nil {
+			return err
+		}
+		for _, stage := range stages {
+			if stage.IsDir() && strings.HasPrefix(stage.Name(), publicationStagePrefix) {
+				if err := j.discardStagedPins(active, raw, filepath.Join(parent, stage.Name())); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (j v1RetirementJournal) discardStagedPins(active *os.File, raw []byte, dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		suffix := retirementMarkerSuffix(entry.Name())
+		if suffix == "" || !entry.Type().IsRegular() {
+			continue
+		}
+		marker := filepath.Join(dir, entry.Name())
+		backup := filepath.Join(filepath.Dir(j.active), strings.TrimSuffix(entry.Name(), suffix))
+		if !j.isAbandonedPin(active, raw, marker, backup) {
+			continue
+		}
+		if err := checkRetirementBytes(active, raw, raw); err != nil {
+			return err
+		}
+		if err := removeRetirementMarker(marker); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (j v1RetirementJournal) isAbandonedPin(active *os.File, raw []byte, marker, backup string) bool {
+	for _, path := range []string{marker, backup} {
+		if reserved, err := j.protects(path); err != nil || reserved {
+			return false
+		}
+	}
+	same, err := sameOpenFile(active, marker)
+	if err != nil || !same {
+		return false
+	}
+	archived, err := readV1Backup(backup)
+	return err == nil && bytes.Equal(archived, raw)
 }
 
 func writeV1Backup(dir string, raw []byte) (string, error) {
