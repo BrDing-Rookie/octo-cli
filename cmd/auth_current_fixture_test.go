@@ -22,6 +22,7 @@ const (
 	authCurrentFixtureStoredToken     = "fixture-stored+/=token"
 	authCurrentFixtureMaxVersion      = "18446744073709551615"
 	authCurrentFixtureVersionOverflow = "18446744073709551616"
+	authCurrentFixtureEnvelopeError   = `{"code":"AUTH_REQUIRED","message":"fixture authorization error"}`
 )
 
 type authCurrentFixtureReply struct {
@@ -103,6 +104,11 @@ func (r authCurrentFixtureReply) withActions(actions string) authCurrentFixtureR
 
 func (r authCurrentFixtureReply) withVersion(version string) authCurrentFixtureReply {
 	r.body = strings.Replace(r.body, `"version":1,`, `"version":`+version+`,`, 1)
+	return r
+}
+
+func (r authCurrentFixtureReply) withEnvelopeError(value string) authCurrentFixtureReply {
+	r.body = strings.Replace(r.body, `{"data":`, `{"error":`+value+`,"data":`, 1)
 	return r
 }
 

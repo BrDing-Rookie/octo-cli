@@ -106,7 +106,11 @@ func runAuthGet(ctx context.Context, f *cmdutil.Factory) error {
 			return err
 		}
 	}
-	err = f.WriteSuccessWithMeta(ctx, f.Out(), raw, output.EnvelopeMeta{})
+	var rendered bytes.Buffer
+	err = f.WriteSuccessWithMeta(ctx, &rendered, raw, output.EnvelopeMeta{})
+	if err == nil {
+		err = f.IOStreams.WriteStdout(ctx, rendered.Bytes())
+	}
 	if err != nil && errors.Is(err, ctx.Err()) {
 		return output.ErrNetwork("CLI Token self-check was cancelled", "retry the self-check")
 	}
@@ -231,11 +235,12 @@ func requestAuthCurrent(ctx context.Context, f *cmdutil.Factory, cred *credentia
 
 func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
 	var envelope struct {
-		Data json.RawMessage `json:"data"`
+		Data  json.RawMessage  `json:"data"`
+		Error *json.RawMessage `json:"error"`
 	}
 	var self authTokenSelf
 	invalid := output.ErrAPI("INVALID_TOKEN_SELF", "invalid TokenSelf response from octo-auth", "check the octo-auth gateway and response contract")
-	if err := json.Unmarshal(raw, &envelope); err != nil {
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope.Error != nil {
 		return self, invalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(envelope.Data))
@@ -317,18 +322,18 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 	meta := output.EnvelopeMeta{Identity: map[string]string{
 		"type": "token", "source": "stdin", "profile": payload["profile"],
 	}}
-	render := func(w io.Writer) error {
+	var rendered bytes.Buffer
+	render := func() error {
 		raw, err := json.Marshal(payload)
 		if err != nil {
 			return err
 		}
-		return f.WriteSuccessWithMeta(ctx, w, raw, meta)
+		return f.WriteSuccessWithMeta(ctx, &rendered, raw, meta)
 	}
 
 	filtered := f.Globals.JQ != ""
-	var rendered bytes.Buffer
 	if filtered {
-		if err := render(&rendered); err != nil {
+		if err := render(); err != nil {
 			if errors.Is(err, ctx.Err()) {
 				return authImportCanceled()
 			}
@@ -354,10 +359,11 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 			payload["cleanup_warning"] = warning
 		}
 	}
-	if filtered {
-		_, err = rendered.WriteTo(f.IOStreams.Out)
-	} else {
-		err = render(f.IOStreams.Out)
+	if !filtered {
+		err = render()
+	}
+	if err == nil {
+		err = f.IOStreams.WriteStdout(ctx, rendered.Bytes())
 	}
 	if err != nil {
 		return output.ErrWithHint("internal", "TOKEN_IMPORT_OUTPUT_FAILED",

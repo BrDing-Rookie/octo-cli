@@ -2,6 +2,7 @@ package cmdutil
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 )
@@ -13,6 +14,47 @@ type IOStreams struct {
 	In     io.Reader
 	Out    io.Writer
 	ErrOut io.Writer
+}
+
+// WriteStdout writes a rendered response and lets the CLI exit on cancellation
+// even when an inherited stdout pipe stays blocked.
+func (s *IOStreams) WriteStdout(ctx context.Context, data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	out := s.Out
+	write := func(data []byte) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, err := out.Write(data)
+		if err == nil && n != len(data) {
+			return io.ErrShortWrite
+		}
+		return err
+	}
+	if ctx.Done() == nil {
+		return write(data)
+	}
+	// The underlying writer can still be blocked when this method returns.
+	// Give the write its own copy so the caller may release or reuse its buffer.
+	data = bytes.Clone(data)
+	done := make(chan error, 1)
+	go func() { done <- write(data) }()
+	select {
+	case err := <-done:
+		return err
+	case <-ctx.Done():
+		select {
+		case err := <-done:
+			return err
+		default:
+			return ctx.Err()
+		}
+	}
 }
 
 // NewStdIOStreams returns streams bound to the process stdio.

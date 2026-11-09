@@ -26,7 +26,7 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 	store := authstore.NewManagedStore(dir, nil)
 	candidate := authCurrentFixtureCandidateToken
 	old := authCurrentFixtureStoredToken
-	reply := authCurrentFixtureSuccess("candidate-id", "owner", "new-space").withVersion("0")
+	reply := authCurrentFixtureSuccess("candidate-id", "owner", "new-space").withVersion("0").withEnvelopeError("null")
 	reply.body = strings.Replace(reply.body, `"name":"fixture"`, `"name":"prefix`+candidate+`suffix"`, 1)
 	permissions := `[{"domain":"Loop.task-2","actions":["Loop.task-2:Read_1.v2","Loop.task-2:*"]},` +
 		`{"domain":"*","actions":["*:read","*","*:*"]},{"domain":"task","actions":[]}]`
@@ -295,6 +295,7 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		{"timeout", candidate, "NETWORK_ERROR", "network", authCurrentFixtureReply{waitForCancellation: true}, true},
 		{"malformed", candidate, "INVALID_TOKEN_SELF", "api_error", authCurrentFixtureReply{status: http.StatusOK, body: `{"data":` + candidate}, true},
 		{"incomplete", candidate, "INVALID_TOKEN_SELF", "api_error", authCurrentFixtureReply{status: http.StatusOK, body: `{"data":{"token":"` + candidate + `"}}`}, true},
+		{"mixed success and error", candidate, "INVALID_TOKEN_SELF", "api_error", active.withEnvelopeError(authCurrentFixtureEnvelopeError), true},
 		{"null action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[null]`), true},
 		{"empty action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[""]`), true},
 		{"blank action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["   "]`), true},
@@ -499,6 +500,7 @@ func TestUnifiedAuthCurrentGetRejectsInvalidTokenSelf(t *testing.T) {
 	for _, tc := range []struct {
 		name, original, replacement string
 	}{
+		{"mixed success and error", `{"data":`, `{"error":` + authCurrentFixtureEnvelopeError + `,"data":`},
 		{"null action", `["task:read"]`, `[null]`},
 		{"empty action", `["task:read"]`, `[""]`},
 		{"blank action", `["task:read"]`, `["   "]`},
