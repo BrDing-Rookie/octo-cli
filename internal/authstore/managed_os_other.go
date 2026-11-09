@@ -7,8 +7,8 @@ import (
 	"os"
 )
 
-func lockManagedFile(*os.File) error {
-	return errors.New("managed credential writes are unavailable on this platform")
+func tryLockManagedFile(*os.File) (bool, error) {
+	return false, errors.New("managed credential writes are unavailable on this platform")
 }
 
 func replaceManagedFile(string, string) (bool, error) {

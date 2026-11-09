@@ -1,6 +1,7 @@
 package authstore
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const (
@@ -197,7 +199,7 @@ func readPrivateFile(path string, limit int64) ([]byte, error) {
 	return data, errors.Join(readErr, closeErr)
 }
 
-func openManagedLock(path string) (*os.File, error) {
+func openManagedLock(ctx context.Context, path string) (*os.File, error) {
 	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() {
 			return nil, errors.New("managed lock must be a regular file")
@@ -209,10 +211,20 @@ func openManagedLock(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := lockManagedFile(lock); err != nil {
-		return nil, errors.Join(err, lock.Close())
+	for ctx.Err() == nil {
+		acquired, err := tryLockManagedFile(lock)
+		if err != nil {
+			return nil, errors.Join(err, lock.Close())
+		}
+		if acquired {
+			return lock, nil
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
-	return lock, nil
+	return nil, errors.Join(ctx.Err(), lock.Close())
 }
 
 // writeManagedFile returns true once replacement is visible, even if a

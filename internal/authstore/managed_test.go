@@ -310,6 +310,55 @@ func TestManagedKeychainFallbackPolicy(t *testing.T) {
 	}
 }
 
+func TestManagedImportCancelsWhileWriteLockHeld(t *testing.T) {
+	dir := t.TempDir()
+	store := NewManagedStore(dir, nil)
+	target := managedFixtureProfile()
+	before, err := store.Snapshot("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Import(before, target, "original-token", BackendEncryptedFile); err != nil {
+		t.Fatal(err)
+	}
+	before, err = store.Snapshot("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(dir, configFile)
+	originalConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := openManagedLock(t.Context(), filepath.Join(dir, ".managed.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lock.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.ImportContext(ctx, before, target, "candidate-token", BackendEncryptedFile)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected lock wait cancellation, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("import did not cancel while the write lock was held")
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Equal(originalConfig, after) {
+		t.Fatalf("cancelled import changed the Profile configuration: %v", err)
+	}
+	if token, err := store.readEntry(before.Profile.TokenSource); err != nil || token != "original-token" {
+		t.Fatalf("expected the original Token after cancellation: %v", err)
+	}
+}
+
 func TestManagedImportsSerializeAcrossProcesses(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

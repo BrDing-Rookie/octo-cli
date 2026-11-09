@@ -2,13 +2,17 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
@@ -25,6 +29,9 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 	reply := authCurrentFixtureSuccess("candidate-id", "owner", "new-space")
 	reply.body = strings.Replace(reply.body, `"name":"fixture"`, `"name":"prefix`+candidate+`suffix"`, 1)
 	reply.body = strings.Replace(reply.body, `"version":1`, `"version":0`, 1)
+	permissions := `[{"domain":"Loop.task-2","actions":["Loop.task-2:Read_1.v2","Loop.task-2:*"]},` +
+		`{"domain":"*","actions":["*:read","*","*:*"]},{"domain":"task","actions":[]}]`
+	reply.body = strings.Replace(reply.body, `[{"domain":"task","actions":["task:read"]}]`, permissions, 1)
 	reply.body = strings.Replace(reply.body, `"bot_name":"Fixture Bot"`,
 		`"bot_name":"`+url.QueryEscape(candidate)+`","relation_id":9007199254740993,"token_hash":"private"`, 1)
 	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
@@ -73,13 +80,13 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 				ExpiresAt  json.RawMessage `json:"expires_at"`
 				LastUsedAt json.RawMessage `json:"last_used_at"`
 			}
-			Permissions []json.RawMessage
+			Permissions []authPermission
 			BotBindings []json.RawMessage `json:"bot_bindings"`
 			NestedData  json.RawMessage   `json:"data"`
 		}
 	}
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil || !result.OK ||
-		result.Data.Token.ID != "candidate-id" || len(result.Data.Permissions) != 1 ||
+		result.Data.Token.ID != "candidate-id" ||
 		len(result.Data.BotBindings) != 1 || result.Data.NestedData != nil {
 		t.Fatalf("unexpected TokenSelf envelope: %s (%v)", stdout, err)
 	}
@@ -87,6 +94,11 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 	if meta.Version == nil || *meta.Version != 0 || string(meta.Remark) != "null" ||
 		string(meta.ExpiresAt) != "null" || string(meta.LastUsedAt) != "null" {
 		t.Fatalf("expected version zero and nullable metadata in TokenSelf: %s", stdout)
+	}
+	var wantPermissions []authPermission
+	if err := json.Unmarshal([]byte(permissions), &wantPermissions); err != nil ||
+		!reflect.DeepEqual(result.Data.Permissions, wantPermissions) {
+		t.Fatalf("expected the permission patterns unchanged: %s (%v)", stdout, err)
 	}
 	binding := string(result.Data.BotBindings[0])
 	if !strings.Contains(binding, "9007199254740993") || strings.Contains(binding, "token_hash") {
@@ -175,9 +187,9 @@ func TestUnifiedAuthCurrentCreatesProfile(t *testing.T) {
 	dir := phaseOneEnv(t)
 	store := authstore.NewManagedStore(dir, nil)
 	candidate := authCurrentFixtureCandidateToken
-	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
-		candidate: authCurrentFixtureSuccess("id", "owner", "space"),
-	})
+	reply := authCurrentFixtureSuccess("id", "owner", "space")
+	reply.body = strings.Replace(reply.body, `[{"domain":"task","actions":["task:read"]}]`, `[]`, 1)
+	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{candidate: reply})
 	t.Setenv(config.EnvProfile, "new")
 	t.Setenv(config.EnvAPIBaseURL, server.URL)
 	t.Setenv(config.EnvSpaceID, "space")
@@ -250,8 +262,6 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 	expired.body = strings.Replace(expired.body, `"is_expired":false`, `"is_expired":true`, 1)
 	revoked := active
 	revoked.body = strings.Replace(revoked.body, `"status":"active"`, `"status":"revoked"`, 1)
-	nullAction := active
-	nullAction.body = strings.Replace(nullAction.body, `["task:read"]`, `[null]`, 1)
 	missingMetadata := active
 	missingMetadata.body = strings.NewReplacer(
 		`,"version":1`, "",
@@ -268,7 +278,10 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		{"timeout", candidate, "NETWORK_ERROR", "network", authCurrentFixtureReply{waitForCancellation: true}, true},
 		{"malformed", candidate, "INVALID_TOKEN_SELF", "api_error", authCurrentFixtureReply{status: http.StatusOK, body: `{"data":` + candidate}, true},
 		{"incomplete", candidate, "INVALID_TOKEN_SELF", "api_error", authCurrentFixtureReply{status: http.StatusOK, body: `{"data":{"token":"` + candidate + `"}}`}, true},
-		{"null action", candidate, "INVALID_TOKEN_SELF", "api_error", nullAction, true},
+		{"null action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[null]`), true},
+		{"empty action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[""]`), true},
+		{"blank action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["   "]`), true},
+		{"unqualified action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["read"]`), true},
 		{"missing required metadata", candidate, "INVALID_TOKEN_SELF", "api_error", missingMetadata, true},
 		{"space", candidate, "VALIDATION_ERROR", "validation", authCurrentFixtureSuccess("id", "owner", "other-space"), true},
 		{"owner", candidate, "VALIDATION_ERROR", "validation", authCurrentFixtureSuccess("id", "other-owner", "space"), true},
@@ -354,11 +367,95 @@ func TestUnifiedAuthCurrentJQFailurePreservesProfile(t *testing.T) {
 	}
 }
 
+func TestUnifiedAuthCurrentCancelWhileReadingStdin(t *testing.T) {
+	dir := phaseOneEnv(t)
+	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+	store := authstore.NewManagedStore(dir, nil)
+	candidate, old := authCurrentFixtureCandidateToken, authCurrentFixtureStoredToken
+	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
+		candidate: authCurrentFixtureSuccess("candidate-id", "owner", "space"),
+		old:       authCurrentFixtureSuccess("old-id", "owner", "space"),
+	})
+	seedAuthCurrentProfile(t, store, "target", server.URL, "space", old)
+	configPath := filepath.Join(dir, "config.json")
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stdin, writer := io.Pipe()
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		_ = writer.Close()
+	})
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type commandResult struct {
+		stdout, stderr string
+		err            error
+	}
+	done := make(chan commandResult, 1)
+	go func() {
+		stdout, stderr, err := runUnifiedAuthCurrentContext(ctx, store, stdin, "--profile", "target", "auth", "login", "--with-token")
+		done <- commandResult{stdout: stdout, stderr: stderr, err: err}
+	}()
+	wrote := make(chan error, 1)
+	go func() {
+		_, err := io.WriteString(writer, candidate)
+		wrote <- err
+	}()
+	// The synchronous pipe write confirms login has read from stdin. Keep the
+	// writer open so there is no EOF to unblock the read before cancellation.
+	select {
+	case err := <-wrote:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case result := <-done:
+		t.Fatalf("login exited before reading stdin: %v", result.err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("login did not read stdin")
+	}
+	cancel()
+	select {
+	case result := <-done:
+		exit := output.AsExitError(result.err)
+		if exit == nil || exit.Code != "NETWORK_ERROR" || result.stdout != "" {
+			t.Fatalf("expected cancellation with empty stdout: %v (%s %s)", result.err, result.stdout, result.stderr)
+		}
+		assertAuthCurrentRedaction(t, candidate, result.stderr, result.err.Error())
+	case <-time.After(5 * time.Second):
+		t.Fatal("login waited for stdin to close after cancellation")
+	}
+	if len(requests()) != 0 {
+		t.Fatal("cancelled login contacted the gateway")
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("cancelled login changed the Profile configuration: %v", err)
+	}
+	stdout, stderr, err := runUnifiedAuthCurrent(store, strings.NewReader(""),
+		"--profile", "target", "--jq", ".data.token.token_id", "auth", "get")
+	if err != nil || strings.TrimSpace(stdout) != `"old-id"` {
+		t.Fatalf("expected the original Token after cancellation: %v (%s %s)", err, stdout, stderr)
+	}
+}
+
 func TestUnifiedAuthCurrentGetRejectsInvalidTokenSelf(t *testing.T) {
 	for _, tc := range []struct {
 		name, original, replacement string
 	}{
 		{"null action", `["task:read"]`, `[null]`},
+		{"empty action", `["task:read"]`, `[""]`},
+		{"blank action", `["task:read"]`, `["   "]`},
+		{"unqualified action", `["task:read"]`, `["read"]`},
+		{"empty action field", `["task:read"]`, `["task:"]`},
+		{"padded action", `["task:read"]`, `["task:read "]`},
+		{"extra separator", `["task:read"]`, `["task:read:extra"]`},
+		{"partial wildcard", `["task:read"]`, `["task:r*"]`},
+		{"mismatched domain", `["task:read"]`, `["doc:read"]`},
+		{"global wildcard in concrete group", `["task:read"]`, `["*"]`},
+		{"invalid group domain", `"domain":"task"`, `"domain":"ta*k"`},
 		{"missing name", `"name":"fixture",`, ""},
 		{"null name", `"name":"fixture"`, `"name":null`},
 		{"missing version", `,"version":1`, ""},
@@ -451,7 +548,11 @@ func TestUnifiedAuthCurrentGetModeAndDryRun(t *testing.T) {
 	assertAuthCurrentRedaction(t, candidate, stdout, stderr, err.Error())
 }
 
-func runUnifiedAuthCurrent(store *authstore.ManagedStore, stdin *strings.Reader, args ...string) (stdout, stderr string, err error) {
+func runUnifiedAuthCurrent(store *authstore.ManagedStore, stdin io.Reader, args ...string) (stdout, stderr string, err error) {
+	return runUnifiedAuthCurrentContext(context.Background(), store, stdin, args...)
+}
+
+func runUnifiedAuthCurrentContext(ctx context.Context, store *authstore.ManagedStore, stdin io.Reader, args ...string) (stdout, stderr string, err error) {
 	f := cmdutil.NewDefaultFactory()
 	streams, _, out, errOut := cmdutil.NewTestIOStreams()
 	streams.In = stdin
@@ -461,7 +562,7 @@ func runUnifiedAuthCurrent(store *authstore.ManagedStore, stdin *strings.Reader,
 	}
 	root := NewRootCmd(f)
 	root.SetArgs(args)
-	err = root.Execute()
+	err = root.ExecuteContext(ctx)
 	return out.String(), errOut.String(), err
 }
 

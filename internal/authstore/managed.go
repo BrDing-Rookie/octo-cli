@@ -1,6 +1,7 @@
 package authstore
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -123,10 +124,18 @@ func cloneProfile(p *config.Profile) *config.Profile {
 // Import commits a verified candidate. The caller performs network
 // verification before invoking Import so the lock covers only local writes.
 func (s *ManagedStore) Import(snap ProfileSnapshot, profile config.Profile, token, backend string) (CommitResult, error) {
+	return s.ImportContext(context.Background(), snap, profile, token, backend)
+}
+
+// ImportContext can be cancelled until the local write transaction starts.
+func (s *ManagedStore) ImportContext(ctx context.Context, snap ProfileSnapshot, profile config.Profile, token, backend string) (CommitResult, error) {
+	if err := ctx.Err(); err != nil {
+		return CommitResult{}, err
+	}
 	if err := validateImport(profile, token, backend); err != nil {
 		return CommitResult{}, err
 	}
-	return s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
+	return s.modify(ctx, snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
 		ref, err := s.stageToken(token, backend)
 		if err != nil {
 			return CommitResult{}, err
@@ -168,7 +177,7 @@ func validateImport(profile config.Profile, token, backend string) error {
 
 // Remove deletes the selected reference before cleaning up its managed entry.
 func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
-	return s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
+	return s.modify(context.Background(), snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
 		if snap.baseline.original == nil {
 			return CommitResult{}, errors.New("selected profile does not exist")
 		}
@@ -187,7 +196,7 @@ func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
 // ConfirmTarget checks an unchanged binding under the write lock. A new
 // origin or Space needs a token verified against that target via Import.
 func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) error {
-	_, err := s.modify(snap, func(_ *config.ProfileConfig) (CommitResult, error) {
+	_, err := s.modify(context.Background(), snap, func(_ *config.ProfileConfig) (CommitResult, error) {
 		if snap.baseline.original == nil || snap.baseline.original.APIBaseURL != apiBaseURL || apiBaseURL == "" {
 			return CommitResult{}, errors.New("re-import a verified Token to change the API origin")
 		}
@@ -196,7 +205,7 @@ func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) er
 	return err
 }
 
-func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfig) (CommitResult, error)) (CommitResult, error) {
+func (s *ManagedStore) modify(ctx context.Context, snap ProfileSnapshot, fn func(*config.ProfileConfig) (CommitResult, error)) (CommitResult, error) {
 	base := snap.baseline
 	if base == nil || base.dir != s.dir || base.name == "" || strings.TrimSpace(base.name) != base.name {
 		return CommitResult{}, errors.New("a valid target profile is required")
@@ -208,7 +217,7 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 	if err := ensurePrivateDir(s.dir); err != nil {
 		return CommitResult{}, err
 	}
-	lock, err := openManagedLock(filepath.Join(s.dir, ".managed.lock"))
+	lock, err := openManagedLock(ctx, filepath.Join(s.dir, ".managed.lock"))
 	if err != nil {
 		return CommitResult{}, err
 	}
@@ -225,6 +234,9 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 	if (base.implicit && cfg.CurrentProfile != base.name) ||
 		exists != (base.original != nil) || !reflect.DeepEqual(actual, base.original) {
 		return CommitResult{}, ErrProfileConflict
+	}
+	if err := ctx.Err(); err != nil {
+		return CommitResult{}, err
 	}
 	return fn(cfg)
 }

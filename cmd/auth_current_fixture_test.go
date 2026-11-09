@@ -94,6 +94,11 @@ func authCurrentFixtureSuccess(tokenID, owner, space string) authCurrentFixtureR
 	}
 }
 
+func (r authCurrentFixtureReply) withActions(actions string) authCurrentFixtureReply {
+	r.body = strings.Replace(r.body, `["task:read"]`, actions, 1)
+	return r
+}
+
 func authCurrentFixtureError(status int, code, reason, echo string) authCurrentFixtureReply {
 	return authCurrentFixtureReply{
 		status: status,

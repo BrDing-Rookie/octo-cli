@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -22,6 +23,8 @@ import (
 )
 
 const authCurrentPath = "/v1/auth/tokens/_current"
+
+var authPermissionField = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+|\*)$`)
 
 type authTokenSelf struct {
 	Token       authTokenMetadata `json:"token"`
@@ -109,12 +112,13 @@ func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool,
 	if err != nil {
 		return err
 	}
-	token, err := readUnifiedLoginToken(f.IOStreams.In)
+	ctx := cmd.Context()
+	token, err := readUnifiedLoginToken(ctx, f.IOStreams.In)
 	if err != nil {
 		return err
 	}
 	candidate := &credential.BusinessContext{Token: token, APIBaseURL: target.APIBaseURL, SpaceID: target.SpaceID}
-	raw, err := requestAuthCurrent(cmd.Context(), f, candidate)
+	raw, err := requestAuthCurrent(ctx, f, candidate)
 	if err != nil {
 		return err
 	}
@@ -125,7 +129,7 @@ func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool,
 	if err := self.Token.verifyImport(target.SpaceID, ownerID); err != nil {
 		return err
 	}
-	return importVerifiedToken(cmd.Context(), f, store, baseline, target, token)
+	return importVerifiedToken(ctx, f, store, baseline, target, token)
 }
 
 func validateUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL, ownerID string) error {
@@ -163,13 +167,34 @@ func authLoginTarget(f *cmdutil.Factory, previous config.Profile, apiBaseURL str
 	return config.Profile{APIBaseURL: runtime.APIBaseURL, SpaceID: runtime.SpaceID}, nil
 }
 
-func readUnifiedLoginToken(stdin io.Reader) (string, error) {
+func readUnifiedLoginToken(ctx context.Context, stdin io.Reader) (string, error) {
+	if ctx.Err() != nil {
+		return "", authImportCanceled()
+	}
 	const limit = 64 * 1024
-	raw, err := io.ReadAll(io.LimitReader(stdin, limit+1))
-	if err != nil || len(raw) > limit {
+	type readResult struct {
+		raw []byte
+		err error
+	}
+	// Stdin may be an inherited blocking pipe. Let the command exit on
+	// cancellation even if the pipe owner leaves it open.
+	done := make(chan readResult, 1)
+	go func() {
+		raw, err := io.ReadAll(io.LimitReader(stdin, limit+1))
+		done <- readResult{raw: raw, err: err}
+	}()
+	var read readResult
+	select {
+	case <-ctx.Done():
+	case read = <-done:
+	}
+	if ctx.Err() != nil {
+		return "", authImportCanceled()
+	}
+	if read.err != nil || len(read.raw) > limit {
 		return "", output.ErrValidation("cannot read candidate CLI Token from stdin", "pipe a single CLI Token")
 	}
-	token := strings.TrimSpace(string(raw))
+	token := strings.TrimSpace(string(read.raw))
 	if err := credential.ValidateBusinessToken(token, "stdin"); err != nil {
 		return "", err
 	}
@@ -225,11 +250,19 @@ func (m *authTokenMetadata) valid() bool {
 }
 
 func (p authPermission) valid() bool {
-	if p.Domain == "" || p.Actions == nil {
+	if !authPermissionField.MatchString(p.Domain) || p.Actions == nil {
 		return false
 	}
+	prefix := p.Domain + ":"
 	for _, action := range p.Actions {
 		if action == nil {
+			return false
+		}
+		if *action == "*" && p.Domain == "*" {
+			continue
+		}
+		name, ok := strings.CutPrefix(*action, prefix)
+		if !ok || !authPermissionField.MatchString(name) {
 			return false
 		}
 	}
@@ -277,10 +310,10 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 			return err
 		}
 	}
-	if ctx.Err() != nil {
-		return output.ErrNetwork("CLI Token verification was cancelled", "retry the import")
+	result, err := store.ImportContext(ctx, baseline, target, token, authstore.BackendAuto)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return authImportCanceled()
 	}
-	result, err := store.Import(baseline, target, token, authstore.BackendAuto)
 	if errors.Is(err, authstore.ErrProfileConflict) {
 		return output.ErrWithHint("validation", "PROFILE_CONFLICT", "profile changed during CLI Token verification", "retry the import after checking the target Profile")
 	}
@@ -307,6 +340,10 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 			"check the Profile with auth get before retrying and review the output options")
 	}
 	return nil
+}
+
+func authImportCanceled() error {
+	return output.ErrNetwork("CLI Token import was cancelled", "retry the import")
 }
 
 func (s *authTokenSelf) redactedPayload(bearer string) ([]byte, error) {
