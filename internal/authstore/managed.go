@@ -275,7 +275,7 @@ func (s *ManagedStore) stageToken(token, backend string) (*config.TokenSource, e
 	ref := &config.TokenSource{Type: "managed_store", Entry: hex.EncodeToString(id[:]), Backend: backend}
 	if backend != BackendEncryptedFile {
 		ref.Backend = BackendKeychain
-		err := s.keychain.Create(s.account(ref.Entry), []byte(token))
+		err := s.createKeychain(ref.Entry, []byte(token))
 		switch {
 		case err == nil:
 			return s.verifyEntry(ref, token)
@@ -308,7 +308,7 @@ func (s *ManagedStore) readEntry(ref *config.TokenSource) (string, error) {
 		return "", err
 	}
 	if ref.Backend == BackendKeychain {
-		data, err := s.keychain.Read(s.account(ref.Entry))
+		data, err := s.readKeychain(ref.Entry)
 		return string(data), err
 	}
 	return s.readEncrypted(ref.Entry)
@@ -319,7 +319,11 @@ func (s *ManagedStore) removeEntry(ref *config.TokenSource) error {
 		return err
 	}
 	if ref.Backend == BackendKeychain {
-		return s.keychain.Remove(s.account(ref.Entry))
+		account, err := s.account(ref.Entry)
+		if err != nil {
+			return err
+		}
+		return s.keychain.Remove(account)
 	}
 	if err := os.Remove(s.encryptedPath(ref.Entry)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err

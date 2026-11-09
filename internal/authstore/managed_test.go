@@ -128,7 +128,10 @@ func TestManagedCommitFailures(t *testing.T) {
 			case "verify-entry":
 				keychain.readsFail = true
 			case "cleanup":
-				keychain.keep = store.account(old.Entry)
+				keychain.keep, err = store.account(old.Entry)
+				if err != nil {
+					t.Fatal(err)
+				}
 			case "directory-sync":
 				store.writeConfig = func(path string, data []byte) (bool, error) {
 					committed, err := writeManagedFile(path, data)
@@ -155,6 +158,50 @@ func TestManagedCommitFailures(t *testing.T) {
 			}
 			if token, err := store.readEntry(after.Profile.TokenSource); err != nil || token != "new-token" {
 				t.Fatalf("new entry cannot be read: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedKeychainEntriesUseCanonicalDirectory(t *testing.T) {
+	for _, backend := range []string{BackendKeychain, BackendEncryptedFile} {
+		t.Run(backend, func(t *testing.T) {
+			parent := t.TempDir()
+			alias := filepath.Join(t.TempDir(), "parent-alias")
+			if err := os.Symlink(parent, alias); err != nil {
+				if runtime.GOOS == "windows" {
+					t.Skipf("cannot create a Windows directory symlink: %v", err)
+				}
+				t.Fatal(err)
+			}
+			keychain := &fixtureKeychain{entries: map[string][]byte{}}
+			original := NewManagedStore(filepath.Join(parent, "store"), keychain)
+			aliased := NewManagedStore(filepath.Join(alias, "store"), keychain)
+			baseline, err := original.Snapshot("target", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			const token = "keychain-fixture-bearer"
+			if _, err := original.Import(baseline, managedFixtureProfile(), token, backend); err != nil {
+				t.Fatal(err)
+			}
+			selected, err := aliased.Snapshot("target", true)
+			if err != nil || !selected.Exists {
+				t.Fatalf("alias did not select the stored profile: %v", err)
+			}
+			ref := selected.Profile.TokenSource
+			if stored, err := aliased.readEntry(ref); err != nil || stored != token {
+				t.Fatalf("alias could not read the stored token: %v", err)
+			}
+			result, err := aliased.Remove(selected)
+			if err != nil || result.CleanupWarning != "" {
+				t.Fatalf("alias could not remove the original entry: %#v, %v", result, err)
+			}
+			if _, err := original.readEntry(ref); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("entry still readable from the original path: %v", err)
+			}
+			if backend == BackendKeychain && len(keychain.entries) != 0 {
+				t.Fatal("removing through the alias left behind a Keychain token")
 			}
 		})
 	}

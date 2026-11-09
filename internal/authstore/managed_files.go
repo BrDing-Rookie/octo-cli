@@ -41,9 +41,31 @@ func (unavailableKeychain) Create(string, []byte) error { return errKeychainUnav
 // Remove reports that no system provider is available.
 func (unavailableKeychain) Remove(string) error { return errKeychainUnavailable }
 
-func (s *ManagedStore) account(entry string) string {
-	digest := sha256.Sum256([]byte(s.dir))
-	return hex.EncodeToString(digest[:]) + "/" + entry
+func (s *ManagedStore) account(entry string) (string, error) {
+	// The same store may be reached through a symlinked parent, such as
+	// /tmp and /private/tmp on macOS. Keep those aliases in one namespace.
+	dir, err := filepath.EvalSymlinks(s.dir)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed credential directory: %w", err)
+	}
+	digest := sha256.Sum256([]byte(dir))
+	return hex.EncodeToString(digest[:]) + "/" + entry, nil
+}
+
+func (s *ManagedStore) readKeychain(entry string) ([]byte, error) {
+	account, err := s.account(entry)
+	if err != nil {
+		return nil, err
+	}
+	return s.keychain.Read(account)
+}
+
+func (s *ManagedStore) createKeychain(entry string, data []byte) error {
+	account, err := s.account(entry)
+	if err != nil {
+		return err
+	}
+	return s.keychain.Create(account, data)
 }
 
 func (s *ManagedStore) encryptedPath(entry string) string {
@@ -97,7 +119,7 @@ func (s *ManagedStore) masterKey(location byte) ([32]byte, error) {
 	var err error
 	switch location {
 	case keyInKeychain:
-		raw, err = s.keychain.Read(s.account("master-key"))
+		raw, err = s.readKeychain("master-key")
 	case keyInFile:
 		raw, err = readPrivateFile(s.masterKeyPath(), 32)
 	default:
@@ -121,7 +143,7 @@ func (s *ManagedStore) masterKeyForWrite() (key [32]byte, location byte, err err
 		if _, err = rand.Read(key[:]); err != nil {
 			return key, 0, err
 		}
-		err = s.keychain.Create(s.account("master-key"), key[:])
+		err = s.createKeychain("master-key", key[:])
 		if err == nil {
 			return key, keyInKeychain, nil
 		}

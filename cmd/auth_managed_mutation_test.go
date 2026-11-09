@@ -16,6 +16,7 @@ func TestManagedAuthMutationKeepsVerifiedTarget(t *testing.T) {
 	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
 	path := filepath.Join(dir, "config.json")
 	raw := `{"version":1,"current_profile":"work","profiles":{"work":{"api_base_url":"https://gateway.example","space_id":"S1","token_source":{"type":"token_file","path":"external"}}}}`
+	const fakeBearer = "demo-review-fake-bearer"
 	phaseOneWrite(t, path, raw)
 	phaseOneWrite(t, filepath.Join(dir, "external"), "external-test-bearer")
 	for _, tc := range []struct {
@@ -24,12 +25,16 @@ func TestManagedAuthMutationKeepsVerifiedTarget(t *testing.T) {
 	}{
 		{[]string{"auth", "update", "--api-base-url", "https://other.example"}, "cannot change the API origin"},
 		{[]string{"auth", "update", "--clear-api-base-url"}, "cannot change the API origin"},
+		{[]string{"auth", "update", "--api-base-url", "https://example.invalid/%ZZ?token=" + fakeBearer}, "invalid API base URL"},
 		{[]string{"--bot-id", "legacy", "auth", "logout"}, "only --profile"},
 		{[]string{"--credential-file", "external", "auth", "logout"}, "only --profile"},
 		{[]string{"--dry-run", "auth", "logout"}, "--dry-run is not supported"},
 		{[]string{"auth", "update", "--api-base-url", "https://gateway.example"}, ""},
 	} {
 		out, err := phaseOneRun(tc.args...)
+		if strings.Contains(out, fakeBearer) || (err != nil && strings.Contains(err.Error(), fakeBearer)) {
+			t.Fatal("auth update echoed the malformed URL's bearer")
+		}
 		switch {
 		case tc.want == "" && err != nil:
 			t.Errorf("%v: %v (%s)", tc.args, err, out)

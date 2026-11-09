@@ -100,6 +100,12 @@ func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
 				}
 				normalized, err := config.NormalizeAPIBaseURL(apiBaseURL)
 				if err != nil {
+					if unified {
+						return failErr(f, output.ErrValidation(
+							"invalid API base URL; expected an HTTP(S) origin",
+							"pass only the Octo gateway base URL, without a service path",
+						))
+					}
 					return failErr(f, output.ErrValidation(
 						err.Error(),
 						"pass only the Octo gateway base URL, without a service path",
