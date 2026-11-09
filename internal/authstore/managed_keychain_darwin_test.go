@@ -117,10 +117,62 @@ func TestDarwinKeychainPinsNewEntriesAcrossSearchListChanges(t *testing.T) {
 	if err := store.Remove(account); err != nil {
 		t.Fatalf("remove from the pinned Keychain: %v", err)
 	}
-	if _, err := os.Stat(store.locatorPath(account)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(dir, credentialsDir, keychainLocatorName(account))); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("successful delete retained locator: %v", err)
 	}
 	if err := store.Remove(account); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("a legacy search miss must be reported: %v", err)
+	}
+}
+
+func TestDarwinKeychainLogoutRejectsSymlinkedCredentials(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(t.TempDir(), "fixture.keychain-db")
+	if err := os.WriteFile(path, nil, secPerm); err != nil {
+		t.Fatal(err)
+	}
+	keychain := macKeychain{dir: dir, run: func(command string) ([]byte, error) {
+		switch {
+		case command == "default-keychain":
+			return []byte(fmt.Sprintf("%q\n", path)), nil
+		case strings.HasPrefix(command, "add-generic-password "):
+			return nil, nil
+		case strings.HasPrefix(command, "find-generic-password "):
+			return []byte("61\n"), nil
+		default:
+			t.Fatalf("unexpected Keychain operation: %s", command)
+			return nil, os.ErrInvalid
+		}
+	}}
+	store := NewManagedStore(dir, keychain)
+	snap, err := store.Snapshot("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Import(snap, managedFixtureProfile(), "a", BackendKeychain); err != nil {
+		t.Fatal(err)
+	}
+	snap, err = store.Snapshot("target", true)
+	if err != nil || !snap.Exists {
+		t.Fatalf("select Keychain profile: %v", err)
+	}
+	credentials := filepath.Join(dir, credentialsDir)
+	external := filepath.Join(t.TempDir(), credentialsDir)
+	if err := os.Rename(credentials, external); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(external, credentials); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.Remove(snap)
+	if err != nil || result.CleanupWarning == "" {
+		t.Fatalf("logout must commit and report refused Keychain cleanup: %#v, %v", result, err)
+	}
+	if after, err := store.Snapshot("target", true); err != nil || after.Exists {
+		t.Fatalf("profile was not removed: %v", err)
+	}
+	locator := filepath.Join(external, keychainLocatorName(snap.Profile.TokenSource.Entry))
+	if raw, err := os.ReadFile(locator); err != nil || string(raw) != path {
+		t.Fatalf("external Keychain locator changed: %v", err)
 	}
 }

@@ -64,6 +64,15 @@ with `OCTO_CONFIG_DIR`):
   decrypted on a *different* machine, not that an attacker who has the file
   cannot eventually decrypt it given the same host.
 
+Unified profiles use **`profiles.json`** in the configured CLI directory
+(`~/.octo/cli` by default). If only a v1 `config.json` exists, the CLI can read
+it and copies its configuration to `profiles.json` on the next successful
+unified profile write. To migrate before running an older CLI, run `auth update`
+in unified mode with the selected profile's existing `--api-base-url`. Relative
+token paths and managed credential references keep their original directory.
+After migration, legacy CLI writes to `config.json` are independent of unified
+profiles.
+
 **Trust boundary: the OS user account.** Any process running as the same user
 can run `octo-cli` and therefore decrypt the store; the encryption defends against
 off-machine leakage (accidental commit, backup, cloud sync), not a co-resident

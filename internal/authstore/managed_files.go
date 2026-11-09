@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -17,6 +18,7 @@ const (
 	keyInKeychain   = 1
 	keyInFile       = 2
 	credentialsDir  = "credentials"
+	masterKeyFile   = "master.key"
 )
 
 var (
@@ -79,7 +81,7 @@ func (s *ManagedStore) encryptedPath(entry string) string {
 }
 
 func (s *ManagedStore) masterKeyPath() string {
-	return filepath.Join(s.dir, credentialsDir, "master.key")
+	return filepath.Join(s.dir, credentialsDir, masterKeyFile)
 }
 
 func (s *ManagedStore) writeEncrypted(entry, token string) error {
@@ -102,24 +104,33 @@ func (s *ManagedStore) writeEncrypted(entry, token string) error {
 }
 
 func (s *ManagedStore) removeEncrypted(entry string) error {
-	root, err := os.OpenRoot(s.dir)
+	return removeCredentialFile(s.dir, entry+".enc")
+}
+
+func openCredentialRoot(dir string) (*os.Root, error) {
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	info, err := root.Lstat(credentialsDir)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && info.IsDir()) {
+		return root, nil
+	}
+	if err == nil {
+		err = errors.New("managed storage requires a real credentials directory")
+	}
+	return nil, errors.Join(err, root.Close())
+}
+
+func removeCredentialFile(dir, name string) error {
+	root, err := openCredentialRoot(dir)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = root.Close() }() //nolint:errcheck // directory handle used only for lookup and removal
 
-	info, err := root.Lstat(credentialsDir)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return errors.New("managed credential cleanup requires a real credentials directory")
-	}
 	// Keep removal inside the store even if the directory is swapped after Lstat.
-	err = root.Remove(filepath.Join(credentialsDir, entry+".enc"))
+	err = root.Remove(filepath.Join(credentialsDir, name))
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
@@ -127,7 +138,7 @@ func (s *ManagedStore) removeEncrypted(entry string) error {
 }
 
 func (s *ManagedStore) readEncrypted(entry string) (string, error) {
-	blob, err := readPrivateFile(s.encryptedPath(entry), maxManagedToken+64)
+	blob, err := readCredentialFile(s.dir, entry+".enc", maxManagedToken+64)
 	if err != nil {
 		return "", err
 	}
@@ -152,7 +163,7 @@ func (s *ManagedStore) masterKey(location byte) ([32]byte, error) {
 	case keyInKeychain:
 		raw, err = s.readKeychain("master-key")
 	case keyInFile:
-		raw, err = readPrivateFile(s.masterKeyPath(), 32)
+		raw, err = readCredentialFile(s.dir, masterKeyFile, 32)
 	default:
 		return [32]byte{}, errors.New("invalid encrypted credential key location")
 	}
@@ -166,11 +177,19 @@ func (s *ManagedStore) masterKey(location byte) ([32]byte, error) {
 }
 
 func (s *ManagedStore) masterKeyForWrite() (key [32]byte, location byte, err error) {
+	fileKey, fileErr := s.masterKey(keyInFile)
 	key, err = s.masterKey(keyInKeychain)
+	fileMissing := errors.Is(fileErr, fs.ErrNotExist)
+	keychainMissing := errors.Is(err, fs.ErrNotExist)
+	if fileMissing || keychainMissing {
+		if checkErr := s.checkMissingMasterKeys(fileMissing, keychainMissing); checkErr != nil {
+			return key, 0, checkErr
+		}
+	}
 	switch {
 	case err == nil:
 		return key, keyInKeychain, nil
-	case errors.Is(err, fs.ErrNotExist):
+	case keychainMissing:
 		if _, err = rand.Read(key[:]); err != nil {
 			return key, 0, err
 		}
@@ -182,13 +201,42 @@ func (s *ManagedStore) masterKeyForWrite() (key [32]byte, location byte, err err
 	if !errors.Is(err, errKeychainUnavailable) {
 		return key, 0, err
 	}
-	key, err = s.masterKey(keyInFile)
-	if errors.Is(err, fs.ErrNotExist) {
-		if _, err = rand.Read(key[:]); err == nil {
-			_, err = writeManagedFile(s.masterKeyPath(), key[:])
+	if fileMissing {
+		if _, fileErr = rand.Read(fileKey[:]); fileErr == nil {
+			_, fileErr = writeManagedFile(s.masterKeyPath(), fileKey[:])
 		}
 	}
-	return key, keyInFile, err
+	return fileKey, keyInFile, fileErr
+}
+
+// Check the on-disk headers, including ciphertext restored without a profile.
+// Imports hold the write lock throughout this check and key initialization.
+func (s *ManagedStore) checkMissingMasterKeys(fileMissing, keychainMissing bool) error {
+	root, err := openCredentialRoot(s.dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }() //nolint:errcheck // directory handle used only for reads
+	entries, err := fs.ReadDir(root.FS(), credentialsDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !strings.EqualFold(filepath.Ext(entry.Name()), ".enc") {
+			continue
+		}
+		blob, err := readPrivateFile(root, filepath.Join(credentialsDir, entry.Name()), maxManagedToken+64)
+		if err != nil {
+			return err
+		}
+		if len(blob) == 0 || (blob[0] != keyInFile && blob[0] != keyInKeychain) {
+			return errors.New("cannot determine the master key for existing encrypted credentials")
+		}
+		if (blob[0] == keyInFile && fileMissing) || (blob[0] == keyInKeychain && keychainMissing) {
+			return errors.New("existing encrypted credentials depend on a missing master key")
+		}
+	}
+	return nil
 }
 
 func ensurePrivateDir(path string) error {
@@ -205,18 +253,27 @@ func ensurePrivateDir(path string) error {
 	return protectManagedPath(path, info, dirPerm)
 }
 
-func readPrivateFile(path string, limit int64) ([]byte, error) {
-	info, err := os.Lstat(path)
+func readCredentialFile(dir, name string, limit int64) ([]byte, error) {
+	root, err := openCredentialRoot(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = root.Close() }() //nolint:errcheck // directory handle used only for reads
+	return readPrivateFile(root, filepath.Join(credentialsDir, name), limit)
+}
+
+func readPrivateFile(root *os.Root, name string, limit int64) ([]byte, error) {
+	info, err := root.Lstat(name)
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("managed storage requires a regular file")
 	}
-	if err := checkManagedFilePrivacy(path, info); err != nil {
+	if err := checkManagedFilePrivacy(filepath.Join(root.Name(), name), info); err != nil {
 		return nil, err
 	}
-	file, err := os.Open(path)
+	file, err := root.Open(name)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +285,7 @@ func readPrivateFile(path string, limit int64) ([]byte, error) {
 	return data, errors.Join(readErr, closeErr)
 }
 
-// openProfileLock serializes both legacy and versioned writers of config.json.
+// openProfileLock serializes profile writes and v1 migration.
 func openProfileLock(dir string) (*os.File, error) {
 	path := filepath.Join(dir, ".managed.lock")
 	if info, err := os.Lstat(path); err == nil {

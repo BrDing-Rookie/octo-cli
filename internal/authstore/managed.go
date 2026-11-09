@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -77,7 +76,7 @@ func NewManagedStore(dir string, keychain Keychain) *ManagedStore {
 	if keychain == nil {
 		keychain = unavailableKeychain{}
 	}
-	return &ManagedStore{dir: dir, keychain: keychain, writeConfig: writeManagedFile}
+	return &ManagedStore{dir: dir, allowLegacy: true, keychain: keychain, writeConfig: writeManagedFile}
 }
 
 // Snapshot reads only metadata. A missing target has Exists=false, while an
@@ -186,9 +185,13 @@ func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
 // ConfirmTarget checks an unchanged binding under the write lock. A new
 // origin or Space needs a token verified against that target via Import.
 func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) error {
-	_, err := s.modify(snap, func(_ *config.ProfileConfig) (CommitResult, error) {
+	_, err := s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
 		if snap.baseline.original == nil || snap.baseline.original.APIBaseURL != apiBaseURL || apiBaseURL == "" {
 			return CommitResult{}, errors.New("re-import a verified Token to change the API origin")
+		}
+		if cfg.NeedsMigration() {
+			_, err := s.persist(cfg)
+			return CommitResult{}, err
 		}
 		return CommitResult{}, nil
 	})
@@ -200,8 +203,8 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 	if base == nil || base.dir != s.dir || base.name == "" || strings.TrimSpace(base.name) != base.name {
 		return CommitResult{}, errors.New("a valid target profile is required")
 	}
-	// Check the strict loader before creating a lock in a legacy directory.
-	if _, err := s.loadWritableConfig(); err != nil {
+	// Reject an invalid source before creating a directory or a lock.
+	if _, err := config.LoadWritableProfileConfigIn(s.dir, s.allowLegacy); err != nil {
 		return CommitResult{}, err
 	}
 	if err := ensurePrivateDir(s.dir); err != nil {
@@ -213,7 +216,7 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 	}
 	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
 
-	cfg, err := s.loadWritableConfig()
+	cfg, err := config.LoadWritableProfileConfigIn(s.dir, s.allowLegacy)
 	if err != nil {
 		return CommitResult{}, err
 	}
@@ -228,20 +231,12 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 	return fn(cfg)
 }
 
-func (s *ManagedStore) loadWritableConfig() (*config.ProfileConfig, error) {
-	info, err := os.Lstat(filepath.Join(s.dir, configFile))
-	if err == nil && info.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("cannot modify a symlinked profile configuration")
-	}
-	return config.LoadProfileConfigIn(s.dir, false)
-}
-
 func (s *ManagedStore) persist(cfg *config.ProfileConfig) (bool, error) {
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return false, err
 	}
-	return s.writeConfig(filepath.Join(s.dir, configFile), append(raw, '\n'))
+	return s.writeConfig(filepath.Join(s.dir, config.ManagedProfileFile), append(raw, '\n'))
 }
 
 func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profile, syncErr error) CommitResult {

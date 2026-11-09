@@ -84,7 +84,7 @@ func TestManagedEncryptedImport(t *testing.T) {
 	if stored, err := s.readEntry(ref); err != nil || stored != token {
 		t.Fatalf("read managed entry: %v", err)
 	}
-	for _, path := range []string{s.masterKeyPath(), s.encryptedPath(ref.Entry), filepath.Join(dir, configFile)} {
+	for _, path := range []string{s.masterKeyPath(), s.encryptedPath(ref.Entry), filepath.Join(dir, config.ManagedProfileFile)} {
 		content, err := os.ReadFile(path)
 		if err != nil || bytes.Contains(content, []byte(token)) {
 			t.Fatalf("expected readable file with no token plaintext (%s): %v", path, err)
@@ -118,6 +118,9 @@ func TestLegacyProfileWritesWaitForManagedCommit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			legacy := &Store{dir: dir}
+			if err := legacy.SaveProfile("legacy", &ProfileMeta{RobotID: "bot-legacy"}, "initial-token"); err != nil {
+				t.Fatal(err)
+			}
 			managed := NewManagedStore(dir, nil)
 			snap, err := managed.Snapshot("managed", true)
 			if err != nil {
@@ -158,11 +161,8 @@ func TestLegacyProfileWritesWaitForManagedCommit(t *testing.T) {
 			if err := <-managedDone; err != nil {
 				t.Fatal(err)
 			}
-			if err := <-legacyDone; err == nil || !strings.Contains(err.Error(), "versioned config.json") {
-				t.Fatalf("legacy mutation did not reject the committed versioned config: %v", err)
-			}
-			if _, err := os.Stat(legacy.credPath()); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("legacy mutation wrote credentials: %v", err)
+			if err := <-legacyDone; err != nil {
+				t.Fatalf("legacy mutation could not coexist with the versioned config: %v", err)
 			}
 			after, err := managed.Snapshot("managed", true)
 			if err != nil || !after.Exists {
@@ -172,6 +172,49 @@ func TestLegacyProfileWritesWaitForManagedCommit(t *testing.T) {
 				t.Fatalf("managed credential was lost: %v", err)
 			}
 		})
+	}
+}
+
+func TestManagedProfileMigrationPreservesCredential(t *testing.T) {
+	dir := t.TempDir()
+	store := NewManagedStore(dir, nil)
+	profile := managedFixtureProfile()
+	snap, err := store.Snapshot("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Import(snap, profile, "managed-token", BackendEncryptedFile); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(dir, configFile)
+	managedPath := filepath.Join(dir, config.ManagedProfileFile)
+	if err := os.Rename(managedPath, legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	snap, err = store.Snapshot("target", true)
+	if err != nil || !snap.Exists {
+		t.Fatalf("read old v1 layout: %v", err)
+	}
+	if _, err := os.Stat(managedPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("reading must not migrate the old layout: %v", err)
+	}
+	ref := *snap.Profile.TokenSource
+	if err := store.ConfirmTarget(snap, profile.APIBaseURL); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a published CLI rewriting the old filename as an unversioned
+	// Bot store, even when the friendly name matches the unified profile.
+	legacy := `{"profiles":{"target":{"api_base_url":"https://legacy.example","robot_id":"bot-legacy"}}}`
+	if err := os.WriteFile(legacyPath, []byte(legacy), secPerm); err != nil {
+		t.Fatal(err)
+	}
+	after, err := store.Snapshot("target", true)
+	if err != nil || !after.Exists || after.Profile.APIBaseURL != profile.APIBaseURL ||
+		after.Profile.TokenSource == nil || *after.Profile.TokenSource != ref {
+		t.Fatalf("v1 binding did not survive the legacy overwrite: %v", err)
+	}
+	if got, err := store.readEntry(after.Profile.TokenSource); err != nil || got != "managed-token" {
+		t.Fatalf("migrated credential could not be decrypted: %v", err)
 	}
 }
 
@@ -191,11 +234,11 @@ func TestManagedRemoveRejectsSymlinkedCredentials(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(filepath.Join(original.dir, configFile))
+	raw, err := os.ReadFile(filepath.Join(original.dir, config.ManagedProfileFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(copyStore.dir, configFile), raw, secPerm); err != nil {
+	if err := os.WriteFile(filepath.Join(copyStore.dir, config.ManagedProfileFile), raw, secPerm); err != nil {
 		t.Fatal(err)
 	}
 	snap, err = copyStore.Snapshot("target", true)
@@ -415,6 +458,76 @@ func TestManagedKeychainFallbackPolicy(t *testing.T) {
 			}
 			if stored, err := store.readEntry(snap.Profile.TokenSource); err != nil || stored != token {
 				t.Fatalf("credential using keychain master key: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedImportRejectsMissingMasterKey(t *testing.T) {
+	for _, location := range []string{"file", "file with available Keychain", "Keychain"} {
+		t.Run(location, func(t *testing.T) {
+			keychain := &fixtureKeychain{entries: map[string][]byte{}}
+			store := NewManagedStore(t.TempDir(), nil)
+			if location == "Keychain" {
+				store.keychain = keychain
+			}
+			profile := managedFixtureProfile()
+			first, err := store.Snapshot("existing", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Import(first, profile, "existing-token", BackendEncryptedFile); err != nil {
+				t.Fatalf("first import into empty store: %v", err)
+			}
+			cfg, err := config.LoadProfileConfigIn(store.dir, false)
+			if err != nil || cfg == nil || cfg.Profiles["existing"] == nil {
+				t.Fatalf("read first profile: %v", err)
+			}
+			ref := cfg.Profiles["existing"].TokenSource
+			configPath := filepath.Join(store.dir, config.ManagedProfileFile)
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var restore func()
+			if location == "Keychain" {
+				account, err := store.account("master-key")
+				if err != nil {
+					t.Fatal(err)
+				}
+				backup := keychain.entries[account]
+				delete(keychain.entries, account)
+				restore = func() { keychain.entries[account] = backup }
+			} else {
+				backup := store.masterKeyPath() + ".backup"
+				if err := os.Rename(store.masterKeyPath(), backup); err != nil {
+					t.Fatal(err)
+				}
+				restore = func() {
+					if err := os.Rename(backup, store.masterKeyPath()); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if location == "file with available Keychain" {
+					store.keychain = keychain
+				}
+			}
+			second, err := store.Snapshot("new", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Import(second, profile, "new-token", BackendEncryptedFile); err == nil || !strings.Contains(err.Error(), "missing master key") {
+				t.Fatalf("expected import to refuse a missing key: %v", err)
+			}
+			if after, err := os.ReadFile(configPath); err != nil || !bytes.Equal(after, before) {
+				t.Fatalf("refused import changed existing references: %v", err)
+			}
+			if _, err := store.readEntry(ref); !errors.Is(err, os.ErrNotExist) || len(keychain.entries) != 0 {
+				t.Fatalf("refused import installed a replacement master key: %v", err)
+			}
+			restore()
+			if got, err := store.readEntry(ref); err != nil || got != "existing-token" {
+				t.Fatalf("credential still unreadable after restoring the original key: %v", err)
 			}
 		})
 	}

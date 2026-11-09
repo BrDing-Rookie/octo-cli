@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
@@ -163,8 +164,10 @@ func ProfileConfigError(err error) error {
 	var pathErr *os.PathError
 	if !errors.As(err, &pathErr) {
 		message = err.Error()
+	} else if filepath.Base(pathErr.Path) == config.ManagedProfileFile {
+		message = "cannot read " + config.ManagedProfileFile
 	}
-	return output.ErrValidation(message, "check the CLI profile directory and config.json")
+	return output.ErrValidation(message, "check profiles.json or the original v1 config.json in the CLI profile directory")
 }
 
 // ReadProfileToken reads and validates the Profile source without applying
@@ -186,7 +189,7 @@ func ReadProfileToken(profiles *config.ProfileConfig, ref *config.TokenSource) (
 			return "", "", authErr
 		}
 	default:
-		return "", "", output.ErrValidation("invalid profile token_source", "check the type and reference in config.json")
+		return "", "", output.ErrValidation("invalid profile token_source", "check the type and reference in the selected profile")
 	}
 	if err != nil {
 		return "", "", err

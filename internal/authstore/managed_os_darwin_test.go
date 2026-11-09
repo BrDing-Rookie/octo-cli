@@ -32,7 +32,12 @@ func TestDarwinManagedStorageRejectsExtendedACL(t *testing.T) {
 	if out, err := exec.Command("/bin/chmod", "+a", "everyone allow read", file).CombinedOutput(); err != nil {
 		t.Fatalf("install file ACL: %v (%s)", err, out)
 	}
-	if _, err := readPrivateFile(file, 32); err == nil || !strings.Contains(err.Error(), "extended ACL") {
+	root, err := os.OpenRoot(filepath.Dir(file))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	if _, err := readPrivateFile(root, filepath.Base(file), 32); err == nil || !strings.Contains(err.Error(), "extended ACL") {
 		t.Fatalf("read should reject the extended ACL: %v", err)
 	}
 }

@@ -13,6 +13,10 @@ const (
 	EnvConfigDir = "OCTO_CONFIG_DIR"
 	EnvProfile   = "OCTO_PROFILE"
 	EnvTokenFile = "OCTO_TOKEN_FILE"
+
+	// ManagedProfileFile holds unified profiles, separate from the legacy Bot store.
+	ManagedProfileFile = "profiles.json"
+	oldProfileFile     = "config.json"
 )
 
 // ProfileConfig is the versioned, non-secret business configuration.
@@ -21,6 +25,7 @@ type ProfileConfig struct {
 	CurrentProfile string              `json:"current_profile"`
 	Profiles       map[string]*Profile `json:"profiles"`
 	dir            string
+	file           string
 }
 
 // Profile binds a request target to a credential reference.
@@ -63,10 +68,34 @@ func ProfileDirectory() (dir string, override bool, err error) {
 	return dir, override, err
 }
 
-// LoadProfileConfigIn reads a pinned directory. Writes must set allowLegacy
-// to false so an existing unversioned configuration cannot be replaced.
+// LoadProfileConfigIn prefers the dedicated file and falls back to the original
+// v1 location only before migration. A dedicated file is authoritative even if empty.
 func LoadProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, error) {
-	path := filepath.Join(dir, "config.json")
+	return loadProfileConfigIn(dir, allowLegacy, false)
+}
+
+// LoadWritableProfileConfigIn rejects symlinked configuration before a mutation.
+func LoadWritableProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, error) {
+	return loadProfileConfigIn(dir, allowLegacy, true)
+}
+
+func loadProfileConfigIn(dir string, allowLegacy, writable bool) (*ProfileConfig, error) {
+	cfg, err := loadProfileConfigFile(dir, ManagedProfileFile, false, writable)
+	if cfg != nil || err != nil {
+		return cfg, err
+	}
+	old, oldErr := loadProfileConfigFile(dir, oldProfileFile, allowLegacy, writable)
+	// A migration may publish the dedicated file while we read config.json.
+	// Prefer it before interpreting a concurrent legacy write as no profile.
+	cfg, err = loadProfileConfigFile(dir, ManagedProfileFile, false, writable)
+	if cfg != nil || err != nil {
+		return cfg, err
+	}
+	return old, oldErr
+}
+
+func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*ProfileConfig, error) {
+	path := filepath.Join(dir, name)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -75,13 +104,16 @@ func LoadProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, error) {
 		return nil, err
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
+		if writable {
+			return nil, fmt.Errorf("cannot modify a symlinked profile configuration (%s)", name)
+		}
 		info, err = os.Stat(path)
 		if err != nil {
 			return nil, err
 		}
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("config.json must be a regular file")
+		return nil, fmt.Errorf("%s must be a regular file", name)
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -90,18 +122,19 @@ func LoadProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, error) {
 
 	var cfg *ProfileConfig
 	if err := json.Unmarshal(raw, &cfg); err != nil || cfg == nil {
-		return nil, fmt.Errorf("invalid config.json")
+		return nil, fmt.Errorf("invalid %s", name)
 	}
 	if allowLegacy && isLegacyProfileConfig(raw) {
 		return nil, nil
 	}
 	if string(cfg.Version) != "1" {
-		return nil, fmt.Errorf("unsupported config.json version (expected 1)")
+		return nil, fmt.Errorf("unsupported %s version (expected 1)", name)
 	}
 	if cfg.Profiles == nil {
-		return nil, fmt.Errorf("config.json must contain a profiles object")
+		return nil, fmt.Errorf("%s must contain a profiles object", name)
 	}
 	cfg.dir = dir
+	cfg.file = name
 	return cfg, nil
 }
 
@@ -109,6 +142,9 @@ func LoadProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, error) {
 func (c *ProfileConfig) Directory() string {
 	return c.dir
 }
+
+// NeedsMigration reports whether this v1 configuration came from config.json.
+func (c *ProfileConfig) NeedsMigration() bool { return c.file == oldProfileFile }
 
 func isLegacyProfileConfig(raw []byte) bool {
 	// Recognize the fields written by the Bot store. A malformed unversioned
@@ -181,7 +217,7 @@ func (c *ProfileConfig) SelectProfile(name string, explicit bool) (string, Profi
 	return "", Profile{}, fmt.Errorf("selected profile does not exist")
 }
 
-// TokenFilePath resolves profile file references relative to config.json.
+// TokenFilePath resolves profile file references relative to the config directory.
 func (c *ProfileConfig) TokenFilePath(path string) string {
 	if path == "" || filepath.IsAbs(path) {
 		return path

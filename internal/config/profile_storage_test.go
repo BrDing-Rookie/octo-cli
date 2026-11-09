@@ -35,3 +35,27 @@ func TestLegacyProfileRecognitionIsNarrow(t *testing.T) {
 		})
 	}
 }
+
+func TestDedicatedProfileFileIsAuthoritative(t *testing.T) {
+	dir := t.TempDir()
+	old := `{"version":1,"current_profile":"old","profiles":{"old":{"space_id":"S1"}}}`
+	if err := os.WriteFile(filepath.Join(dir, oldProfileFile), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := LoadProfileConfigIn(dir, true); err != nil || cfg == nil || !cfg.NeedsMigration() {
+		t.Fatalf("load original v1 file: %v", err)
+	}
+	path := filepath.Join(dir, ManagedProfileFile)
+	if err := os.WriteFile(path, []byte(`{"version":1,"profiles":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := LoadProfileConfigIn(dir, true); err != nil || cfg == nil || len(cfg.Profiles) != 0 || cfg.NeedsMigration() {
+		t.Fatalf("dedicated empty store must mask the original v1 file: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := LoadProfileConfigIn(dir, true); cfg != nil || err == nil {
+		t.Fatalf("invalid dedicated file must not fall back: %#v, %v", cfg, err)
+	}
+}

@@ -98,7 +98,8 @@ func (k macKeychain) Create(account string, data []byte) error {
 	if len(command)+len(pathArg)+1 >= securityLineLimit {
 		return errKeychainEntryTooLarge
 	}
-	locator := k.locatorPath(account)
+	name := keychainLocatorName(account)
+	locator := filepath.Join(k.dir, credentialsDir, name)
 	if err := ensurePrivateDir(filepath.Dir(locator)); err != nil {
 		return err
 	}
@@ -107,12 +108,12 @@ func (k macKeychain) Create(account string, data []byte) error {
 	visible, err := writeManagedFile(locator, []byte(path))
 	if err != nil {
 		if visible {
-			return errors.Join(err, os.Remove(locator))
+			return errors.Join(err, removeCredentialFile(k.dir, name))
 		}
 		return err
 	}
 	if _, err := k.run(command + pathArg); err != nil {
-		return errors.Join(err, os.Remove(locator))
+		return errors.Join(err, removeCredentialFile(k.dir, name))
 	}
 	return nil
 }
@@ -141,19 +142,19 @@ func (k macKeychain) Remove(account string) error {
 		return err
 	}
 	if pathArg != "" {
-		return os.Remove(k.locatorPath(account))
+		return removeCredentialFile(k.dir, keychainLocatorName(account))
 	}
 	return nil
 }
 
-func (k macKeychain) locatorPath(account string) string {
+func keychainLocatorName(account string) string {
 	// The account contains the canonical directory hash and a generated
 	// entry name (or master-key). Only the entry name is needed here.
-	return filepath.Join(k.dir, "credentials", ".keychain-"+filepath.Base(account))
+	return ".keychain-" + filepath.Base(account)
 }
 
 func (k macKeychain) boundPathArgument(account string) (string, error) {
-	path, err := readPrivateFile(k.locatorPath(account), unix.PathMax)
+	path, err := readCredentialFile(k.dir, keychainLocatorName(account), unix.PathMax)
 	if errors.Is(err, fs.ErrNotExist) {
 		// Entries written before locators were introduced still use the list.
 		return "", nil
