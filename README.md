@@ -412,8 +412,10 @@ OCTO_CONFIG_DIR="$profile_dir" OCTO_CREDENTIAL_MODE=unified \
   or a target conflict. Automatic provisioning requires the missing result.
 
 The success data includes the Profile name, API origin, and Space when set.
-The command reads the stored Profile source and works offline. The caller
-verifies account ownership when it establishes the binding.
+The command reads the stored Profile source and works offline. Before reusing
+a readable Profile, compare its returned API origin and Space with the
+expected values. The caller verifies account ownership when it establishes
+the binding.
 
 ### API Base URL
 

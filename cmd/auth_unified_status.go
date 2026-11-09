@@ -77,8 +77,8 @@ func selectUnifiedStatusProfile(f *cmdutil.Factory) (string, *config.ProfileConf
 		}
 		return name, profiles, profile, nil
 	}
-	if profiles.CurrentProfile == name {
-		return "", nil, nil, output.ErrValidation("current_profile does not exist", "check the CLI profile directory and config.json")
+	if current := profiles.CurrentProfile; current != "" && profiles.Profiles[current] == nil {
+		return "", nil, nil, output.ErrValidation("current_profile must reference an existing, non-null profile", "check the CLI profile directory and config.json")
 	}
 	return name, profiles, nil, nil
 }

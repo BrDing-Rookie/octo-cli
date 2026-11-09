@@ -141,7 +141,25 @@ func TestUnifiedAuthStatusRejectsUnknownTarget(t *testing.T) {
 	assertUnifiedAuthStatusError(t, out, err, "no target profile selected", 2)
 	phaseOneWrite(t, filepath.Join(dir, "config.json"), `{"version":1,"current_profile":"dangling","profiles":{}}`)
 	out, err = phaseOneRun("--format", "json", "auth", "status")
-	assertUnifiedAuthStatusError(t, out, err, "current_profile does not exist", 2)
+	assertUnifiedAuthStatusError(t, out, err, "current_profile must reference an existing, non-null profile", 2)
+}
+
+func TestUnifiedAuthStatusRejectsMissingTargetWhenCurrentProfileIsInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name, profiles string
+	}{
+		{"dangling", `{}`},
+		{"null", `{"default":null}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+			phaseOneWrite(t, filepath.Join(dir, "config.json"),
+				`{"version":1,"current_profile":"default","profiles":`+tc.profiles+`}`)
+			out, err := phaseOneRun("--format", "json", "--profile", "absent", "auth", "status")
+			assertUnifiedAuthStatusError(t, out, err, "current_profile must reference an existing, non-null profile", 2)
+		})
+	}
 }
 
 func TestUnifiedAuthStatusRedactsBearerInMetadata(t *testing.T) {
