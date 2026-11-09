@@ -33,12 +33,12 @@ type authTokenMetadata struct {
 	ID         string     `json:"token_id"`
 	OwnerID    string     `json:"owner_id"`
 	SpaceID    string     `json:"space_id"`
-	Name       string     `json:"name"`
+	Name       *string    `json:"name"`
 	Remark     *string    `json:"remark"`
 	Status     string     `json:"status"`
 	ExpiresAt  *time.Time `json:"expires_at"`
 	IsExpired  *bool      `json:"is_expired"`
-	Version    int64      `json:"version"`
+	Version    *int64     `json:"version"`
 	CreatedAt  *time.Time `json:"created_at"`
 	UpdatedAt  *time.Time `json:"updated_at"`
 	LastUsedAt *time.Time `json:"last_used_at"`
@@ -201,9 +201,7 @@ func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
 }
 
 func (s *authTokenSelf) valid() bool {
-	meta := &s.Token
-	if meta.ID == "" || meta.OwnerID == "" || meta.SpaceID == "" || meta.IsExpired == nil ||
-		(meta.Status != "active" && meta.Status != "revoked") || s.Permissions == nil || s.BotBindings == nil {
+	if !s.Token.valid() || s.Permissions == nil || s.BotBindings == nil {
 		return false
 	}
 	for _, permission := range s.Permissions {
@@ -218,6 +216,12 @@ func (s *authTokenSelf) valid() bool {
 		}
 	}
 	return true
+}
+
+func (m *authTokenMetadata) valid() bool {
+	return m.ID != "" && m.OwnerID != "" && m.SpaceID != "" && m.Name != nil &&
+		(m.Status == "active" || m.Status == "revoked") && m.IsExpired != nil &&
+		m.Version != nil && m.CreatedAt != nil && m.UpdatedAt != nil
 }
 
 func (p authPermission) valid() bool {
@@ -287,7 +291,7 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 		warning := client.RedactBearer(result.CleanupWarning, token)
 		if filtered {
 			// Cleanup runs after commit, so report its warning outside the jq result.
-			_, _ = fmt.Fprintln(f.IOStreams.ErrOut, warning)
+			writeUI(f.IOStreams.ErrOut, warning+"\n")
 		} else {
 			payload["cleanup_warning"] = warning
 		}
