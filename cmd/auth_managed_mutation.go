@@ -55,16 +55,19 @@ func confirmUnifiedProfileTarget(f *cmdutil.Factory, apiBaseURL string) error {
 	if err != nil {
 		return failErr(f, err)
 	}
-	if apiBaseURL == "" || apiBaseURL != snap.Profile.APIBaseURL {
-		return failErr(f, output.ErrValidation(
-			"cannot change the API origin of a unified profile with auth update",
-			"re-import a Token verified for the target API origin",
-		))
+	// auth update has already normalized the requested URL. Reject an origin
+	// change before taking a write lock, then recheck against the locked state.
+	current, err := config.NormalizeAPIBaseURL(snap.Profile.APIBaseURL)
+	if err != nil || current != apiBaseURL {
+		return failErr(f, managedProfileMutationError(authstore.ErrProfileOriginChange))
 	}
-	if err := store.ConfirmTarget(snap, apiBaseURL); err != nil {
+	result, err := store.ConfirmTarget(snap, apiBaseURL)
+	if err != nil {
 		return failErr(f, managedProfileMutationError(err))
 	}
-	return emitJSON(f, map[string]any{"profile": snap.Name, "api_base_url": apiBaseURL})
+	payload := map[string]any{"profile": snap.Name, "api_base_url": apiBaseURL}
+	putIfSet(payload, "cleanup_warning", result.CleanupWarning)
+	return emitJSON(f, payload)
 }
 
 func logoutUnifiedProfile(f *cmdutil.Factory) error {
@@ -84,6 +87,9 @@ func logoutUnifiedProfile(f *cmdutil.Factory) error {
 func managedProfileMutationError(err error) error {
 	if errors.Is(err, authstore.ErrProfileConflict) {
 		return output.ErrWithHint("validation", "PROFILE_CONFLICT", "the selected profile changed", "read the profile again and retry")
+	}
+	if errors.Is(err, authstore.ErrProfileOriginChange) {
+		return output.ErrValidation(err.Error(), "re-import a Token verified for the target API origin")
 	}
 	return output.ErrValidation("cannot modify the unified profile", "check the configuration directory and its permissions")
 }

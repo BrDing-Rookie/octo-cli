@@ -63,6 +63,9 @@ func replaceManagedFile(from, to string) (bool, error) {
 	}
 }
 
+// Managed file publication requests write-through in MoveFileEx.
+func syncManagedDirectory(string) error { return nil }
+
 func protectManagedPath(path string, _ os.FileInfo, _ os.FileMode) error {
 	path, err := managedWindowsPath(path)
 	if err != nil {

@@ -1,8 +1,10 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -33,6 +35,45 @@ func TestLegacyProfileRecognitionIsNarrow(t *testing.T) {
 				t.Fatal("strict writes must refuse unversioned or corrupt configuration")
 			}
 		})
+	}
+}
+
+func TestProfileConfigDistinguishesTokenFileFromDedicatedStore(t *testing.T) {
+	dir := t.TempDir()
+	primary := filepath.Join(dir, ManagedProfileFile)
+	if err := os.WriteFile(primary, []byte("fixture-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "external-token")
+	if err := os.Link(primary, alias); err != nil {
+		t.Fatal(err)
+	}
+	old := fmt.Sprintf(`{"version":1,"profiles":{"old":{"token_source":{"type":"token_file","path":%q}}}}`, alias)
+	if err := os.WriteFile(filepath.Join(dir, oldProfileFile), []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadWritableProfileConfigIn(dir, true)
+	if err != nil || cfg == nil || !cfg.NeedsMigration() || cfg.WriteFile() == ManagedProfileFile {
+		t.Fatalf("referenced token file must remain external: %v", err)
+	}
+	path := filepath.Join(dir, cfg.WriteFile())
+	if err := os.WriteFile(primary, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := LoadProfileConfigIn(dir, true); cfg != nil || err == nil {
+		t.Fatalf("partial JSON must remain a configuration error: %v", err)
+	}
+	if err := os.WriteFile(primary, []byte("fixture-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, err := LoadProfileConfigIn(dir, true); cfg != nil || err == nil || !strings.Contains(err.Error(), profileCollisionDir) {
+		t.Fatalf("invalid alternate configuration must not fall back to the old file: %v", err)
 	}
 }
 

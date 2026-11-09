@@ -7,6 +7,8 @@ import (
 	"os"
 )
 
+func syncManagedDirectory(string) error { return nil }
+
 func lockManagedFile(*os.File) error {
 	return errors.New("managed credential writes are unavailable on this platform")
 }

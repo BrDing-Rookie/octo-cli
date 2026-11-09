@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,10 +16,13 @@ func TestManagedAuthMutationKeepsVerifiedTarget(t *testing.T) {
 	dir := phaseOneEnv(t)
 	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
 	path := filepath.Join(dir, "config.json")
-	raw := `{"version":1,"current_profile":"work","profiles":{"work":{"api_base_url":"https://gateway.example","space_id":"S1","token_source":{"type":"token_file","path":"external"}}}}`
+	raw := `{"version":1,"current_profile":"work","profiles":{"work":{"api_base_url":"https://gateway.example/","space_id":"S1","token_source":{"type":"token_file","path":"profiles.json"}}}}`
 	const fakeBearer = "demo-review-fake-bearer"
 	phaseOneWrite(t, path, raw)
-	phaseOneWrite(t, filepath.Join(dir, "external"), "external-test-bearer")
+	phaseOneWrite(t, filepath.Join(dir, "profiles.json"), "external-test-bearer")
+	if out, err := phaseOneRun("--dry-run", "api", "GET", "/probe"); err != nil || !strings.Contains(out, "https://gateway.example/probe") {
+		t.Fatalf("read original v1 binding: %v (%s)", err, out)
+	}
 	for _, tc := range []struct {
 		args []string
 		want string
@@ -29,7 +33,6 @@ func TestManagedAuthMutationKeepsVerifiedTarget(t *testing.T) {
 		{[]string{"--bot-id", "legacy", "auth", "logout"}, "only --profile"},
 		{[]string{"--credential-file", "external", "auth", "logout"}, "only --profile"},
 		{[]string{"--dry-run", "auth", "logout"}, "--dry-run is not supported"},
-		{[]string{"auth", "update", "--api-base-url", "https://gateway.example"}, ""},
 	} {
 		out, err := phaseOneRun(tc.args...)
 		if strings.Contains(out, fakeBearer) || (err != nil && strings.Contains(err.Error(), fakeBearer)) {
@@ -46,11 +49,31 @@ func TestManagedAuthMutationKeepsVerifiedTarget(t *testing.T) {
 			t.Fatalf("binding changed after %v: %v", tc.args, readErr)
 		}
 	}
-	out, err := phaseOneRun("auth", "logout")
+	if _, err := os.Stat(filepath.Join(dir, ".managed.lock")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rejected updates must not take the write lock: %v", err)
+	}
+	out, err := phaseOneRun("auth", "update", "--api-base-url", "https://gateway.example")
+	if err != nil || strings.Contains(out, "cleanup_warning") {
+		t.Fatalf("migrate the same origin: %v (%s)", err, out)
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("original v1 path remains active: %v", err)
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, "config.v1-*.bak"))
+	if err != nil || len(backups) != 1 {
+		t.Fatalf("expected one recovery file: %v, %v", backups, err)
+	}
+	if got, err := os.ReadFile(backups[0]); err != nil || !bytes.Equal(got, []byte(raw)) {
+		t.Fatalf("recovery file must contain original bytes: %v", err)
+	}
+	if out, err := phaseOneRun("--dry-run", "api", "GET", "/probe"); err != nil || !strings.Contains(out, "https://gateway.example/probe") {
+		t.Fatalf("read migrated binding: %v (%s)", err, out)
+	}
+	out, err = phaseOneRun("auth", "logout")
 	if err != nil || !strings.Contains(out, `"removed": "work"`) {
 		t.Fatalf("logout: %v (%s)", err, out)
 	}
-	if data, err := os.ReadFile(filepath.Join(dir, "external")); err != nil || string(data) != "external-test-bearer" {
+	if data, err := os.ReadFile(filepath.Join(dir, "profiles.json")); err != nil || string(data) != "external-test-bearer" {
 		t.Fatalf("logout modified external credential: %v", err)
 	}
 	cfg, err := config.LoadProfileConfig()

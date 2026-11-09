@@ -199,8 +199,11 @@ func TestManagedProfileMigrationPreservesCredential(t *testing.T) {
 		t.Fatalf("reading must not migrate the old layout: %v", err)
 	}
 	ref := *snap.Profile.TokenSource
-	if err := store.ConfirmTarget(snap, profile.APIBaseURL); err != nil {
-		t.Fatal(err)
+	if result, err := store.ConfirmTarget(snap, profile.APIBaseURL); err != nil || result.CleanupWarning != "" {
+		t.Fatalf("migrate v1 profile: %#v, %v", result, err)
+	}
+	if _, err := os.Stat(legacyPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("original v1 path is still active: %v", err)
 	}
 	// Simulate a published CLI rewriting the old filename as an unversioned
 	// Bot store, even when the friendly name matches the unified profile.
@@ -215,6 +218,66 @@ func TestManagedProfileMigrationPreservesCredential(t *testing.T) {
 	}
 	if got, err := store.readEntry(after.Profile.TokenSource); err != nil || got != "managed-token" {
 		t.Fatalf("migrated credential could not be decrypted: %v", err)
+	}
+}
+
+func TestManagedMigrationPreservesConcurrentLegacyWrite(t *testing.T) {
+	dir := t.TempDir()
+	legacyPath := filepath.Join(dir, configFile)
+	old := `{"version":1,"profiles":{"unified":{"api_base_url":"https://gateway.example/"}}}`
+	if err := os.WriteFile(legacyPath, []byte(old), secPerm); err != nil {
+		t.Fatal(err)
+	}
+	store := NewManagedStore(dir, nil)
+	snap, err := store.Snapshot("unified", true)
+	if err != nil || !snap.Exists {
+		t.Fatalf("select original v1 profile: %v", err)
+	}
+	legacy := &Store{dir: dir}
+	store.writeConfig = func(path string, data []byte) (bool, error) {
+		committed, err := writeManagedFile(path, data)
+		if err == nil {
+			// Published legacy writers replace config.json without our lock.
+			err = legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}})
+		}
+		return committed, err
+	}
+	if result, err := store.ConfirmTarget(snap, "https://gateway.example"); err != nil || result.CleanupWarning != "" {
+		t.Fatalf("migrate while legacy writer publishes: %#v, %v", result, err)
+	}
+	if profiles, err := legacy.LoadProfiles(); err != nil || len(profiles) != 1 || profiles["bot"].RobotID != "cli_bot" {
+		t.Fatalf("concurrent legacy configuration was lost: %v", err)
+	}
+}
+
+func TestFinishV1RetirementRestoresWithoutReplacing(t *testing.T) {
+	for _, activeExists := range []bool{false, true} {
+		t.Run(fmt.Sprintf("active_exists=%t", activeExists), func(t *testing.T) {
+			dir := t.TempDir()
+			active := filepath.Join(dir, configFile)
+			backup := filepath.Join(dir, "config.v1-fixture.bak")
+			captured := []byte(`{"profiles":{"first":{"robot_id":"cli_first"}}}`)
+			if err := os.WriteFile(backup, captured, secPerm); err != nil {
+				t.Fatal(err)
+			}
+			want := captured
+			if activeExists {
+				want = []byte(`{"profiles":{"second":{"robot_id":"cli_second"}}}`)
+				if err := os.WriteFile(active, want, secPerm); err != nil {
+					t.Fatal(err)
+				}
+			}
+			warning := finishV1Retirement(active, backup, []byte(`{"version":1,"profiles":{}}`), nil)
+			if (warning != "") != activeExists {
+				t.Fatalf("unexpected recovery warning: %q", warning)
+			}
+			if raw, err := os.ReadFile(active); err != nil || !bytes.Equal(raw, want) {
+				t.Fatalf("wrong active legacy configuration: %v", err)
+			}
+			if raw, err := os.ReadFile(backup); err != nil || !bytes.Equal(raw, captured) {
+				t.Fatalf("captured legacy configuration was not retained: %v", err)
+			}
+		})
 	}
 }
 

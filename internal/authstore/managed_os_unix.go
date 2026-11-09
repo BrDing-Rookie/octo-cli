@@ -23,11 +23,15 @@ func replaceManagedFile(from, to string) (bool, error) {
 	if err := os.Rename(from, to); err != nil {
 		return false, err
 	}
-	dir, err := os.Open(filepath.Dir(to))
+	return true, syncManagedDirectory(filepath.Dir(to))
+}
+
+func syncManagedDirectory(path string) error {
+	dir, err := os.Open(path)
 	if err != nil {
-		return true, err
+		return err
 	}
-	return true, errors.Join(dir.Sync(), dir.Close())
+	return errors.Join(dir.Sync(), dir.Close())
 }
 
 func protectManagedPath(path string, info os.FileInfo, perm os.FileMode) error {

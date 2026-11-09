@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -15,8 +16,9 @@ const (
 	EnvTokenFile = "OCTO_TOKEN_FILE"
 
 	// ManagedProfileFile holds unified profiles, separate from the legacy Bot store.
-	ManagedProfileFile = "profiles.json"
-	oldProfileFile     = "config.json"
+	ManagedProfileFile  = "profiles.json"
+	profileCollisionDir = ".octo-unified"
+	oldProfileFile      = "config.json"
 )
 
 // ProfileConfig is the versioned, non-secret business configuration.
@@ -26,6 +28,7 @@ type ProfileConfig struct {
 	Profiles       map[string]*Profile `json:"profiles"`
 	dir            string
 	file           string
+	writeFile      string
 }
 
 // Profile binds a request target to a credential reference.
@@ -80,18 +83,66 @@ func LoadWritableProfileConfigIn(dir string, allowLegacy bool) (*ProfileConfig, 
 }
 
 func loadProfileConfigIn(dir string, allowLegacy, writable bool) (*ProfileConfig, error) {
-	cfg, err := loadProfileConfigFile(dir, ManagedProfileFile, false, writable)
-	if cfg != nil || err != nil {
+	cfg, err, alternate := loadDedicatedProfileConfig(dir, writable)
+	if cfg != nil || alternate {
 		return cfg, err
 	}
 	old, oldErr := loadProfileConfigFile(dir, oldProfileFile, allowLegacy, writable)
 	// A migration may publish the dedicated file while we read config.json.
-	// Prefer it before interpreting a concurrent legacy write as no profile.
-	cfg, err = loadProfileConfigFile(dir, ManagedProfileFile, false, writable)
-	if cfg != nil || err != nil {
+	cfg, err, alternate = loadDedicatedProfileConfig(dir, writable)
+	if cfg != nil || alternate {
 		return cfg, err
 	}
+	primary := filepath.Join(dir, ManagedProfileFile)
+	if old != nil && old.ReferencesTokenFile(primary) && (err == nil || isOpaqueProfileTokenFile(primary)) {
+		// This path is an input to the v1 configuration. Keep it reserved
+		// even if the external file is missing or is replaced later.
+		old.writeFile = filepath.Join(profileCollisionDir, ManagedProfileFile)
+		return old, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return old, oldErr
+}
+
+func isOpaqueProfileTokenFile(path string) bool {
+	const limit = 64 * 1024
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > limit {
+		return false
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, limit+1))
+	closeErr := file.Close()
+	if err != nil || closeErr != nil || len(raw) > limit {
+		return false
+	}
+	token := bytes.TrimSpace(raw)
+	// A partial or unsupported JSON config remains a configuration error
+	// even when the old metadata happens to reference its pathname.
+	return len(token) != 0 && token[0] != '{' && token[0] != '[' &&
+		bytes.IndexFunc(token, func(r rune) bool { return r < '!' || r > '~' }) < 0
+}
+
+func loadDedicatedProfileConfig(dir string, writable bool) (cfg *ProfileConfig, err error, alternate bool) {
+	// A token can also occupy the alternate directory's name. Only a real
+	// directory can contain a dedicated profile configuration there.
+	info, err := os.Lstat(filepath.Join(dir, profileCollisionDir))
+	if err == nil && info.IsDir() {
+		name := filepath.Join(profileCollisionDir, ManagedProfileFile)
+		cfg, err := loadProfileConfigFile(dir, name, false, writable)
+		if cfg != nil || err != nil {
+			return cfg, err, true
+		}
+	} else if err != nil && !os.IsNotExist(err) {
+		return nil, err, true
+	}
+	cfg, err = loadProfileConfigFile(dir, ManagedProfileFile, false, writable)
+	return cfg, err, false
 }
 
 func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*ProfileConfig, error) {
@@ -135,6 +186,7 @@ func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*Profi
 	}
 	cfg.dir = dir
 	cfg.file = name
+	cfg.writeFile = name
 	return cfg, nil
 }
 
@@ -145,6 +197,34 @@ func (c *ProfileConfig) Directory() string {
 
 // NeedsMigration reports whether this v1 configuration came from config.json.
 func (c *ProfileConfig) NeedsMigration() bool { return c.file == oldProfileFile }
+
+// WriteFile returns the dedicated path relative to the profile directory.
+func (c *ProfileConfig) WriteFile() string {
+	if c.writeFile == oldProfileFile || c.writeFile == "" {
+		return ManagedProfileFile
+	}
+	return c.writeFile
+}
+
+// ReferencesTokenFile checks both direct paths and aliases of an existing file.
+func (c *ProfileConfig) ReferencesTokenFile(path string) bool {
+	target, targetErr := os.Stat(path)
+	for _, p := range c.Profiles {
+		if p == nil || p.TokenSource == nil || p.TokenSource.Type != "token_file" || p.TokenSource.Path == "" {
+			continue
+		}
+		candidate := filepath.Clean(c.TokenFilePath(p.TokenSource.Path))
+		if candidate == path {
+			return true
+		}
+		if targetErr == nil {
+			if info, err := os.Stat(candidate); err == nil && os.SameFile(target, info) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 func isLegacyProfileConfig(raw []byte) bool {
 	// Recognize the fields written by the Bot store. A malformed unversioned

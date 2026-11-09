@@ -1,9 +1,11 @@
 package authstore
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -11,6 +13,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 )
 
 const (
@@ -303,6 +307,81 @@ func openProfileLock(dir string) (*os.File, error) {
 		return nil, errors.Join(err, lock.Close())
 	}
 	return lock, nil
+}
+
+// retireV1Config runs only after the dedicated config has been committed.
+// A v0.19.5 process can replace the old pathname without taking our lock.
+func (s *ManagedStore) retireV1Config(cfg *config.ProfileConfig) string {
+	const warning = "could not retire the previous v1 configuration"
+	active := filepath.Join(s.dir, configFile)
+	info, err := os.Lstat(active)
+	if errors.Is(err, fs.ErrNotExist) || (err == nil && !info.Mode().IsRegular()) {
+		return ""
+	}
+	if err != nil {
+		return warning
+	}
+	raw, err := os.ReadFile(active)
+	if errors.Is(err, fs.ErrNotExist) {
+		return ""
+	}
+	if err != nil {
+		return warning
+	}
+	var old config.ProfileConfig
+	if json.Unmarshal(raw, &old) != nil || string(old.Version) != "1" || old.Profiles == nil {
+		return ""
+	}
+	if cfg.ReferencesTokenFile(active) {
+		return "previous v1 configuration retained because a profile uses that path as a Token file"
+	}
+	// Also cover a retry after the dedicated rename became visible but its
+	// directory sync failed. Do not retire the v1 file until both paths are durable.
+	dedicatedDir := filepath.Dir(filepath.Join(s.dir, cfg.WriteFile()))
+	if err := syncManagedDirectory(dedicatedDir); err != nil {
+		return warning
+	}
+	if dedicatedDir != s.dir {
+		if err := syncManagedDirectory(s.dir); err != nil {
+			return warning
+		}
+	}
+	return archiveV1Config(active, raw)
+}
+
+func archiveV1Config(active string, raw []byte) string {
+	const warning = "could not retire the previous v1 configuration"
+	backup, err := os.CreateTemp(filepath.Dir(active), "config.v1-*.bak")
+	if err != nil {
+		return warning
+	}
+	if err := backup.Close(); err != nil {
+		_ = os.Remove(backup.Name()) //nolint:errcheck // preserve the primary error
+		return warning
+	}
+	moved, syncErr := replaceManagedFile(active, backup.Name())
+	if !moved {
+		_ = os.Remove(backup.Name()) //nolint:errcheck // only our empty placeholder exists here
+		return warning
+	}
+	return finishV1Retirement(active, backup.Name(), raw, syncErr)
+}
+
+func finishV1Retirement(active, backup string, expected []byte, syncErr error) string {
+	if info, err := os.Lstat(backup); err == nil && info.Mode().IsRegular() {
+		if captured, err := os.ReadFile(backup); err == nil && bytes.Equal(captured, expected) {
+			if syncErr == nil {
+				return ""
+			}
+			return "could not sync the v1 configuration backup " + filepath.Base(backup)
+		}
+	}
+	// The rename caught a concurrent replacement. Restore the captured file
+	// only if the pathname is still vacant and keep the backup for recovery.
+	if err := os.Link(backup, active); err == nil && syncManagedDirectory(filepath.Dir(active)) == nil {
+		return ""
+	}
+	return "concurrent configuration retained in " + filepath.Base(backup)
 }
 
 // writeManagedFile returns true once replacement is visible, even if a

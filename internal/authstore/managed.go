@@ -25,6 +25,9 @@ const (
 // ErrProfileConflict means the caller must re-read and revalidate its target.
 var ErrProfileConflict = errors.New("profile changed while validating the credential")
 
+// ErrProfileOriginChange means a new origin requires a verified Token import.
+var ErrProfileOriginChange = errors.New("cannot change the API origin of a unified profile with auth update")
+
 // ManagedStore owns the versioned configuration and its managed entries.
 type ManagedStore struct {
 	dir         string
@@ -184,18 +187,26 @@ func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
 
 // ConfirmTarget checks an unchanged binding under the write lock. A new
 // origin or Space needs a token verified against that target via Import.
-func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) error {
-	_, err := s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
-		if snap.baseline.original == nil || snap.baseline.original.APIBaseURL != apiBaseURL || apiBaseURL == "" {
-			return CommitResult{}, errors.New("re-import a verified Token to change the API origin")
+func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) (CommitResult, error) {
+	return s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
+		profile := cfg.Profiles[snap.baseline.name]
+		if profile == nil {
+			return CommitResult{}, ErrProfileOriginChange
+		}
+		current, currentErr := config.NormalizeAPIBaseURL(profile.APIBaseURL)
+		requested, requestErr := config.NormalizeAPIBaseURL(apiBaseURL)
+		if currentErr != nil || requestErr != nil || current != requested {
+			return CommitResult{}, ErrProfileOriginChange
 		}
 		if cfg.NeedsMigration() {
-			_, err := s.persist(cfg)
-			return CommitResult{}, err
+			committed, err := s.persist(cfg)
+			if !committed {
+				return CommitResult{}, err
+			}
+			return s.afterCommit(cfg, nil, err), nil
 		}
-		return CommitResult{}, nil
+		return s.afterCommit(cfg, nil, nil), nil
 	})
-	return err
 }
 
 func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfig) (CommitResult, error)) (CommitResult, error) {
@@ -236,7 +247,23 @@ func (s *ManagedStore) persist(cfg *config.ProfileConfig) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return s.writeConfig(filepath.Join(s.dir, config.ManagedProfileFile), append(raw, '\n'))
+	path := filepath.Join(s.dir, cfg.WriteFile())
+	if cfg.ReferencesTokenFile(path) {
+		return false, errors.New("managed profile configuration path is reserved by a Token file")
+	}
+	if filepath.Dir(path) != s.dir {
+		if err := ensurePrivateDir(filepath.Dir(path)); err != nil {
+			return false, err
+		}
+		// The alternate layout uses a child directory. Sync the store as
+		// well as the child before retiring the only active v1 source.
+		committed, err := s.writeConfig(path, append(raw, '\n'))
+		if err == nil && committed {
+			err = syncManagedDirectory(s.dir)
+		}
+		return committed, err
+	}
+	return s.writeConfig(path, append(raw, '\n'))
 }
 
 func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profile, syncErr error) CommitResult {
@@ -245,20 +272,24 @@ func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profil
 		// old entry in case the filesystem recovers the previous config.
 		return CommitResult{CleanupWarning: "profile changed but directory sync failed; previous credential retained"}
 	}
+	result := CommitResult{CleanupWarning: s.retireV1Config(cfg)}
 	if old == nil || old.TokenSource == nil || old.TokenSource.Type != "managed_store" {
-		return CommitResult{}
+		return result
 	}
 	ref := old.TokenSource
 	for _, p := range cfg.Profiles {
 		if p != nil && p.TokenSource != nil && p.TokenSource.Type == "managed_store" &&
 			p.TokenSource.Backend == ref.Backend && p.TokenSource.Entry == ref.Entry {
-			return CommitResult{}
+			return result
 		}
 	}
 	if err := s.removeEntry(ref); err != nil {
-		return CommitResult{CleanupWarning: "profile changed but the previous managed credential could not be removed"}
+		if result.CleanupWarning != "" {
+			result.CleanupWarning += ". "
+		}
+		result.CleanupWarning += "profile changed but the previous managed credential could not be removed"
 	}
-	return CommitResult{}
+	return result
 }
 
 func (s *ManagedStore) stageToken(token, backend string) (*config.TokenSource, error) {

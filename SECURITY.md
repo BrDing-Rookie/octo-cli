@@ -66,12 +66,17 @@ with `OCTO_CONFIG_DIR`):
 
 Unified profiles use **`profiles.json`** in the configured CLI directory
 (`~/.octo/cli` by default). If only a v1 `config.json` exists, the CLI can read
-it and copies its configuration to `profiles.json` on the next successful
-unified profile write. To migrate before running an older CLI, run `auth update`
-in unified mode with the selected profile's existing `--api-base-url`. Relative
-token paths and managed credential references keep their original directory.
-After migration, legacy CLI writes to `config.json` are independent of unified
-profiles.
+it and migrates it on the next successful unified profile write. To migrate
+before running an older CLI, run `auth update` in unified mode with the selected
+profile's existing `--api-base-url`. If a v1 profile already uses `profiles.json`
+as its Token file, the CLI writes `.octo-unified/profiles.json` and keeps the
+Token at its original path. Relative Token paths and managed credential
+references keep their original directory.
+
+After the unified configuration is durable, the CLI archives the original v1
+metadata as `config.v1-*.bak`. The legacy CLI can then use `config.json` for Bot
+profiles. A migration that captures a concurrent legacy write restores it only
+if the active path is vacant and retains the captured file for recovery.
 
 **Trust boundary: the OS user account.** Any process running as the same user
 can run `octo-cli` and therefore decrypt the store; the encryption defends against
