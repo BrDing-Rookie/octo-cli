@@ -25,7 +25,10 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-const authCurrentOutputProcessArg = "--test-auth-current-output"
+const (
+	authCurrentOutputProcessArg = "--test-auth-current-output"
+	authCurrentRawStdout        = "--raw-stdout"
+)
 
 func TestUnifiedAuthCurrentCancelWhileWritingOutput(t *testing.T) {
 	for _, tc := range []struct {
@@ -105,20 +108,76 @@ func TestUnifiedAuthCurrentCancelWhileWritingOutput(t *testing.T) {
 					}
 					return
 				}
-				snap, err := store.Snapshot("target", true)
-				if err != nil || snap.Profile.TokenSource == nil || snap.Profile.TokenSource.Entry == originalEntry {
-					t.Fatalf("expected the committed Profile after stdout cancellation: %+v (%v)", snap, err)
-				}
-				cfg, err := config.LoadProfileConfig()
-				if err != nil {
-					t.Fatal(err)
-				}
-				token, err := authstore.ReadManagedToken(cfg, snap.Profile.TokenSource)
-				if err != nil || token != candidate {
-					t.Fatalf("expected the committed Token after stdout cancellation: %v", err)
-				}
+				assertAuthCurrentCommittedToken(t, store, originalEntry, candidate)
 			})
 		}
+	}
+}
+
+func TestUnifiedAuthCurrentBrokenStdoutPreservesCommittedToken(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"plain", nil},
+		{"filtered", []string{"--jq", ".data.profile"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+			store := authstore.NewManagedStore(dir, nil)
+			candidate := authCurrentFixtureCandidateToken
+			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
+				candidate: authCurrentFixtureSuccess("candidate-id", "owner", "space"),
+			})
+			originalEntry := seedAuthCurrentProfile(t, store, "target", server.URL, "space", authCurrentFixtureStoredToken)
+			reader, stdout := authCurrentTestPipe(t)
+			if err := reader.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithTimeout(t.Context(), 8*time.Second)
+			defer cancel()
+			args := []string{authCurrentOutputProcessArg, authCurrentRawStdout, "--format", "json", "--profile", "target"}
+			args = append(args, tc.args...)
+			args = append(args, "auth", "login", "--with-token")
+			proc := exec.CommandContext(ctx, os.Args[0], args...)
+			proc.Stdin = strings.NewReader(candidate)
+			proc.Stdout = stdout
+			var stderr bytes.Buffer
+			proc.Stderr = &stderr
+			var exit *exec.ExitError
+			if err := proc.Run(); !errors.As(err, &exit) || exit.ExitCode() != 1 {
+				t.Fatalf("expected login to exit with code 1 after broken stdout: %v (%s)", err, stderr.String())
+			}
+			var envelope struct {
+				Error struct{ Code string }
+			}
+			if err := json.Unmarshal(stderr.Bytes(), &envelope); err != nil || envelope.Error.Code != "TOKEN_IMPORT_OUTPUT_FAILED" {
+				t.Fatalf("expected the post-commit error envelope: %s (%v)", stderr.String(), err)
+			}
+			assertAuthCurrentRedaction(t, candidate, stderr.String())
+			if len(requests()) != 1 {
+				t.Fatal("expected one candidate verification request")
+			}
+			assertAuthCurrentCommittedToken(t, store, originalEntry, candidate)
+		})
+	}
+}
+
+func assertAuthCurrentCommittedToken(t *testing.T, store *authstore.ManagedStore, originalEntry, candidate string) {
+	t.Helper()
+	snap, err := store.Snapshot("target", true)
+	if err != nil || snap.Profile.TokenSource == nil || snap.Profile.TokenSource.Entry == originalEntry {
+		t.Fatalf("expected the committed Profile after output failure: %+v (%v)", snap, err)
+	}
+	cfg, err := config.LoadProfileConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := authstore.ReadManagedToken(cfg, snap.Profile.TokenSource)
+	if err != nil || token != candidate {
+		t.Fatalf("expected the committed Token after output failure: %v", err)
 	}
 }
 
@@ -244,11 +303,13 @@ func init() {
 	f := cmdutil.NewDefaultFactory()
 	store := authstore.NewManagedStore(os.Getenv("OCTO_CONFIG_DIR"), nil)
 	f.ManagedStoreFunc = func() (*authstore.ManagedStore, error) { return store, nil }
-	ready := os.NewFile(3, "ready")
-	if watchDiagnostic := os.Args[2]; watchDiagnostic != "" {
-		f.IOStreams.ErrOut = authCurrentNotifyingWriter{out: os.Stderr, ready: ready, match: watchDiagnostic}
-	} else {
-		f.IOStreams.Out = authCurrentNotifyingWriter{out: os.Stdout, ready: ready}
+	if watchDiagnostic := os.Args[2]; watchDiagnostic != authCurrentRawStdout {
+		ready := os.NewFile(3, "ready")
+		if watchDiagnostic != "" {
+			f.IOStreams.ErrOut = authCurrentNotifyingWriter{out: os.Stderr, ready: ready, match: watchDiagnostic}
+		} else {
+			f.IOStreams.Out = authCurrentNotifyingWriter{out: os.Stdout, ready: ready}
+		}
 	}
 	root := NewRootCmd(f)
 	root.SetArgs(os.Args[3:])

@@ -26,6 +26,17 @@ func (s *IOStreams) WriteStdout(ctx context.Context, data []byte) error {
 	return err
 }
 
+// WriteStdoutAfterCommit also reports a broken standard pipe as a write error
+// on Unix so the caller can report the outcome of a completed mutation.
+func (s *IOStreams) WriteStdoutAfterCommit(ctx context.Context, data []byte) error {
+	_, err := writeStream(ctx, stdoutPipeWriter{out: s.Out}, data, 0)
+	return err
+}
+
+type stdoutPipeWriter struct {
+	out io.Writer
+}
+
 // StderrWithContext lets best-effort diagnostics stop waiting on cancellation.
 func (s *IOStreams) StderrWithContext(ctx context.Context) io.Writer {
 	if ctx.Done() == nil || s.ErrOut == nil {

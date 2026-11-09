@@ -32,7 +32,7 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 		`{"domain":"*","actions":["*:read","*","*:*"]},{"domain":"task","actions":[]}]`
 	reply.body = strings.Replace(reply.body, `[{"domain":"task","actions":["task:read"]}]`, permissions, 1)
 	reply.body = strings.Replace(reply.body, `"bot_name":"Fixture Bot"`,
-		`"bot_name":"`+url.QueryEscape(candidate)+`","relation_id":9007199254740993,"token_hash":"private"`, 1)
+		`"bot_name":"`+url.QueryEscape(candidate)+`","relation_id":9007199254740993,"Label":"one","label":"two","token_hash":"private"`, 1)
 	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
 		old:       authCurrentFixtureSuccess("old-id", "owner", "old-space"),
 		candidate: reply,
@@ -104,7 +104,8 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 		t.Fatalf("expected the permission patterns unchanged: %s (%v)", stdout, err)
 	}
 	binding := string(result.Data.BotBindings[0])
-	if !strings.Contains(binding, "9007199254740993") || strings.Contains(binding, "token_hash") {
+	if !strings.Contains(binding, "9007199254740993") || strings.Contains(binding, "token_hash") ||
+		!strings.Contains(binding, `"Label"`) || !strings.Contains(binding, `"label"`) {
 		t.Fatalf("unexpected bot binding projection: %s", binding)
 	}
 
@@ -286,6 +287,8 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 	duplicateExpiry.body = strings.Replace(duplicateExpiry.body, `"is_expired":false`, `"is_expired":true,"is_expired":false`, 1)
 	duplicateData := active
 	duplicateData.body = strings.TrimSuffix(revoked.body, "}") + "," + strings.TrimPrefix(active.body, "{")
+	duplicateBotID := active
+	duplicateBotID.body = strings.Replace(duplicateBotID.body, `"bot_id":"fixture-bot"`, `"bot_id":null,"bot_id":"fixture-bot"`, 1)
 	missingMetadata := active
 	missingMetadata.body = strings.NewReplacer(
 		`,"version":1`, "",
@@ -314,6 +317,8 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		{"duplicate data", candidate, "INVALID_TOKEN_SELF", "api_error", duplicateData, true},
 		{"duplicate status", candidate, "INVALID_TOKEN_SELF", "api_error", duplicateStatus, true},
 		{"duplicate expiry flag", candidate, "INVALID_TOKEN_SELF", "api_error", duplicateExpiry, true},
+		{"duplicate permission actions", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[null],"actions":["task:*"]`), true},
+		{"duplicate bot id", candidate, "INVALID_TOKEN_SELF", "api_error", duplicateBotID, true},
 		{"null action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[null]`), true},
 		{"empty action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`[""]`), true},
 		{"blank action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["   "]`), true},
@@ -527,6 +532,8 @@ func TestUnifiedAuthCurrentGetRejectsInvalidTokenSelf(t *testing.T) {
 		{"case alias of status", `"status":"active"`, `"STATUS":"revoked","status":"active"`},
 		{"Unicode alias of status", `"status":"active"`, `"\u017ftatus":"revoked","status":"active"`},
 		{"duplicate expiry flag", `"is_expired":false`, `"is_expired":true,"is_expired":false`},
+		{"duplicate permission actions", `["task:read"]`, `[null],"actions":["task:*"]`},
+		{"duplicate bot id", `"bot_id":"fixture-bot"`, `"bot_id":null,"bot_id":"fixture-bot"`},
 		{"null action", `["task:read"]`, `[null]`},
 		{"empty action", `["task:read"]`, `[""]`},
 		{"blank action", `["task:read"]`, `["   "]`},

@@ -30,7 +30,7 @@ var authPermissionField = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+|\*)$`)
 type authTokenSelf struct {
 	Token       authTokenMetadata `json:"token"`
 	Permissions []authPermission  `json:"permissions"`
-	BotBindings []map[string]any  `json:"bot_bindings"`
+	BotBindings []authBotBinding  `json:"bot_bindings"`
 }
 
 type authTokenMetadata struct {
@@ -50,7 +50,7 @@ type authTokenMetadata struct {
 
 // UnmarshalJSON checks metadata keys before the typed decode can overwrite them.
 func (meta *authTokenMetadata) UnmarshalJSON(data []byte) error {
-	if !uniqueTokenSelfObjectKeys(data) {
+	if !uniqueTokenSelfObjectKeys(data, true) {
 		return errors.New("invalid or ambiguous TokenSelf metadata")
 	}
 	type wireMetadata authTokenMetadata
@@ -78,6 +78,27 @@ func (field authRequiredNullable[T]) MarshalJSON() ([]byte, error) {
 type authPermission struct {
 	Domain  string    `json:"domain"`
 	Actions []*string `json:"actions"`
+}
+
+// UnmarshalJSON rejects duplicate permission fields before decoding actions.
+func (permission *authPermission) UnmarshalJSON(data []byte) error {
+	if !uniqueTokenSelfObjectKeys(data, true) {
+		return errors.New("invalid or ambiguous TokenSelf permission")
+	}
+	type wirePermission authPermission
+	return json.Unmarshal(data, (*wirePermission)(permission))
+}
+
+type authBotBinding map[string]any
+
+// UnmarshalJSON checks exact map keys and preserves numbers in binding data.
+func (binding *authBotBinding) UnmarshalJSON(data []byte) error {
+	if !uniqueTokenSelfObjectKeys(data, false) {
+		return errors.New("invalid or ambiguous TokenSelf bot binding")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	return decoder.Decode((*map[string]any)(binding))
 }
 
 func newAuthGetCmd(f *cmdutil.Factory) *cobra.Command {
@@ -253,8 +274,8 @@ func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
 	}
 	var self authTokenSelf
 	invalid := output.ErrAPI("INVALID_TOKEN_SELF", "invalid TokenSelf response from octo-auth", "check the octo-auth gateway and response contract")
-	if !uniqueTokenSelfObjectKeys(raw) || json.Unmarshal(raw, &envelope) != nil ||
-		envelope.Error != nil || !uniqueTokenSelfObjectKeys(envelope.Data) {
+	if !uniqueTokenSelfObjectKeys(raw, true) || json.Unmarshal(raw, &envelope) != nil ||
+		envelope.Error != nil || !uniqueTokenSelfObjectKeys(envelope.Data, true) {
 		return self, invalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(envelope.Data))
@@ -265,9 +286,9 @@ func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
 	return self, nil
 }
 
-// Check the containing object's keys before encoding/json applies its
-// case-insensitive struct field matching. The typed decode validates values.
-func uniqueTokenSelfObjectKeys(raw []byte) bool {
+// Check the containing object's keys before decoding can overwrite a value.
+// Fold struct keys like encoding/json does. Map keys are case-sensitive.
+func uniqueTokenSelfObjectKeys(raw []byte, foldKeys bool) bool {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if start, err := decoder.Token(); err != nil || start != json.Delim('{') {
 		return false
@@ -280,7 +301,9 @@ func uniqueTokenSelfObjectKeys(raw []byte) bool {
 		if err != nil || !ok {
 			return false
 		}
-		key = strings.Map(foldTokenSelfKeyRune, key)
+		if foldKeys {
+			key = strings.Map(foldTokenSelfKeyRune, key)
+		}
 		if _, duplicate := seen[key]; duplicate {
 			return false
 		}
@@ -415,7 +438,7 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 		err = render()
 	}
 	if err == nil {
-		err = f.IOStreams.WriteStdout(ctx, rendered.Bytes())
+		err = f.IOStreams.WriteStdoutAfterCommit(ctx, rendered.Bytes())
 	}
 	if err != nil {
 		return output.ErrWithHint("internal", "TOKEN_IMPORT_OUTPUT_FAILED",
