@@ -94,8 +94,8 @@ func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool,
 		return err
 	}
 	name, _ := config.ProfileSelector(f.Globals.Profile, f.Globals.ProfileSet)
-	if strings.TrimSpace(name) == "" {
-		return output.ErrValidation("unified auth login requires a Profile name", "pass --profile or set OCTO_PROFILE")
+	if name == "" || strings.TrimSpace(name) != name {
+		return output.ErrValidation("unified auth login requires a valid Profile name", "pass --profile or set OCTO_PROFILE without surrounding whitespace")
 	}
 	store, err := f.ManagedStore()
 	if err != nil {

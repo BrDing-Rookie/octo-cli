@@ -239,12 +239,20 @@ func TestUnifiedAuthCurrentPreflight(t *testing.T) {
 	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
 		candidate: authCurrentFixtureSuccess("id", "owner", "space"),
 	})
-	for _, flags := range [][]string{{"--dry-run"}, {"--format", "invalid-format"}, {"--jq", "("}} {
+	for _, tc := range []struct {
+		flags   []string
+		profile string
+	}{
+		{[]string{"--dry-run"}, "new"},
+		{[]string{"--format", "invalid-format"}, "new"},
+		{[]string{"--jq", "("}, "new"},
+		{nil, " padded "},
+	} {
 		stdin := strings.NewReader(candidate)
-		stdout, stderr, err := runUnifiedAuthCurrent(store, stdin, append(flags,
-			"--profile", "new", "--space", "space", "auth", "login", "--api-base-url", server.URL, "--with-token")...)
+		stdout, stderr, err := runUnifiedAuthCurrent(store, stdin, append(tc.flags,
+			"--profile", tc.profile, "--space", "space", "auth", "login", "--api-base-url", server.URL, "--with-token")...)
 		if err == nil || stdin.Len() != len(candidate) {
-			t.Fatalf("invalid flags read stdin or passed: %v (%v)", flags, err)
+			t.Fatalf("invalid options read stdin or passed: flags %v, profile %q (%v)", tc.flags, tc.profile, err)
 		}
 		assertAuthCurrentRedaction(t, candidate, stdout, stderr, err.Error())
 	}
