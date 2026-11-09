@@ -167,6 +167,12 @@ func (s *Store) saveProfiles(profiles map[string]ProfileMeta) error {
 // orphaned token (invisible, since nothing lists it) rather than a listed
 // profile with no token.
 func (s *Store) SaveProfile(name string, meta *ProfileMeta, token string) error {
+	lock, err := s.lockProfiles()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	profiles, err := s.LoadProfiles()
 	if err != nil {
 		return err
@@ -222,6 +228,12 @@ func profileChangeInvalidatesMailBindings(name string, meta *ProfileMeta, token 
 // UpdateProfileAPIBaseURL changes only the non-secret endpoint metadata for an
 // existing profile. Bot and mailbox credentials remain untouched.
 func (s *Store) UpdateProfileAPIBaseURL(name, apiBaseURL string) error {
+	lock, err := s.lockProfiles()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	profiles, err := s.LoadProfiles()
 	if err != nil {
 		return err
@@ -242,6 +254,12 @@ func (s *Store) UpdateProfileAPIBaseURL(name, apiBaseURL string) error {
 // metadata first, then the token. A crash in between leaves an orphaned token
 // (harmless) rather than a listed profile whose token is already gone.
 func (s *Store) RemoveProfile(name string) error {
+	lock, err := s.lockProfiles()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	profiles, err := s.LoadProfiles()
 	if err != nil {
 		return err
@@ -276,6 +294,15 @@ func (s *Store) RemoveProfile(name string) error {
 		return err
 	}
 	return s.savePendingMailAuthorizations(pendingMail)
+}
+
+func (s *Store) lockProfiles() (*os.File, error) {
+	// Make room for the lock without changing the permissions of an existing
+	// store before LoadProfiles checks its format under the lock.
+	if err := os.MkdirAll(s.dir, dirPerm); err != nil {
+		return nil, fmt.Errorf("create %s: %w", s.dir, err)
+	}
+	return openProfileLock(s.dir)
 }
 
 // ProfileForRobotID returns the name of the profile that records the given

@@ -3,7 +3,9 @@ package authstore
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 	"unsafe"
 
@@ -14,7 +16,32 @@ func lockManagedFile(f *os.File) error {
 	return windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &windows.Overlapped{})
 }
 
+// managedWindowsPath applies Go's conservative long-path threshold to calls
+// made directly to Win32. Extended paths must be absolute and normalized.
+func managedWindowsPath(path string) (string, error) {
+	path = filepath.FromSlash(path)
+	if strings.HasPrefix(path, `\\?\`) || strings.HasPrefix(path, `\\.\`) || strings.HasPrefix(path, `\??\`) {
+		return path, nil
+	}
+	full, err := windows.FullPath(path)
+	if err != nil || len(full) < 248 {
+		return full, err
+	}
+	if unc, ok := strings.CutPrefix(full, `\\`); ok {
+		return `\\?\UNC\` + unc, nil
+	}
+	return `\\?\` + full, nil
+}
+
 func replaceManagedFile(from, to string) (bool, error) {
+	from, err := managedWindowsPath(from)
+	if err != nil {
+		return false, err
+	}
+	to, err = managedWindowsPath(to)
+	if err != nil {
+		return false, err
+	}
 	src, err := windows.UTF16PtrFromString(from)
 	if err != nil {
 		return false, err
@@ -37,6 +64,10 @@ func replaceManagedFile(from, to string) (bool, error) {
 }
 
 func protectManagedPath(path string, _ os.FileInfo, _ os.FileMode) error {
+	path, err := managedWindowsPath(path)
+	if err != nil {
+		return err
+	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return err
@@ -59,6 +90,10 @@ func protectManagedPath(path string, _ os.FileInfo, _ os.FileMode) error {
 }
 
 func checkManagedFilePrivacy(path string, _ os.FileInfo) error {
+	path, err := managedWindowsPath(path)
+	if err != nil {
+		return err
+	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return err

@@ -104,6 +104,116 @@ func TestManagedEncryptedImport(t *testing.T) {
 	}
 }
 
+func TestLegacyProfileWritesWaitForManagedCommit(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		write func(*Store) error
+	}{
+		{"login", func(s *Store) error {
+			return s.SaveProfile("legacy", &ProfileMeta{RobotID: "bot-legacy"}, "legacy-token")
+		}},
+		{"update", func(s *Store) error { return s.UpdateProfileAPIBaseURL("legacy", "https://legacy.example") }},
+		{"logout", func(s *Store) error { return s.RemoveProfile("legacy") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			legacy := &Store{dir: dir}
+			managed := NewManagedStore(dir, nil)
+			snap, err := managed.Snapshot("managed", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			commitReady, commit := make(chan struct{}), make(chan struct{})
+			managed.writeConfig = func(path string, data []byte) (bool, error) {
+				close(commitReady)
+				<-commit
+				return writeManagedFile(path, data)
+			}
+			managedDone := make(chan error, 1)
+			go func() {
+				_, err := managed.Import(snap, managedFixtureProfile(), "managed-token", BackendEncryptedFile)
+				managedDone <- err
+			}()
+			select {
+			case <-commitReady:
+			case err := <-managedDone:
+				t.Fatalf("import stopped before commit: %v", err)
+			}
+
+			legacyStarted, legacyDone := make(chan struct{}), make(chan error, 1)
+			go func() {
+				close(legacyStarted)
+				legacyDone <- tc.write(legacy)
+			}()
+			<-legacyStarted
+			select {
+			case err := <-legacyDone:
+				close(commit)
+				<-managedDone
+				t.Fatalf("legacy mutation finished while import held the lock: %v", err)
+			case <-time.After(100 * time.Millisecond):
+			}
+			close(commit)
+			if err := <-managedDone; err != nil {
+				t.Fatal(err)
+			}
+			if err := <-legacyDone; err == nil || !strings.Contains(err.Error(), "versioned config.json") {
+				t.Fatalf("legacy mutation did not reject the committed versioned config: %v", err)
+			}
+			if _, err := os.Stat(legacy.credPath()); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("legacy mutation wrote credentials: %v", err)
+			}
+			after, err := managed.Snapshot("managed", true)
+			if err != nil || !after.Exists {
+				t.Fatalf("managed profile was lost: %v", err)
+			}
+			if token, err := managed.readEntry(after.Profile.TokenSource); err != nil || token != "managed-token" {
+				t.Fatalf("managed credential was lost: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedRemoveRejectsSymlinkedCredentials(t *testing.T) {
+	original := NewManagedStore(t.TempDir(), nil)
+	copyStore := NewManagedStore(t.TempDir(), nil)
+	snap, err := original.Snapshot("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := original.Import(snap, managedFixtureProfile(), "original-token", BackendEncryptedFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(original.dir, credentialsDir), filepath.Join(copyStore.dir, credentialsDir)); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("cannot create a Windows directory symlink: %v", err)
+		}
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(original.dir, configFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(copyStore.dir, configFile), raw, secPerm); err != nil {
+		t.Fatal(err)
+	}
+	snap, err = copyStore.Snapshot("target", true)
+	if err != nil || !snap.Exists {
+		t.Fatalf("select copied profile: %v", err)
+	}
+	result, err := copyStore.Remove(snap)
+	if err != nil || result.CleanupWarning == "" {
+		t.Fatalf("logout must commit and report refused cleanup: %#v, %v", result, err)
+	}
+	if after, err := copyStore.Snapshot("target", true); err != nil || after.Exists {
+		t.Fatalf("copied profile was not removed: %v", err)
+	}
+	if token, err := original.readEntry(snap.Profile.TokenSource); err != nil || token != "original-token" {
+		t.Fatalf("the original store lost its credential: %v", err)
+	}
+}
+
 func TestManagedCommitFailures(t *testing.T) {
 	for _, scenario := range []string{"pre-commit", "verify-entry", "cleanup", "directory-sync"} {
 		t.Run(scenario, func(t *testing.T) {

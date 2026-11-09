@@ -16,6 +16,7 @@ const (
 	maxManagedToken = 64 * 1024
 	keyInKeychain   = 1
 	keyInFile       = 2
+	credentialsDir  = "credentials"
 )
 
 var (
@@ -42,6 +43,11 @@ func (unavailableKeychain) Create(string, []byte) error { return errKeychainUnav
 func (unavailableKeychain) Remove(string) error { return errKeychainUnavailable }
 
 func (s *ManagedStore) account(entry string) (string, error) {
+	// There is no account to resolve when the platform has no Keychain. On
+	// Windows, resolving the directory can itself hit a legacy path limit.
+	if _, unavailable := s.keychain.(unavailableKeychain); unavailable {
+		return "", errKeychainUnavailable
+	}
 	// The same store may be reached through a symlinked parent, such as
 	// /tmp and /private/tmp on macOS. Keep those aliases in one namespace.
 	dir, err := canonicalManagedDirectory(s.dir)
@@ -69,15 +75,15 @@ func (s *ManagedStore) createKeychain(entry string, data []byte) error {
 }
 
 func (s *ManagedStore) encryptedPath(entry string) string {
-	return filepath.Join(s.dir, "credentials", entry+".enc")
+	return filepath.Join(s.dir, credentialsDir, entry+".enc")
 }
 
 func (s *ManagedStore) masterKeyPath() string {
-	return filepath.Join(s.dir, "credentials", "master.key")
+	return filepath.Join(s.dir, credentialsDir, "master.key")
 }
 
 func (s *ManagedStore) writeEncrypted(entry, token string) error {
-	if err := ensurePrivateDir(filepath.Join(s.dir, "credentials")); err != nil {
+	if err := ensurePrivateDir(filepath.Join(s.dir, credentialsDir)); err != nil {
 		return err
 	}
 	key, location, err := s.masterKeyForWrite()
@@ -90,7 +96,32 @@ func (s *ManagedStore) writeEncrypted(entry, token string) error {
 	}
 	committed, err := writeManagedFile(s.encryptedPath(entry), append([]byte{location}, blob...))
 	if committed && err != nil {
-		return errors.Join(err, os.Remove(s.encryptedPath(entry)))
+		return errors.Join(err, s.removeEncrypted(entry))
+	}
+	return err
+}
+
+func (s *ManagedStore) removeEncrypted(entry string) error {
+	root, err := os.OpenRoot(s.dir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }() //nolint:errcheck // directory handle used only for lookup and removal
+
+	info, err := root.Lstat(credentialsDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return errors.New("managed credential cleanup requires a real credentials directory")
+	}
+	// Keep removal inside the store even if the directory is swapped after Lstat.
+	err = root.Remove(filepath.Join(credentialsDir, entry+".enc"))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
 	return err
 }
@@ -197,7 +228,9 @@ func readPrivateFile(path string, limit int64) ([]byte, error) {
 	return data, errors.Join(readErr, closeErr)
 }
 
-func openManagedLock(path string) (*os.File, error) {
+// openProfileLock serializes both legacy and versioned writers of config.json.
+func openProfileLock(dir string) (*os.File, error) {
+	path := filepath.Join(dir, ".managed.lock")
 	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() {
 			return nil, errors.New("managed lock must be a regular file")

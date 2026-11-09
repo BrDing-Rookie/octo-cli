@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -208,7 +207,7 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 	if err := ensurePrivateDir(s.dir); err != nil {
 		return CommitResult{}, err
 	}
-	lock, err := openManagedLock(filepath.Join(s.dir, ".managed.lock"))
+	lock, err := openProfileLock(s.dir)
 	if err != nil {
 		return CommitResult{}, err
 	}
@@ -325,10 +324,7 @@ func (s *ManagedStore) removeEntry(ref *config.TokenSource) error {
 		}
 		return s.keychain.Remove(account)
 	}
-	if err := os.Remove(s.encryptedPath(ref.Entry)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return err
-	}
-	return nil
+	return s.removeEncrypted(ref.Entry)
 }
 
 func validateManagedRef(ref *config.TokenSource) error {

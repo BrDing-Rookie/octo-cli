@@ -4,11 +4,60 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/windows"
 )
+
+func TestManagedWindowsPath(t *testing.T) {
+	longSuffix := strings.Repeat(strings.Repeat("d", 100)+`\`, 3) + configFile
+	for _, tc := range []struct {
+		name string
+		path string
+		want string
+	}{
+		{"short", `C:\store\` + configFile, `C:\store\` + configFile},
+		{"local", `C:/store/../` + longSuffix, `\\?\C:\` + longSuffix},
+		{"UNC", `\\server\share\store\..\` + longSuffix, `\\?\UNC\server\share\` + longSuffix},
+		{"extended", `\\?\UNC\server\share\` + longSuffix, `\\?\UNC\server\share\` + longSuffix},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, err := managedWindowsPath(tc.path); err != nil || got != tc.want {
+				t.Fatalf("got %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestWindowsManagedStoreWithLongPath(t *testing.T) {
+	dir := t.TempDir()
+	for range 3 {
+		dir = filepath.Join(dir, strings.Repeat("d", 100))
+	}
+	store := NewManagedStore(dir, nil)
+	profile := managedFixtureProfile()
+	for _, token := range []string{"first-token", "rotated-token"} {
+		snap, err := store.Snapshot("target", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result, err := store.Import(snap, profile, token, BackendAuto); err != nil || result.CleanupWarning != "" {
+			t.Fatalf("import using a long path: %#v, %v", result, err)
+		}
+	}
+	snap, err := store.Snapshot("target", true)
+	if err != nil || !snap.Exists {
+		t.Fatalf("read committed profile: %v", err)
+	}
+	if got, err := store.readEntry(snap.Profile.TokenSource); err != nil || got != "rotated-token" {
+		t.Fatalf("read rotated credential: %v", err)
+	}
+	if result, err := store.Remove(snap); err != nil || result.CleanupWarning != "" {
+		t.Fatalf("remove profile using a long path: %#v, %v", result, err)
+	}
+}
 
 func TestWindowsManagedReplacementWaitsForReader(t *testing.T) {
 	dir := t.TempDir()
