@@ -252,12 +252,16 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show the single active bot identity (whoami); use `auth list` to enumerate",
+		Short: "Check a unified Profile or show the active legacy bot identity",
 		Args:  cobra.NoArgs,
-		PreRunE: func(cmd *cobra.Command, _ []string) error {
-			return rejectUnifiedCredentialCommand(f, "auth "+cmd.Name())
-		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unified, err := f.UsesUnifiedCredentials()
+			if err != nil {
+				return failErr(f, err)
+			}
+			if unified {
+				return runUnifiedAuthStatus(f)
+			}
 			// Report the same credential an ordinary request would use. In
 			// particular, environment credentials must bypass the local store.
 			cred, resolveErr := f.Credential()

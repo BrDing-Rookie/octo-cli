@@ -1136,11 +1136,13 @@ func TestPhaseOneAuthDoesNotFallBackToLegacyCredentials(t *testing.T) {
 			}
 			t.Setenv("OCTO_TOKEN", "opaque-runtime-bearer")
 			commands := [][]string{
-				{"status"},
 				{"login", "--with-token"},
 			}
 			if tc.modeError != "" {
-				commands = append(commands, []string{"list"}, []string{"update", "--api-base-url", "https://other.example"}, []string{"logout"})
+				commands = append(commands,
+					[]string{"list"}, []string{"status"},
+					[]string{"update", "--api-base-url", "https://other.example"}, []string{"logout"},
+				)
 			}
 			for _, command := range commands {
 				name := command[0]

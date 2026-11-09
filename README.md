@@ -394,6 +394,27 @@ OCTO_TOKEN="$BOT_TOKEN" octo-cli message sync
 The success envelope's `identity.source` names the variable actually used
 (`env:OCTO_TOKEN` or `env:OCTO_BOT_TOKEN`), so a mix-up is visible.
 
+### Unified Profile status
+
+Run the local Profile check before starting a managed CLI session.
+
+```sh
+OCTO_CONFIG_DIR="$profile_dir" OCTO_CREDENTIAL_MODE=unified \
+  octo-cli --format json --profile "$profile" auth status
+```
+
+- Exit 0 with `data.status: "readable"` means the selected Profile's
+  credential is locally readable and passes the unified Token format check.
+- Exit 0 with `data.status: "missing"` means the named unified Profile
+  is absent. A directory with only legacy Bot profiles also reports missing.
+- A nonzero exit with the JSON error envelope on stderr indicates an invalid
+  selector or configuration, a broken credential reference, a read error,
+  or a target conflict. Automatic provisioning requires the missing result.
+
+The success data includes the Profile name, API origin, and Space when set.
+The command reads the stored Profile source and works offline. The caller
+verifies account ownership when it establishes the binding.
+
 ### API Base URL
 
 All backend services are accessed through a single API base URL.
