@@ -657,13 +657,12 @@ func (f *Factory) PreflightOutput(format string) error {
 // EmitSuccess renders a success envelope, applying --jq first (if set) and
 // then the configured output format. Non-nil raw is placed inside the envelope.
 func (f *Factory) EmitSuccess(raw []byte) error {
-	rm := normalizeRaw(raw)
-	return f.emit(rm, output.EnvelopeMeta{})
+	return f.EmitSuccessWithMeta(raw, output.EnvelopeMeta{})
 }
 
 // EmitSuccessWithMeta is EmitSuccess plus envelope meta (rate limit, notice).
 func (f *Factory) EmitSuccessWithMeta(raw []byte, meta output.EnvelopeMeta) error {
-	return f.emit(normalizeRaw(raw), meta)
+	return f.WriteSuccessWithMeta(f.IOStreams.Out, raw, meta)
 }
 
 // identityValue builds the envelope's identity field from the credential
@@ -710,14 +709,16 @@ func (f *Factory) identityValue() any {
 	return id
 }
 
-func (f *Factory) emit(raw []byte, meta output.EnvelopeMeta) error {
+// WriteSuccessWithMeta renders the success response to w. A mutating command
+// can buffer the response here before committing and write it after commit.
+func (f *Factory) WriteSuccessWithMeta(w io.Writer, raw []byte, meta output.EnvelopeMeta) error {
 	if meta.Identity == nil {
 		meta.Identity = f.identityValue()
 	}
 	// Build the success envelope into an in-memory buffer first so --jq can
 	// operate on the canonical envelope shape (not the backend shape).
 	var envBuf bytes.Buffer
-	if err := output.WriteSuccess(&envBuf, raw, meta); err != nil {
+	if err := output.WriteSuccess(&envBuf, normalizeRaw(raw), meta); err != nil {
 		return err
 	}
 	// Re-parse into any so Format/ApplyJQ can work with it. UseNumber keeps every
@@ -751,7 +752,7 @@ func (f *Factory) emit(raw []byte, meta output.EnvelopeMeta) error {
 			envelope = results
 		}
 	}
-	return output.Format(f.IOStreams.Out, f.Format(), envelope)
+	return output.Format(w, f.Format(), envelope)
 }
 
 // EmitError renders an error envelope to stderr. Non-ExitError values are

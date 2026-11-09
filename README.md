@@ -381,6 +381,10 @@ gateway must support `GET /v1/auth/tokens/_current`.
 | `auth login --with-token` | Reads the candidate Token from stdin, verifies its status and target Space online, and saves it to the selected Profile. Add `--owner-id` to verify the expected account. |
 | `auth get` | Checks the selected Token online and returns its metadata, permissions, and Bot bindings in the JSON `data` object. |
 
+Login evaluates `--jq` before saving the Token. With `--jq`, credential cleanup
+warnings go to stderr. If login returns `TOKEN_IMPORT_OUTPUT_FAILED`, the Profile
+already contains the new Token. Use `auth get` to verify it before retrying.
+
 Use the same Profile and configuration directory for import and self-check.
 Clear the environment Token overrides to check the stored credential.
 

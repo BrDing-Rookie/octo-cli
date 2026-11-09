@@ -45,8 +45,8 @@ type authTokenMetadata struct {
 }
 
 type authPermission struct {
-	Domain  string   `json:"domain"`
-	Actions []string `json:"actions"`
+	Domain  string    `json:"domain"`
+	Actions []*string `json:"actions"`
 }
 
 func newAuthGetCmd(f *cmdutil.Factory) *cobra.Command {
@@ -125,10 +125,7 @@ func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool,
 	if err := self.Token.verifyImport(target.SpaceID, ownerID); err != nil {
 		return err
 	}
-	if cmd.Context().Err() != nil {
-		return output.ErrNetwork("CLI Token verification was cancelled", "retry the import")
-	}
-	return importVerifiedToken(f, store, &baseline, target, token)
+	return importVerifiedToken(cmd.Context(), f, store, baseline, target, token)
 }
 
 func validateUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL, ownerID string) error {
@@ -210,13 +207,25 @@ func (s *authTokenSelf) valid() bool {
 		return false
 	}
 	for _, permission := range s.Permissions {
-		if permission.Domain == "" || permission.Actions == nil {
+		if !permission.valid() {
 			return false
 		}
 	}
 	for _, binding := range s.BotBindings {
 		id, _ := binding["bot_id"].(string)
 		if _, ok := binding["bot_name"].(string); id == "" || !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (p authPermission) valid() bool {
+	if p.Domain == "" || p.Actions == nil {
+		return false
+	}
+	for _, action := range p.Actions {
+		if action == nil {
 			return false
 		}
 	}
@@ -239,30 +248,61 @@ func (m *authTokenMetadata) verifyImport(spaceID, ownerID string) error {
 	return nil
 }
 
-func importVerifiedToken(f *cmdutil.Factory, store *authstore.ManagedStore, baseline *authstore.ProfileSnapshot, target config.Profile, token string) error {
-	result, err := store.Import(*baseline, target, token, authstore.BackendAuto)
-	if errors.Is(err, authstore.ErrProfileConflict) {
-		return output.ErrWithHint("validation", "PROFILE_CONFLICT", "profile changed during CLI Token verification", "retry the import after checking the target Profile")
-	}
-	if err != nil {
-		return output.ErrWithHint("config", "CREDENTIAL_STORE_ERROR", "cannot commit the verified CLI Token", "check the Profile directory and system credential store")
-	}
+func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authstore.ManagedStore, baseline authstore.ProfileSnapshot, target config.Profile, token string) error {
 	payload := map[string]string{
 		"profile":      client.RedactBearer(baseline.Name, token),
 		"api_base_url": client.RedactBearer(target.APIBaseURL, token),
 		"space_id":     client.RedactBearer(target.SpaceID, token),
 		"token_source": "managed_store",
 	}
-	if result.CleanupWarning != "" {
-		payload["cleanup_warning"] = client.RedactBearer(result.CleanupWarning, token)
-	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return err
-	}
-	return f.EmitSuccessWithMeta(raw, output.EnvelopeMeta{Identity: map[string]string{
+	meta := output.EnvelopeMeta{Identity: map[string]string{
 		"type": "token", "source": "stdin", "profile": payload["profile"],
-	}})
+	}}
+	render := func(w io.Writer) error {
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return err
+		}
+		return f.WriteSuccessWithMeta(w, raw, meta)
+	}
+
+	filtered := f.Globals.JQ != ""
+	var rendered bytes.Buffer
+	if filtered {
+		if err := render(&rendered); err != nil {
+			return err
+		}
+	}
+	if ctx.Err() != nil {
+		return output.ErrNetwork("CLI Token verification was cancelled", "retry the import")
+	}
+	result, err := store.Import(baseline, target, token, authstore.BackendAuto)
+	if errors.Is(err, authstore.ErrProfileConflict) {
+		return output.ErrWithHint("validation", "PROFILE_CONFLICT", "profile changed during CLI Token verification", "retry the import after checking the target Profile")
+	}
+	if err != nil {
+		return output.ErrWithHint("config", "CREDENTIAL_STORE_ERROR", "cannot commit the verified CLI Token", "check the Profile directory and system credential store")
+	}
+	if result.CleanupWarning != "" {
+		warning := client.RedactBearer(result.CleanupWarning, token)
+		if filtered {
+			// Cleanup runs after commit, so report its warning outside the jq result.
+			_, _ = fmt.Fprintln(f.IOStreams.ErrOut, warning)
+		} else {
+			payload["cleanup_warning"] = warning
+		}
+	}
+	if filtered {
+		_, err = rendered.WriteTo(f.IOStreams.Out)
+	} else {
+		err = render(f.IOStreams.Out)
+	}
+	if err != nil {
+		return output.ErrWithHint("internal", "TOKEN_IMPORT_OUTPUT_FAILED",
+			"the CLI Token was saved to the Profile, but the import result could not be rendered or written",
+			"check the Profile with auth get before retrying and review the output options")
+	}
+	return nil
 }
 
 func (s *authTokenSelf) redactedPayload(bearer string) ([]byte, error) {
@@ -284,8 +324,8 @@ func (s *authTokenSelf) redactedPayload(bearer string) ([]byte, error) {
 	for i := range s.Permissions {
 		group := &s.Permissions[i]
 		group.Domain = client.RedactBearer(group.Domain, bearer)
-		for j, action := range group.Actions {
-			group.Actions[j] = client.RedactBearer(action, bearer)
+		for _, action := range group.Actions {
+			*action = client.RedactBearer(*action, bearer)
 		}
 	}
 	for _, binding := range s.BotBindings {
