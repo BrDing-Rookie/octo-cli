@@ -41,7 +41,7 @@ type authTokenMetadata struct {
 	Status     string                          `json:"status"`
 	ExpiresAt  authRequiredNullable[time.Time] `json:"expires_at"`
 	IsExpired  *bool                           `json:"is_expired"`
-	Version    *int64                          `json:"version"`
+	Version    *uint64                         `json:"version"`
 	CreatedAt  *time.Time                      `json:"created_at"`
 	UpdatedAt  *time.Time                      `json:"updated_at"`
 	LastUsedAt authRequiredNullable[time.Time] `json:"last_used_at"`

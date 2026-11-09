@@ -26,9 +26,8 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 	store := authstore.NewManagedStore(dir, nil)
 	candidate := authCurrentFixtureCandidateToken
 	old := authCurrentFixtureStoredToken
-	reply := authCurrentFixtureSuccess("candidate-id", "owner", "new-space")
+	reply := authCurrentFixtureSuccess("candidate-id", "owner", "new-space").withVersion("0")
 	reply.body = strings.Replace(reply.body, `"name":"fixture"`, `"name":"prefix`+candidate+`suffix"`, 1)
-	reply.body = strings.Replace(reply.body, `"version":1`, `"version":0`, 1)
 	permissions := `[{"domain":"Loop.task-2","actions":["Loop.task-2:Read_1.v2","Loop.task-2:*"]},` +
 		`{"domain":"*","actions":["*:read","*","*:*"]},{"domain":"task","actions":[]}]`
 	reply.body = strings.Replace(reply.body, `[{"domain":"task","actions":["task:read"]}]`, permissions, 1)
@@ -75,7 +74,7 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 		Data struct {
 			Token struct {
 				ID         string          `json:"token_id"`
-				Version    *int64          `json:"version"`
+				Version    *uint64         `json:"version"`
 				Remark     json.RawMessage `json:"remark"`
 				ExpiresAt  json.RawMessage `json:"expires_at"`
 				LastUsedAt json.RawMessage `json:"last_used_at"`
@@ -193,7 +192,7 @@ func TestUnifiedAuthCurrentCreatesProfile(t *testing.T) {
 	dir := phaseOneEnv(t)
 	store := authstore.NewManagedStore(dir, nil)
 	candidate := authCurrentFixtureCandidateToken
-	reply := authCurrentFixtureSuccess("id", "owner", "space")
+	reply := authCurrentFixtureSuccess("id", "owner", "space").withVersion(authCurrentFixtureMaxVersion)
 	reply.body = strings.Replace(reply.body, `[{"domain":"task","actions":["task:read"]}]`, `[]`, 1)
 	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{candidate: reply})
 	t.Setenv(config.EnvProfile, "new")
@@ -210,6 +209,13 @@ func TestUnifiedAuthCurrentCreatesProfile(t *testing.T) {
 	current, err := store.Snapshot("", false)
 	if err != nil || !current.Exists || current.Name != "new" {
 		t.Fatalf("first import did not set the current profile: %+v (%v)", current, err)
+	}
+
+	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+	stdout, stderr, err = runUnifiedAuthCurrent(store, strings.NewReader(""),
+		"--jq", ".data.token.version", "auth", "get")
+	if err != nil || strings.TrimSpace(stdout) != authCurrentFixtureMaxVersion || len(requests()) != 2 {
+		t.Fatalf("expected exact maximum unsigned version from auth get: %v (%s %s)", err, stdout, stderr)
 	}
 }
 
@@ -294,6 +300,8 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		{"blank action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["   "]`), true},
 		{"unqualified action", candidate, "INVALID_TOKEN_SELF", "api_error", active.withActions(`["read"]`), true},
 		{"missing required metadata", candidate, "INVALID_TOKEN_SELF", "api_error", missingMetadata, true},
+		{"negative version", candidate, "INVALID_TOKEN_SELF", "api_error", active.withVersion("-1"), true},
+		{"version overflow", candidate, "INVALID_TOKEN_SELF", "api_error", active.withVersion(authCurrentFixtureVersionOverflow), true},
 		{"missing remark", candidate, "INVALID_TOKEN_SELF", "api_error", withoutNullableField("remark"), true},
 		{"missing expiration", candidate, "INVALID_TOKEN_SELF", "api_error", withoutNullableField("expires_at"), true},
 		{"missing last use", candidate, "INVALID_TOKEN_SELF", "api_error", withoutNullableField("last_used_at"), true},
@@ -507,6 +515,8 @@ func TestUnifiedAuthCurrentGetRejectsInvalidTokenSelf(t *testing.T) {
 		{"missing version", `,"version":1`, ""},
 		{"null version", `"version":1`, `"version":null`},
 		{"fractional version", `"version":1`, `"version":1.5`},
+		{"negative version", `"version":1`, `"version":-1`},
+		{"version overflow", `"version":1`, `"version":` + authCurrentFixtureVersionOverflow},
 		{"missing creation time", `"created_at":"2026-11-04T06:00:00Z",`, ""},
 		{"null creation time", `"created_at":"2026-11-04T06:00:00Z"`, `"created_at":null`},
 		{"missing update time", `"updated_at":"2026-11-04T06:00:00Z",`, ""},
