@@ -33,22 +33,17 @@ func (s *IOStreams) WriteStdoutAfterCommit(ctx context.Context, data []byte) err
 	return err
 }
 
-// StderrAfterCommit keeps diagnostics cancellable and reports a broken
-// standard pipe as a write error on Unix.
-func (s *IOStreams) StderrAfterCommit(ctx context.Context) io.Writer {
-	return contextStreamWriter{ctx: ctx, out: standardPipeWriter{out: s.ErrOut}}
-}
-
 type standardPipeWriter struct {
 	out io.Writer
 }
 
-// StderrWithContext lets best-effort diagnostics stop waiting on cancellation.
+// StderrWithContext keeps diagnostics cancellable and reports a broken
+// standard pipe as a write error on Unix.
 func (s *IOStreams) StderrWithContext(ctx context.Context) io.Writer {
-	if ctx.Done() == nil || s.ErrOut == nil {
-		return s.ErrOut
+	if s.ErrOut == nil {
+		return nil
 	}
-	return contextStreamWriter{ctx: ctx, out: s.ErrOut}
+	return contextStreamWriter{ctx: ctx, out: standardPipeWriter{out: s.ErrOut}}
 }
 
 type contextStreamWriter struct {

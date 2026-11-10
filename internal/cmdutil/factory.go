@@ -773,14 +773,15 @@ func (f *Factory) EmitError(err error) error {
 func (f *Factory) EmitErrorContext(ctx context.Context, err error) error {
 	f.ErrorEmitted = true
 	wrapped := WrapCLIError(err)
+	out := standardPipeWriter{out: f.IOStreams.ErrOut}
 	if ctx.Done() == nil {
-		return output.WriteError(f.IOStreams.ErrOut, wrapped)
+		return output.WriteError(out, wrapped)
 	}
 	var rendered bytes.Buffer
 	if err := output.WriteError(&rendered, wrapped); err != nil {
 		return err
 	}
-	_, writeErr := writeStream(ctx, f.IOStreams.ErrOut, rendered.Bytes(), canceledErrorWriteGrace)
+	_, writeErr := writeStream(ctx, out, rendered.Bytes(), canceledErrorWriteGrace)
 	return writeErr
 }
 
