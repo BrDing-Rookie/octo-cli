@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 
@@ -156,8 +157,8 @@ func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool,
 		return err
 	}
 	name, _ := config.ProfileSelector(f.Globals.Profile, f.Globals.ProfileSet)
-	if name == "" || strings.TrimSpace(name) != name {
-		return output.ErrValidation("unified auth login requires a valid Profile name", "pass --profile or set OCTO_PROFILE without surrounding whitespace")
+	if name == "" || !utf8.ValidString(name) || strings.TrimSpace(name) != name {
+		return output.ErrValidation("unified auth login requires a valid Profile name", "pass --profile or set OCTO_PROFILE to a UTF-8 name without surrounding whitespace")
 	}
 	store, err := f.ManagedStore()
 	if err != nil {

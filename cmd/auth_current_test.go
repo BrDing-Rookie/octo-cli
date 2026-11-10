@@ -614,6 +614,71 @@ func TestUnifiedAuthCurrentPreflight(t *testing.T) {
 	}
 }
 
+func TestUnifiedAuthCurrentInvalidUTF8ProfilePreservesCredential(t *testing.T) {
+	const existingName = "dev-\uFFFD"
+	const invalidName = "dev-\xff"
+	for _, selector := range []string{"--profile", config.EnvProfile} {
+		t.Run(selector, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+			store := authstore.NewManagedStore(dir, nil)
+			candidate, old := authCurrentFixtureCandidateToken, authCurrentFixtureStoredToken
+			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
+				candidate: authCurrentFixtureSuccess("candidate-id", "owner", "space"),
+			})
+			entry := seedAuthCurrentProfile(t, store, existingName, server.URL, "space", old)
+			configPath := filepath.Join(dir, "config.json")
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			args := []string{"--space", "space", "auth", "login", "--api-base-url", server.URL, "--with-token"}
+			if selector == "--profile" {
+				args = append(args, "--profile", invalidName)
+			} else {
+				t.Setenv(config.EnvProfile, invalidName)
+			}
+			stdin := strings.NewReader(candidate)
+			f := cmdutil.NewDefaultFactory()
+			streams, _, stdout, stderr := cmdutil.NewTestIOStreams()
+			streams.In = stdin
+			f.IOStreams = streams
+			var openedStore bool
+			f.ManagedStoreFunc = func() (*authstore.ManagedStore, error) {
+				openedStore = true
+				return store, nil
+			}
+			root := NewRootCmd(f)
+			root.SetArgs(args)
+			err = root.ExecuteContext(t.Context())
+			exit := output.AsExitError(err)
+			if exit == nil || exit.Code != "VALIDATION_ERROR" || !strings.Contains(exit.Message, "Profile name") || stdout.Len() != 0 {
+				t.Errorf("expected Profile name validation failure without stdout: %v (%s)", err, stderr)
+			}
+			if readBytes, calls := len(candidate)-stdin.Len(), len(requests()); openedStore || readBytes != 0 || calls != 0 {
+				t.Errorf("invalid Profile name passed preflight: opened store = %v, stdin bytes read = %d, HTTP calls = %d", openedStore, readBytes, calls)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Errorf("invalid Profile name changed config.json: %v", err)
+			}
+			cfg, err := config.LoadProfileConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, profile, err := cfg.SelectProfile(existingName, true)
+			if err != nil || profile.TokenSource == nil || profile.TokenSource.Entry != entry {
+				t.Errorf("original Profile credential reference changed: %v", err)
+			}
+			token, err := authstore.ReadManagedToken(cfg, profile.TokenSource)
+			if err != nil || token != old {
+				t.Errorf("original Profile no longer resolves the previous Token: %v", err)
+			}
+		})
+	}
+}
+
 func TestUnifiedAuthCurrentGetModeAndDryRun(t *testing.T) {
 	_ = phaseOneEnv(t)
 	candidate := authCurrentFixtureCandidateToken
