@@ -67,22 +67,24 @@ with `OCTO_CONFIG_DIR`):
 Unified profiles are stored in **`profiles.json`** inside a private directory
 allocated under the configured CLI directory (`~/.octo/cli` by default). A
 publication marker identifies the authoritative directory, including when its
-metadata is unreadable. The CLI can read the original v1 `config.json` and
-earlier dedicated layouts, and publishes them on the next successful unified
-profile write. Conflicting Token ownership claims or an unreadable original
-`config.json` stop resolution of unmarked historical layouts. When the original
-file is missing or contains Bot metadata, a separate archive must corroborate
-the complete profile bindings and default selection. An existing published
-configuration retains authority. To migrate before running an older CLI, run
-`auth update` in unified mode with the selected
-profile's existing `--api-base-url`. Existing Token files stay at their paths,
+metadata is unreadable. The CLI can migrate the original v1 `config.json`.
+Before publication, unmarked dedicated metadata with profiles requires the
+same bindings and default selection in the original v1 file. An empty
+dedicated store still suppresses older profiles when the original is present.
+Root archives can flag a potential Token conflict at `config.json` but cannot
+authorize a configuration. If only unmarked dedicated metadata and root
+archives remain, profile resolution stops until the original verified v1
+metadata is restored. To migrate before running an older CLI, run
+`auth update` in unified mode with the selected profile's existing
+`--api-base-url`. Existing Token files stay at their paths,
 including targets that are temporarily missing. Relative Token paths and
 managed credential references keep their original base.
 
 Unified and current Bot profile writes share `.managed.lock`. Both protect
 referenced Token paths and aliases from conflicting writes. The encrypted-file
-backend leaves an external `master.key` alone, and managed credential cleanup
-preserves any entry path still referenced as an external Token.
+backend leaves an external `master.key` alone. On macOS, Keychain creation and
+cleanup also protect locator files. Cleanup leaves an obsolete Keychain item
+in place when a profile still uses its locator path as an external Token.
 
 When migrating directly from the original v1 configuration, the CLI verifies
 the source inode and bytes, archives them as `config.v1-*.bak`, and publishes

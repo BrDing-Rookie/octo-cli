@@ -99,7 +99,7 @@ func (k macKeychain) Create(account string, data []byte) error {
 		return errKeychainEntryTooLarge
 	}
 	name := keychainLocatorName(account)
-	locator := filepath.Join(k.dir, credentialsDir, name)
+	locator := k.locatorPath(account)
 	if err := ensurePrivateDir(filepath.Dir(locator)); err != nil {
 		return err
 	}
@@ -151,6 +151,10 @@ func keychainLocatorName(account string) string {
 	// The account contains the canonical directory hash and a generated
 	// entry name (or master-key). Only the entry name is needed here.
 	return ".keychain-" + filepath.Base(account)
+}
+
+func (k macKeychain) locatorPath(account string) string {
+	return filepath.Join(k.dir, credentialsDir, keychainLocatorName(account))
 }
 
 func (k macKeychain) boundPathArgument(account string) (string, error) {

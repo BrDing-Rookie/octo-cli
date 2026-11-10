@@ -222,7 +222,7 @@ func TestProfileWritesRejectLockTokenCollisions(t *testing.T) {
 			if err := os.WriteFile(path, []byte(raw), secPerm); err != nil {
 				t.Fatal(err)
 			}
-			writeOwnershipFixture(t, filepath.Join(dir, "config.v1-1.bak"), []byte(raw))
+			writeOwnershipFixture(t, filepath.Join(dir, configFile), []byte(raw))
 			managed := NewManagedStore(dir, nil)
 			snap, err := managed.Snapshot("work", true)
 			if err != nil || !snap.Exists {
@@ -647,10 +647,11 @@ func TestManagedMutationKeepsExternalTokenNamedLikeRetirementMarker(t *testing.T
 					t.Fatal(err)
 				}
 				raw := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":"https://gateway.example","token_source":{"type":"token_file","path":%q}}}}`, name)
-				if err := os.WriteFile(filepath.Join(dir, config.ManagedProfileFile), []byte(raw), secPerm); err != nil {
+				owned := filepath.Join(dir, config.OwnedProfileDirPrefix+"fixture")
+				if err := os.MkdirAll(filepath.Join(owned, config.OwnedProfileMarker), dirPerm); err != nil {
 					t.Fatal(err)
 				}
-				writeOwnershipFixture(t, filepath.Join(dir, "config.v1-456.bak"), []byte(raw))
+				writeOwnershipFixture(t, filepath.Join(owned, config.ManagedProfileFile), []byte(raw))
 				legacy := &Store{dir: dir}
 				if active == "different inode" {
 					if err := legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}}); err != nil {

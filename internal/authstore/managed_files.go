@@ -70,7 +70,19 @@ func (s *ManagedStore) readKeychain(entry string) ([]byte, error) {
 	return s.keychain.Read(account)
 }
 
-func (s *ManagedStore) createKeychain(entry string, data []byte) error {
+func (s *ManagedStore) checkKeychainLocator(cfg *config.ProfileConfig, entry string) error {
+	// Only backends that persist a locator have a filesystem target.
+	if keychain, ok := s.keychain.(interface{ locatorPath(string) string }); ok {
+		path := keychain.locatorPath(entry)
+		return checkProfileWritePaths(cfg, filepath.Dir(path), path)
+	}
+	return nil
+}
+
+func (s *ManagedStore) createKeychain(cfg *config.ProfileConfig, entry string, data []byte) error {
+	if err := s.checkKeychainLocator(cfg, entry); err != nil {
+		return err
+	}
 	account, err := s.account(entry)
 	if err != nil {
 		return err
@@ -182,6 +194,9 @@ func (s *ManagedStore) masterKey(location byte) ([32]byte, error) {
 }
 
 func (s *ManagedStore) masterKeyForWrite(cfg *config.ProfileConfig) (key [32]byte, location byte, err error) {
+	if err := s.checkKeychainLocator(cfg, "master-key"); err != nil {
+		return key, 0, err
+	}
 	var fileKey [32]byte
 	fileErr := checkProfileWritePaths(cfg, s.masterKeyPath())
 	if fileErr == nil {
@@ -202,7 +217,7 @@ func (s *ManagedStore) masterKeyForWrite(cfg *config.ProfileConfig) (key [32]byt
 		if _, err = rand.Read(key[:]); err != nil {
 			return key, 0, err
 		}
-		err = s.createKeychain("master-key", key[:])
+		err = s.createKeychain(cfg, "master-key", key[:])
 		if err == nil {
 			return key, keyInKeychain, nil
 		}

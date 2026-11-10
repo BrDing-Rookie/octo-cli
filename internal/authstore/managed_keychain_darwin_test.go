@@ -176,3 +176,153 @@ func TestDarwinKeychainLogoutRejectsSymlinkedCredentials(t *testing.T) {
 		t.Fatalf("external Keychain locator changed: %v", err)
 	}
 }
+
+func darwinLocatorFixture(t *testing.T, dir string) (keychain macKeychain, path string, items map[string]string) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "fixture.keychain-db")
+	writeOwnershipFixture(t, path, []byte{})
+	items = make(map[string]string)
+	keychain = macKeychain{dir: dir, run: func(command string) ([]byte, error) {
+		if command == "default-keychain" {
+			return []byte(fmt.Sprintf("%q\n", path)), nil
+		}
+		args := strings.Fields(command)
+		account := args[4]
+		switch args[0] {
+		case "find-generic-password":
+			if value, ok := items[account]; ok {
+				return []byte(value + "\n"), nil
+			}
+			return nil, os.ErrNotExist
+		case "add-generic-password":
+			items[account] = args[6]
+			return nil, nil
+		case "delete-generic-password":
+			delete(items, account)
+			return nil, nil
+		default:
+			t.Fatalf("unexpected Keychain operation: %s", args[0])
+			return nil, os.ErrInvalid
+		}
+	}}
+	return keychain, path, items
+}
+
+func TestDarwinManagedImportProtectsMasterKeyLocator(t *testing.T) {
+	for _, scenario := range []string{"missing", "dangling alias", "existing", "hard link"} {
+		t.Run(scenario, func(t *testing.T) {
+			dir := t.TempDir()
+			keychain, path, items := darwinLocatorFixture(t, dir)
+			store := NewManagedStore(dir, keychain)
+			locator := filepath.Join(dir, credentialsDir, keychainLocatorName("master-key"))
+			ref := locator
+			var want []byte
+			if scenario == "existing" || scenario == "hard link" {
+				want = []byte(path)
+				writeOwnershipFixture(t, locator, want)
+			}
+			switch scenario {
+			case "dangling alias":
+				ref = filepath.Join(dir, "alias")
+				symlinkOwnershipFixture(t, locator, ref)
+			case "hard link":
+				ref = filepath.Join(dir, "alias")
+				if err := os.Link(locator, ref); err != nil {
+					t.Fatal(err)
+				}
+			}
+			publishOwnershipFixture(t, dir, ref)
+			snap, err := store.Snapshot("work", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = store.Import(snap, managedFixtureProfile(), "encrypted-fixture-token", BackendEncryptedFile)
+			if err == nil || !strings.Contains(err.Error(), "reserved by a Token file") {
+				t.Errorf("expected a locator conflict: %v", err)
+			}
+			assertOwnershipFixture(t, locator, want)
+			if len(items) != 0 {
+				t.Fatal("conflicting import created a Keychain item")
+			}
+			if after, err := store.Snapshot("work", true); err != nil || after.Exists {
+				t.Fatalf("conflicting import committed a profile: %v", err)
+			}
+		})
+	}
+}
+
+func TestDarwinManagedCleanupProtectsEntryLocator(t *testing.T) {
+	for _, operation := range []string{"logout", "replace"} {
+		for _, scenario := range []string{"direct", "symlink", "hard link", "missing", "dangling alias", "unreferenced"} {
+			t.Run(operation+"/"+scenario, func(t *testing.T) {
+				dir := t.TempDir()
+				keychain, path, items := darwinLocatorFixture(t, dir)
+				store := NewManagedStore(dir, keychain)
+				profile := managedFixtureProfile()
+				snap, err := store.Snapshot("work", true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.Import(snap, profile, "original-fixture-token", BackendKeychain); err != nil {
+					t.Fatal(err)
+				}
+				snap, err = store.Snapshot("work", true)
+				if err != nil || !snap.Exists {
+					t.Fatalf("read imported profile: %v", err)
+				}
+				entry := snap.Profile.TokenSource.Entry
+				account, err := store.account(entry)
+				if err != nil {
+					t.Fatal(err)
+				}
+				locator := filepath.Join(dir, credentialsDir, keychainLocatorName(entry))
+				ref := locator
+				want := []byte(path)
+				if scenario == "missing" || scenario == "dangling alias" {
+					if err := os.Remove(locator); err != nil {
+						t.Fatal(err)
+					}
+					want = nil
+				}
+				switch scenario {
+				case "symlink", "dangling alias":
+					ref = filepath.Join(dir, "alias")
+					symlinkOwnershipFixture(t, locator, ref)
+				case "hard link":
+					ref = filepath.Join(dir, "alias")
+					if err := os.Link(locator, ref); err != nil {
+						t.Fatal(err)
+					}
+				}
+				protected := scenario != "unreferenced"
+				if protected {
+					publishOwnershipFixture(t, dir, ref)
+				} else {
+					want = nil
+				}
+				var result CommitResult
+				if operation == "logout" {
+					result, err = store.Remove(snap)
+				} else {
+					result, err = store.Import(snap, profile, "replacement-fixture-token", BackendKeychain)
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				assertOwnershipFixture(t, locator, want)
+				if _, kept := items[account]; kept != protected || (result.CleanupWarning != "") != protected {
+					t.Fatalf("unexpected cleanup of old Keychain account: kept=%t, %#v", kept, result)
+				}
+				after, err := store.Snapshot("work", true)
+				if err != nil || after.Exists != (operation == "replace") {
+					t.Fatalf("unexpected binding after %s: %v", operation, err)
+				}
+				if after.Exists {
+					if token, err := store.readEntry(after.Profile.TokenSource); err != nil || token != "replacement-fixture-token" {
+						t.Fatalf("replacement credential is unreadable: %v", err)
+					}
+				}
+			})
+		}
+	}
+}

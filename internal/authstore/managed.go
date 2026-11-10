@@ -364,7 +364,7 @@ func (s *ManagedStore) stageToken(cfg *config.ProfileConfig, token, backend stri
 	ref := &config.TokenSource{Type: "managed_store", Entry: hex.EncodeToString(id[:]), Backend: backend}
 	if backend != BackendEncryptedFile {
 		ref.Backend = BackendKeychain
-		err := s.createKeychain(ref.Entry, []byte(token))
+		err := s.createKeychain(cfg, ref.Entry, []byte(token))
 		switch {
 		case err == nil:
 			return s.verifyEntry(cfg, ref, token)
@@ -408,6 +408,9 @@ func (s *ManagedStore) removeEntry(cfg *config.ProfileConfig, ref *config.TokenS
 		return err
 	}
 	if ref.Backend == BackendKeychain {
+		if err := s.checkKeychainLocator(cfg, ref.Entry); err != nil {
+			return err
+		}
 		account, err := s.account(ref.Entry)
 		if err != nil {
 			return err

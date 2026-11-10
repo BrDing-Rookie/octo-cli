@@ -176,8 +176,66 @@ func TestPhaseOneUnavailableV1DoesNotRouteThroughHistoricalToken(t *testing.T) {
 			default:
 			}
 			phaseOneWrite(t, token, archived)
+			if out, err := phaseOneRun(args...); err == nil {
+				t.Fatalf("matching root files must not authorize a binding: %s", out)
+			}
+			select {
+			case call := <-calls:
+				t.Fatalf("sent a request using a root archive alone: %s", strings.Fields(call)[0])
+			default:
+			}
+			phaseOneWrite(t, v1, archived)
 			phaseOneCheckRequest(t, calls, "trusted /probe Bearer environment-fixture-bearer S1", args...)
 		})
+	}
+}
+
+func TestPhaseOneHistoricalTokenFilesCannotAuthorizeRouting(t *testing.T) {
+	for _, candidate := range []string{"profiles.json", filepath.Join(".octo-unified", "profiles.json")} {
+		for _, scenario := range []string{"original path was a Token", "backup path was a Token"} {
+			t.Run(candidate+"/"+scenario, func(t *testing.T) {
+				dir := phaseOneEnv(t)
+				t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+				t.Setenv("OCTO_TOKEN", "environment-fixture-bearer")
+				trusted, untrusted, calls := phaseOneTargets(t, "trusted", "untrusted")
+				original := filepath.Join(dir, "config.json")
+				historical := filepath.Join(dir, candidate)
+				backup := filepath.Join(dir, "config.v1-123.bak")
+				if err := os.MkdirAll(filepath.Dir(historical), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				poisoned := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1"}}}`, untrusted)
+				if scenario == "original path was a Token" {
+					raw := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":"config.json"}}}}`, trusted)
+					phaseOneWrite(t, historical, raw)
+					phaseOneWrite(t, backup, raw)
+					if err := os.Remove(historical); err != nil {
+						t.Fatal(err)
+					}
+					phaseOneWrite(t, original, poisoned)
+				} else {
+					raw := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":%q}},"provider":{"token_source":{"type":"token_file","path":"config.v1-123.bak"}}}}`, trusted, candidate)
+					phaseOneWrite(t, original, raw)
+					phaseOneWrite(t, historical, "provider-token-one")
+					phaseOneWrite(t, backup, "provider-token-two")
+					phaseOneCheckRequest(t, calls, "trusted /probe Bearer environment-fixture-bearer S1", "--profile", "work", "api", "GET", "/probe")
+					if err := os.Remove(original); err != nil {
+						t.Fatal(err)
+					}
+					phaseOneWrite(t, historical, poisoned)
+					phaseOneWrite(t, backup, poisoned)
+				}
+				out, err := phaseOneRun("--profile", "work", "api", "GET", "/probe")
+				select {
+				case call := <-calls:
+					t.Fatalf("sent a request using external Token JSON: %s", strings.Fields(call)[0])
+				default:
+				}
+				if err == nil {
+					t.Fatalf("ambiguous configuration must fail profile resolution: %s", out)
+				}
+			})
+		}
 	}
 }
 

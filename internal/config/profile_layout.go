@@ -80,6 +80,17 @@ func loadUnownedProfiles(dir string, allowLegacy, writable bool) (*ProfileConfig
 	if oldErr != nil && !errors.Is(oldErr, errLegacyProfileConfig) {
 		return nil, oldErr
 	}
+	if old != nil {
+		// An archive can flag a path as ambiguous even after the historical
+		// configuration that used that Token path has disappeared.
+		reserved, err := profilePathWasToken(archivedV1Profiles(dir), filepath.Join(dir, oldProfileFile))
+		if err != nil {
+			return nil, err
+		}
+		if reserved {
+			return nil, errors.New("original profile configuration path may be an external Token file")
+		}
+	}
 	files := []historicalProfileFile{inspectHistoricalFile(dir, ManagedProfileFile)}
 	// A regular Token or symlink at the old alternate directory is not a
 	// configuration candidate. Do not probe children through that pathname.
@@ -91,40 +102,30 @@ func loadUnownedProfiles(dir string, allowLegacy, writable bool) (*ProfileConfig
 	if err := checkHistoricalClaims(dir, old, files); err != nil {
 		return nil, err
 	}
-	var evidence []*ProfileConfig
-	if old != nil {
-		evidence = []*ProfileConfig{old}
-	} else {
-		evidence = archivedV1Profiles(dir)
-	}
-	cfg, err := selectHistoricalProfiles(dir, files, evidence, old != nil)
+	cfg, err := selectHistoricalProfiles(dir, files, old)
 	if err != nil {
-		return cfg, err
+		return nil, err
 	}
-	if cfg != nil {
-		if old == nil && !hasArchivedProfileEvidence(cfg, evidence) {
-			return nil, errors.New("previous managed profile configuration has no independent ownership evidence")
-		}
-		return cfg, nil
+	if cfg == nil {
+		return old, oldErr
 	}
-	return old, oldErr
+	return corroborateHistoricalProfiles(old, cfg)
 }
 
-// Without the original configuration, an archive must independently confirm
-// all bindings. A stale backup that merely mentions a different Token path
-// cannot authorize the origin or credential references in this candidate.
-func hasArchivedProfileEvidence(candidate *ProfileConfig, archives []*ProfileConfig) bool {
-	for _, archive := range archives {
-		if os.SameFile(candidate.fileInfo, archive.fileInfo) ||
-			candidate.CurrentProfile != archive.CurrentProfile || !reflect.DeepEqual(candidate.Profiles, archive.Profiles) {
-			continue
-		}
-		reserved, err := candidate.ReferencesTokenFile(filepath.Join(archive.dir, archive.file))
-		if err == nil && !reserved {
-			return true
-		}
+func corroborateHistoricalProfiles(old, candidate *ProfileConfig) (*ProfileConfig, error) {
+	// A root backup is also an allowed external Token path. Even a
+	// byte-for-byte match on different inodes cannot establish authority.
+	if old == nil {
+		return nil, errors.New("previous managed profile configuration has no independent ownership evidence")
 	}
-	return false
+	if len(candidate.Profiles) == 0 {
+		return candidate, nil // preserve an empty store's suppression of older profiles
+	}
+	if candidate.CurrentProfile != old.CurrentProfile || !reflect.DeepEqual(candidate.Profiles, old.Profiles) {
+		return nil, errors.New("historical profile bindings differ from the original v1 configuration")
+	}
+	// Matching metadata can migrate from the verified original inode.
+	return old, nil
 }
 
 // A parseable Token must not get to decide which other parseable file is
@@ -164,24 +165,18 @@ func inspectHistoricalFile(dir, name string) historicalProfileFile {
 	return historicalProfileFile{name: name, cfg: cfg, err: err}
 }
 
-func selectHistoricalProfiles(dir string, files []historicalProfileFile, evidence []*ProfileConfig, activeV1 bool) (*ProfileConfig, error) {
+func selectHistoricalProfiles(dir string, files []historicalProfileFile, old *ProfileConfig) (*ProfileConfig, error) {
 	var selected *ProfileConfig
 	var broken, linked error
-	var external bool
-	var excludedConfigs []string
 	for _, file := range files {
 		if file.cfg == nil && file.err == nil {
 			continue
 		}
-		reserved, err := historicalFileIsToken(dir, file, evidence, activeV1)
+		reserved, err := historicalFileIsToken(dir, file, old)
 		if err != nil {
 			return nil, err
 		}
 		if reserved {
-			external = true
-			if file.cfg != nil {
-				excludedConfigs = append(excludedConfigs, filepath.Join(dir, file.name))
-			}
 			continue
 		}
 		if file.link {
@@ -201,33 +196,24 @@ func selectHistoricalProfiles(dir string, files []historicalProfileFile, evidenc
 		return nil, broken
 	}
 	if selected != nil {
-		return corroborateHistoricalOwnership(selected, excludedConfigs)
+		return selected, nil
 	}
 	if linked != nil {
 		return nil, linked
 	}
-	if external && !activeV1 {
-		return nil, errors.New("previous managed profile configuration is missing")
-	}
 	return nil, nil
 }
 
-func corroborateHistoricalOwnership(selected *ProfileConfig, excludedConfigs []string) (*ProfileConfig, error) {
-	for _, path := range excludedConfigs {
-		if reserved, err := selected.ReferencesTokenFile(path); err != nil || !reserved {
-			return nil, errors.New("ambiguous previous managed profile configuration and Token ownership")
-		}
+func historicalFileIsToken(dir string, file historicalProfileFile, old *ProfileConfig) (bool, error) {
+	if old == nil {
+		return false, nil
 	}
-	return selected, nil
-}
-
-func historicalFileIsToken(dir string, file historicalProfileFile, evidence []*ProfileConfig, activeV1 bool) (bool, error) {
 	path := filepath.Join(dir, file.name)
-	reserved, err := profilePathWasToken(evidence, path)
+	reserved, err := old.ReferencesTokenFile(path)
 	if err != nil || !reserved {
 		return false, err
 	}
-	return !activeV1 || file.link || file.cfg != nil || isOpaqueProfileTokenFile(path), nil
+	return file.link || isOpaqueProfileTokenFile(path), nil
 }
 
 func archivedV1Profiles(dir string) []*ProfileConfig {

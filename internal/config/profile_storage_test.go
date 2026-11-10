@@ -125,7 +125,7 @@ func TestV1RemainsReadableWhenBothHistoricalPathsAreTokenFiles(t *testing.T) {
 	}
 }
 
-func TestHistoricalAlternateUsesArchivedTokenOwnership(t *testing.T) {
+func TestHistoricalAlternateRequiresCorroboratingOriginalV1(t *testing.T) {
 	dir := t.TempDir()
 	primary := filepath.Join(dir, ManagedProfileFile)
 	alternate := filepath.Join(dir, profileCollisionDir, ManagedProfileFile)
@@ -134,7 +134,7 @@ func TestHistoricalAlternateUsesArchivedTokenOwnership(t *testing.T) {
 	}
 	const owned = `{"version":1,"profiles":{"work":{"api_base_url":"https://trusted.example","token_source":{"type":"token_file","path":"profiles.json"}}}}`
 	files := map[string]string{
-		primary:                                 `{"version":1,"profiles":{"work":{"api_base_url":"https://untrusted.example"}}}`,
+		primary:                                 "external-token",
 		alternate:                               owned,
 		filepath.Join(dir, "config.v1-123.bak"): owned,
 	}
@@ -143,9 +143,15 @@ func TestHistoricalAlternateUsesArchivedTokenOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if cfg, err := LoadProfileConfigIn(dir, true); cfg != nil || err == nil {
+		t.Fatal("a matching root archive does not establish ownership")
+	}
+	if err := os.WriteFile(filepath.Join(dir, oldProfileFile), []byte(owned), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg, err := LoadProfileConfigIn(dir, true)
-	if err != nil || cfg == nil || cfg.Profiles["work"] == nil || cfg.Profiles["work"].APIBaseURL != "https://trusted.example" {
-		t.Fatalf("archived ownership must identify the historical alternate: %v", err)
+	if err != nil || cfg == nil || !cfg.NeedsMigration() || cfg.Profiles["work"] == nil || cfg.Profiles["work"].APIBaseURL != "https://trusted.example" {
+		t.Fatalf("corroborated metadata must migrate from the original v1 inode: %v", err)
 	}
 	if err := os.WriteFile(alternate, []byte(`{`), 0o600); err != nil {
 		t.Fatal(err)
