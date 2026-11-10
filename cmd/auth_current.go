@@ -49,13 +49,27 @@ type authTokenMetadata struct {
 	LastUsedAt authRequiredNullable[time.Time] `json:"last_used_at"`
 }
 
-// UnmarshalJSON checks metadata keys before the typed decode can overwrite them.
+// UnmarshalJSON rejects duplicate metadata keys and timestamps that cannot
+// be serialized back to JSON.
 func (meta *authTokenMetadata) UnmarshalJSON(data []byte) error {
 	if !uniqueTokenSelfObjectKeys(data, true) {
 		return errors.New("invalid or ambiguous TokenSelf metadata")
 	}
 	type wireMetadata authTokenMetadata
-	return json.Unmarshal(data, (*wireMetadata)(meta))
+	if err := json.Unmarshal(data, (*wireMetadata)(meta)); err != nil {
+		return err
+	}
+	// Go can decode timestamps that its JSON encoder rejects. Check the
+	// output representation before either command accepts the metadata.
+	for _, timestamp := range []*time.Time{meta.CreatedAt, meta.UpdatedAt, meta.ExpiresAt.value, meta.LastUsedAt.value} {
+		if timestamp == nil {
+			continue
+		}
+		if _, err := timestamp.MarshalJSON(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // authRequiredNullable distinguishes an omitted field from an explicit null

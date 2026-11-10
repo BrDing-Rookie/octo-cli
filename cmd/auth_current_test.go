@@ -373,6 +373,68 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 	}
 }
 
+func TestUnifiedAuthCurrentRejectsUnserializableTimestamp(t *testing.T) {
+	for _, tc := range []struct {
+		field, original string
+	}{
+		{"created_at", `"2026-11-04T06:00:00Z"`},
+		{"updated_at", `"2026-11-04T06:00:00Z"`},
+		{"expires_at", `null`},
+		{"last_used_at", `null`},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+			store := authstore.NewManagedStore(dir, nil)
+			candidate, old := authCurrentFixtureCandidateToken, authCurrentFixtureStoredToken
+			reply := authCurrentFixtureSuccess("fixture-id", "owner", "space")
+			field := `"` + tc.field + `":`
+			reply.body = strings.Replace(reply.body, field+tc.original, field+`"2026-11-04T06:00:00+24:00"`, 1)
+			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{old: reply, candidate: reply})
+			seedAuthCurrentProfile(t, store, "target", server.URL, "space", old)
+			configPath := filepath.Join(dir, "config.json")
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			for _, command := range []struct {
+				stdin string
+				args  []string
+			}{
+				{"", []string{"auth", "get"}},
+				{candidate, []string{"auth", "login", "--with-token"}},
+			} {
+				args := append([]string{"--profile", "target"}, command.args...)
+				stdout, stderr, err := runUnifiedAuthCurrent(store, strings.NewReader(command.stdin), args...)
+				exit := output.AsExitError(err)
+				if exit == nil || exit.Type != "api_error" || exit.Code != "INVALID_TOKEN_SELF" || stdout != "" {
+					t.Errorf("%v: expected INVALID_TOKEN_SELF without stdout: %v (%s %s)", command.args, err, stdout, stderr)
+				}
+			}
+			if got := len(requests()); got != 2 {
+				t.Errorf("got %d _current calls, want 2", got)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(before, after) {
+				t.Errorf("invalid TokenSelf changed config.json: %v", err)
+			}
+			cfg, err := config.LoadProfileConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, profile, err := cfg.SelectProfile("target", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			token, err := authstore.ReadManagedToken(cfg, profile.TokenSource)
+			if err != nil || token != old {
+				t.Errorf("original Profile no longer resolves the previous Token: %v", err)
+			}
+		})
+	}
+}
+
 func TestUnifiedAuthCurrentJQFailurePreservesProfile(t *testing.T) {
 	for _, tc := range []struct {
 		name, query, typ, code string
