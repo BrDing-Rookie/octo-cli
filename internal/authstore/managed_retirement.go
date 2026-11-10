@@ -2,6 +2,7 @@ package authstore
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -47,13 +48,29 @@ func (s *ManagedStore) retireV1Config(cfg *config.ProfileConfig, previous *confi
 	if reserved {
 		return "previous configuration path retained because a profile uses it as a Token file"
 	}
+	if cfg.V1Retirement == nil {
+		return ""
+	}
 	// Also cover a retry after publication became visible but its directory
 	// sync failed. The journal must be durable before it can change config.json.
 	if err := errors.Join(syncManagedDirectory(dedicatedDir), syncManagedDirectory(s.dir)); err != nil {
 		return retirementWarning
 	}
-	if err := journal.resume(); err != nil {
+	marker, err := journal.resume()
+	if err != nil {
 		return retirementWarning + ", recovery is pending"
+	}
+	// Disable recovery before unlinking the pin. If interrupted here, a
+	// leftover link cannot be adopted by a later mutation.
+	cfg.V1Retirement = nil
+	write := s.persist(cfg, nil)
+	if !write.committed || write.err != nil {
+		return retirementWarning + ", recovery record could not be cleared"
+	}
+	if marker != "" {
+		if err := removeRetirementMarker(marker); err != nil {
+			return "could not remove the completed v1 retirement marker"
+		}
 	}
 	return ""
 }
@@ -126,6 +143,10 @@ func (j v1RetirementJournal) prepareMigration(publishAt string) string {
 	if err := j.discardAbandonedPins(active, raw); err != nil {
 		return retirementWarning + ", could not inspect a previous migration"
 	}
+	return j.stageRetirement(active, raw, publishAt)
+}
+
+func (j v1RetirementJournal) stageRetirement(active *os.File, raw []byte, publishAt string) string {
 	backup, err := writeV1Backup(filepath.Dir(j.active), raw)
 	if err != nil {
 		if backup == "" {
@@ -138,8 +159,12 @@ func (j v1RetirementJournal) prepareMigration(publishAt string) string {
 			return retirementWarning + ", original bytes retained in " + filepath.Base(backup)
 		}
 	}
-	if _, err := j.mark(active, backup); err != nil {
+	marker, err := j.mark(active, backup)
+	if err != nil {
 		return retirementWarning + ", original bytes retained in " + filepath.Base(backup)
+	}
+	if marker != "" {
+		j.profiles.V1Retirement = &config.V1Retirement{Backup: filepath.Base(backup), Digest: sha256.Sum256(raw)}
 	}
 	return ""
 }
@@ -275,43 +300,6 @@ func (j v1RetirementJournal) mark(active *os.File, backup string) (string, error
 	return pending, nil
 }
 
-func (j v1RetirementJournal) resume() error {
-	info, err := os.Lstat(j.owned)
-	if err != nil || !info.IsDir() {
-		return errors.New("managed retirement directory is unavailable")
-	}
-	if err := j.resumeDirectory(j.owned, true); err != nil {
-		return err
-	}
-	return j.resumeDirectory(filepath.Dir(j.active), false)
-}
-
-func (j v1RetirementJournal) resumeDirectory(dir string, owned bool) error {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		suffix := retirementMarkerSuffix(name)
-		if suffix == "" || !entry.Type().IsRegular() {
-			continue
-		}
-		marker := filepath.Join(dir, name)
-		reserved, err := j.protects(marker)
-		if err != nil && owned {
-			return err
-		}
-		if reserved || err != nil {
-			continue
-		}
-		if err := j.resumeMarker(marker, suffix); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func retirementMarkerSuffix(name string) string {
 	if strings.HasPrefix(name, "config.v1-") {
 		for _, suffix := range []string{retirementSuffix, retirementStageSuffix} {
@@ -323,33 +311,45 @@ func retirementMarkerSuffix(name string) string {
 	return ""
 }
 
-func (j v1RetirementJournal) resumeMarker(marker, suffix string) error {
-	active, err := openMatchingRetirementFile(j.active, marker)
-	if err != nil {
-		return err
+func (j v1RetirementJournal) resume() (string, error) {
+	record := j.profiles.V1Retirement
+	if record == nil {
+		return "", nil
 	}
+	if !isV1BackupName(record.Backup) {
+		return "", errors.New("invalid v1 retirement record")
+	}
+	marker := filepath.Join(j.owned, record.Backup+retirementSuffix)
+	active, err := openMatchingRetirementFile(j.active, marker)
 	// A detached link cannot prove that it pinned the inspected active file.
 	// Retain it even in the owned directory rather than guessing from its name.
-	if active == nil {
-		return nil
+	if err != nil || active == nil {
+		return "", err
 	}
 	defer func() { _ = active.Close() }() //nolint:errcheck // retirement syncs before cleanup
-	backup := filepath.Join(filepath.Dir(j.active), strings.TrimSuffix(filepath.Base(marker), suffix))
-	raw, err := readV1Backup(backup)
-	if err != nil {
-		return err
-	}
-	// A staged link was made before clearing could begin, so it must
-	// still match the original backup byte for byte.
-	if suffix == retirementStageSuffix {
-		if err := checkRetirementBytes(active, raw, raw); err != nil {
-			return err
+	backup := filepath.Join(filepath.Dir(j.active), record.Backup)
+	for _, path := range []string{j.active, marker, backup} {
+		if reserved, err := j.protects(path); err != nil || reserved {
+			return "", errors.New("retirement path may be a referenced Token file")
 		}
 	}
-	if reserved, err := j.protects(j.active); err != nil || reserved {
-		return errors.New("retirement target may be a referenced Token file")
+	raw, err := readV1Backup(backup)
+	if err != nil || sha256.Sum256(raw) != record.Digest {
+		return "", errors.New("v1 retirement backup does not match the published record")
 	}
-	return finishV1Retirement(active, marker, raw)
+	if same, err := sameOpenFile(active, j.active); err != nil || !same {
+		return "", err
+	}
+	if err := clearArchivedV1Config(active, raw); err != nil {
+		return "", err
+	}
+	return marker, nil
+}
+
+func isV1BackupName(name string) bool {
+	digits, prefix := strings.CutPrefix(name, "config.v1-")
+	digits, suffix := strings.CutSuffix(digits, ".bak")
+	return prefix && suffix && digits != "" && strings.Trim(digits, "0123456789") == ""
 }
 
 func openMatchingRetirementFile(active, marker string) (*os.File, error) {
@@ -361,6 +361,9 @@ func openMatchingRetirementFile(active, marker string) (*os.File, error) {
 		return nil, err
 	}
 	link, err := os.Lstat(marker)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -406,16 +409,6 @@ func sameOpenFile(active *os.File, path string) (bool, error) {
 	}
 	opened, err := active.Stat()
 	return err == nil && info.Mode().IsRegular() && os.SameFile(opened, info), err
-}
-
-func finishV1Retirement(active *os.File, pending string, raw []byte) error {
-	if same, err := sameOpenFile(active, active.Name()); err != nil || !same {
-		return err
-	}
-	if err := clearArchivedV1Config(active, raw); err != nil {
-		return err
-	}
-	return removeRetirementMarker(pending)
 }
 
 func removeRetirementMarker(pending string) error {

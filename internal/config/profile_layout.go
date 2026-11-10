@@ -58,11 +58,35 @@ func loadPublishedProfiles(dir string) (*ProfileConfig, error) {
 	if file == "" {
 		return nil, nil
 	}
+	if err := checkPublishedProfileOwnership(dir, file); err != nil {
+		return nil, err
+	}
 	cfg, err := loadProfileConfigFile(dir, file, false, true)
 	if cfg == nil && err == nil {
 		return nil, errors.New("published managed profile configuration is missing")
 	}
 	return cfg, err
+}
+
+func checkPublishedProfileOwnership(dir, file string) error {
+	// During migration the original v1 file may still be active. Its
+	// Token references can disprove ownership of a proposed publication.
+	// An absent, retired or damaged original cannot authorize a fallback.
+	old, err := loadProfileConfigFile(dir, oldProfileFile, true, false)
+	if err != nil || old == nil {
+		return nil
+	}
+	profileDir := filepath.Join(dir, filepath.Dir(file))
+	for _, path := range []string{profileDir, filepath.Join(profileDir, OwnedProfileMarker), filepath.Join(dir, file)} {
+		reserved, err := old.ReferencesTokenFile(path)
+		if err != nil {
+			return err
+		}
+		if reserved {
+			return errors.New("published profile path may be an external Token file")
+		}
+	}
+	return nil
 }
 
 type historicalProfileFile struct {

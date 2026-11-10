@@ -280,3 +280,122 @@ func TestManagedMigrationStagingProcess(t *testing.T) {
 	fmt.Println(markers[0])
 	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
 }
+
+func TestManagedLaterUpdateDoesNotAdoptExternalRetirementPair(t *testing.T) {
+	for _, location := range []string{"root", "published"} {
+		t.Run(location, func(t *testing.T) {
+			dir := t.TempDir()
+			store := NewManagedStore(dir, nil)
+			profile := managedFixtureProfile()
+			other, err := store.Snapshot("other", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Import(other, profile, "managed-fixture", BackendEncryptedFile); err != nil {
+				t.Fatal(err)
+			}
+			active := filepath.Join(dir, configFile)
+			v1 := []byte(`{"version":1,"profiles":{"fixture":{}}}`)
+			writeOwnershipFixture(t, active, v1)
+			backup := filepath.Join(dir, "config.v1-123.bak")
+			writeOwnershipFixture(t, backup, v1)
+			parent := dir
+			if location == "published" {
+				parent = filepath.Join(filepath.Dir(publishedConfigPath(t, dir)), config.OwnedProfileMarker)
+			}
+			link := filepath.Join(parent, filepath.Base(backup)+retirementSuffix)
+			if err := os.Link(active, link); err != nil {
+				t.Fatal(err)
+			}
+			publishOwnershipFixture(t, dir, active)
+			external, err := store.Snapshot("external", true)
+			if err != nil || !external.Exists {
+				t.Fatalf("select external profile: %v", err)
+			}
+			if _, err := store.Remove(external); err != nil {
+				t.Fatal(err)
+			}
+			assertOwnershipFixture(t, active, v1)
+			assertOwnershipFixture(t, link, v1)
+			store = NewManagedStore(dir, nil)
+			other, err = store.Snapshot("other", true)
+			if err != nil || !other.Exists {
+				t.Fatalf("select remaining profile: %v", err)
+			}
+			if _, err := store.ConfirmTarget(other, profile.APIBaseURL); err != nil {
+				t.Fatal(err)
+			}
+			assertOwnershipFixture(t, active, v1)
+			assertOwnershipFixture(t, link, v1)
+			assertOwnershipFixture(t, backup, v1)
+		})
+	}
+}
+
+func TestMailMutationsProtectExternalPaths(t *testing.T) {
+	proof := &PendingMailAuthorization{DeviceCode: "device", CodeVerifier: "verifier"}
+	for _, tc := range []struct {
+		name, target string
+		seed, mutate func(*Store) error
+	}{
+		{"save pending", mailPendingFile, nil, func(s *Store) error {
+			return s.SavePendingMailAuthorization("fixture", proof)
+		}},
+		{"remove pending", mailPendingFile, func(s *Store) error {
+			return s.SavePendingMailAuthorization("fixture", proof)
+		}, func(s *Store) error { return s.RemovePendingMailAuthorization("fixture") }},
+		{"save credential", mailCredFile, nil, func(s *Store) error {
+			return s.SaveMailCredential("fixture", "omb_fixture")
+		}},
+		{"remove credential", mailCredFile, func(s *Store) error {
+			return s.SaveMailCredential("fixture", "omb_fixture")
+		}, func(s *Store) error { return s.RemoveMailCredential("fixture") }},
+		{"initialize salt", saltFile, nil, func(s *Store) error {
+			return s.SavePendingMailAuthorization("fixture", proof)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			store := &Store{dir: dir}
+			target := filepath.Join(dir, tc.target)
+			var want []byte
+			if tc.seed != nil {
+				if err := tc.seed(store); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				want, err = os.ReadFile(target)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			alias := filepath.Join(dir, "alias")
+			if want == nil {
+				symlinkOwnershipFixture(t, target, alias)
+			} else if err := os.Link(target, alias); err != nil {
+				t.Fatal(err)
+			}
+			publishOwnershipFixture(t, dir, alias)
+			if err := tc.mutate(store); err == nil || !strings.Contains(err.Error(), "reserved by a Token file") {
+				t.Errorf("expected an ownership conflict: %v", err)
+			}
+			assertOwnershipFixture(t, target, want)
+		})
+	}
+}
+
+func TestMailReadDoesNotCreateMissingSalt(t *testing.T) {
+	dir := t.TempDir()
+	store := &Store{dir: dir}
+	if err := store.SavePendingMailAuthorization("fixture", &PendingMailAuthorization{DeviceCode: "device", CodeVerifier: "verifier"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(store.saltPath()); err != nil {
+		t.Fatal(err)
+	}
+	publishOwnershipFixture(t, dir, store.saltPath())
+	if _, err := store.PendingMailAuthorization("fixture"); err == nil {
+		t.Fatal("encrypted data unexpectedly loaded without its salt")
+	}
+	assertOwnershipFixture(t, store.saltPath(), nil)
+}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -123,6 +124,9 @@ func TestLegacyProfileWritesWaitForManagedCommit(t *testing.T) {
 		}},
 		{"update", func(s *Store) error { return s.UpdateProfileAPIBaseURL("legacy", "https://legacy.example") }},
 		{"logout", func(s *Store) error { return s.RemoveProfile("legacy") }},
+		{"start mail authorization", func(s *Store) error {
+			return s.SavePendingMailAuthorization("fixture", &PendingMailAuthorization{DeviceCode: "device", CodeVerifier: "verifier"})
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -451,6 +455,7 @@ func TestV1RetirementKeepsBotPublishedAfterReadingV1(t *testing.T) {
 				if pending, err := journal.mark(file, backup); err != nil || pending == "" {
 					t.Fatalf("pin the v1 source: %v", err)
 				}
+				journal.profiles.V1Retirement = &config.V1Retirement{Backup: filepath.Base(backup), Digest: sha256.Sum256(raw)}
 			}
 			legacy := &Store{dir: dir}
 			if err := legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}}); err != nil {
@@ -465,8 +470,8 @@ func TestV1RetirementKeepsBotPublishedAfterReadingV1(t *testing.T) {
 					t.Fatalf("unexpected attempt to pin the replacement: %v", err)
 				}
 			}
-			if err := journal.resume(); err != nil {
-				t.Fatal(err)
+			if marker, err := journal.resume(); err != nil || marker != "" {
+				t.Fatalf("unexpected recovery of a replaced source: %v", err)
 			}
 			if after, err := os.Stat(active); err != nil || !os.SameFile(after, published) {
 				t.Fatalf("concurrent legacy inode changed: %v", err)
@@ -486,7 +491,7 @@ func TestV1RetirementKeepsBotPublishedAfterReadingV1(t *testing.T) {
 }
 
 func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
-	for _, scenario := range []string{"same inode", "legacy replacement", "active file removed", "older unmarked short write", "unpublished marker", "older root marker"} {
+	for _, scenario := range []string{"same inode", "legacy replacement", "active file removed", "unrecorded short write", "unrecorded staged marker", "unrecorded root marker", "changed backup"} {
 		t.Run(scenario, func(t *testing.T) {
 			dir := t.TempDir()
 			store := NewManagedStore(dir, nil)
@@ -498,9 +503,13 @@ func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
 			if _, err := store.Import(snap, profile, "managed-token", BackendEncryptedFile); err != nil {
 				t.Fatal(err)
 			}
+			cfg, err := config.LoadProfileConfigIn(dir, true)
+			if err != nil || cfg == nil {
+				t.Fatalf("load published configuration: %v", err)
+			}
 			journal := v1RetirementJournal{
 				owned:    filepath.Join(filepath.Dir(publishedConfigPath(t, dir)), config.OwnedProfileMarker),
-				profiles: &config.ProfileConfig{},
+				profiles: cfg,
 			}
 			path := filepath.Join(dir, configFile)
 			v1 := []byte(`{"version":1,"profiles":{"old":{"api_base_url":"https://gateway.example"}}}`)
@@ -518,13 +527,13 @@ func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
 			}
 			var pending string
 			switch scenario {
-			case "older unmarked short write":
-			case "unpublished marker":
+			case "unrecorded short write":
+			case "unrecorded staged marker":
 				pending = filepath.Join(journal.owned, filepath.Base(backup)+retirementStageSuffix)
 				if err := os.Link(path, pending); err != nil {
 					t.Fatal(err)
 				}
-			case "older root marker":
+			case "unrecorded root marker":
 				pending = backup + retirementSuffix
 				if err := os.Link(path, pending); err != nil {
 					t.Fatal(err)
@@ -534,14 +543,21 @@ func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
 				if err != nil || pending == "" {
 					t.Fatalf("persist recovery marker: %v", err)
 				}
+				cfg.V1Retirement = &config.V1Retirement{Backup: filepath.Base(backup), Digest: sha256.Sum256(raw)}
+				if write := store.persist(cfg, nil); !write.committed || write.err != nil {
+					t.Fatalf("persist recovery record: %v", write.err)
+				}
 			}
-			if scenario != "unpublished marker" {
+			if scenario != "unrecorded staged marker" {
 				if _, err := file.WriteAt([]byte(`{"profiles":{}}`), 0); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if err := file.Close(); err != nil {
 				t.Fatal(err)
+			}
+			if scenario == "changed backup" {
+				writeOwnershipFixture(t, backup, []byte(`{"version":1,"profiles":{"different":{}}}`))
 			}
 			legacy := &Store{dir: dir}
 			if _, err := legacy.LoadProfiles(); err == nil {
@@ -562,17 +578,25 @@ func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
 				t.Fatalf("published profile must remain available: %v", err)
 			}
 			result, err := store.ConfirmTarget(snap, profile.APIBaseURL)
-			if scenario == "older unmarked short write" {
-				if err != nil {
-					t.Fatalf("unmarked damage should leave unified profiles available: %v", err)
+			if strings.HasPrefix(scenario, "unrecorded") || scenario == "changed backup" {
+				if err != nil || (result.CleanupWarning != "") != (scenario == "changed backup") {
+					t.Fatalf("unexpected recovery result for %s: %#v, %v", scenario, result, err)
 				}
 				if _, err := legacy.LoadProfiles(); err == nil {
-					t.Fatal("unmarked legacy file was overwritten")
+					t.Fatal("unverified legacy file was overwritten")
+				}
+				if pending != "" {
+					if _, err := os.Stat(pending); err != nil {
+						t.Fatalf("unverified retirement marker changed: %v", err)
+					}
 				}
 				return
 			}
 			if err != nil || result.CleanupWarning != "" {
 				t.Fatalf("retry retirement: %#v, %v", result, err)
+			}
+			if cfg, err := config.LoadProfileConfigIn(dir, true); err != nil || cfg == nil || cfg.V1Retirement != nil {
+				t.Fatalf("completed retirement record was not cleared: %v", err)
 			}
 			if got, err := legacy.LoadProfiles(); err != nil || (scenario != "legacy replacement" && len(got) != 0) ||
 				(scenario == "legacy replacement" && (len(got) != 1 || got["bot"].RobotID != "cli_bot")) {

@@ -239,6 +239,33 @@ func TestPhaseOneHistoricalTokenFilesCannotAuthorizeRouting(t *testing.T) {
 	}
 }
 
+func TestPhaseOneTokenDirectoryCannotPublishProfile(t *testing.T) {
+	dir := phaseOneEnv(t)
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+	t.Setenv("OCTO_TOKEN", "environment-fixture-bearer")
+	trusted, untrusted, calls := phaseOneTargets(t, "trusted", "untrusted")
+	const candidate = ".octo-managed-profile-123"
+	path := filepath.Join(candidate, "profiles.json")
+	token := filepath.Join(candidate, ".published", "token")
+	phaseOneWrite(t, filepath.Join(dir, "config.json"), fmt.Sprintf(
+		`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":%q}},"provider":{"token_source":{"type":"token_file","path":%q}}}}`, trusted, path, token))
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, token)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	phaseOneWrite(t, filepath.Join(dir, token), "provider-token")
+	phaseOneWrite(t, filepath.Join(dir, path), fmt.Sprintf(
+		`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1"}}}`, untrusted))
+	out, err := phaseOneRun("--profile", "work", "api", "GET", "/probe")
+	select {
+	case call := <-calls:
+		t.Fatalf("sent a request using a Token directory: %s", strings.Fields(call)[0])
+	default:
+	}
+	if err == nil {
+		t.Fatalf("ambiguous publication must fail profile resolution: %s", out)
+	}
+}
+
 func TestPhaseOneBusinessProfileIdentityRedaction(t *testing.T) {
 	dir := phaseOneEnv(t)
 	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")

@@ -67,7 +67,9 @@ with `OCTO_CONFIG_DIR`):
 Unified profiles are stored in **`profiles.json`** inside a private directory
 allocated under the configured CLI directory (`~/.octo/cli` by default). A
 publication marker identifies the authoritative directory, including when its
-metadata is unreadable. The CLI can migrate the original v1 `config.json`.
+metadata is unreadable. A readable original v1 `config.json` can disqualify a
+publication when it references its directory, marker, or metadata as a Token.
+The CLI can migrate the original v1 `config.json`.
 Before publication, unmarked dedicated metadata with profiles requires the
 same bindings and default selection in the original v1 file. An empty
 dedicated store still suppresses older profiles when the original is present.
@@ -80,8 +82,9 @@ metadata is restored. To migrate before running an older CLI, run
 including targets that are temporarily missing. Relative Token paths and
 managed credential references keep their original base.
 
-Unified and current Bot profile writes share `.managed.lock`. Both protect
-referenced Token paths and aliases from conflicting writes. The encrypted-file
+Unified, current Bot and Mail credential writes share `.managed.lock`. They
+protect referenced Token paths and aliases from conflicting writes. Mail and
+Bot reads leave a missing encryption salt alone. The encrypted-file
 backend leaves an external `master.key` alone. On macOS, Keychain creation and
 cleanup also protect locator files. Cleanup leaves an obsolete Keychain item
 in place when a profile still uses its locator path as an external Token.
@@ -91,12 +94,14 @@ the source inode and bytes, archives them as `config.v1-*.bak`, and publishes
 the new configuration together with the recovery marker. Once the publication
 is durable, the CLI clears the verified v1 file into an empty Bot store.
 A legacy writer that replaces `config.json` keeps its active file. Recovery
-requires a matching active inode and a valid paired backup. A retry after
+requires a retirement record published with the profile metadata, a matching
+active inode, and the recorded backup digest. A retry after
 interrupted staging removes an old pin only when it still links to the
 verified migration source and its backup matches the source bytes. Detached
-markers and unmarked `config.json` files remain in place after publication,
-including files whose Token reference was previously removed. An older migration that
-left an unmarked v1 file may require manual recovery before using the Bot CLI.
+markers and files without a published retirement record remain in place,
+including files whose Token reference was previously removed. An older
+migration interrupted without a record may require manual recovery before
+using the Bot CLI.
 
 **Trust boundary: the OS user account.** Any process running as the same user
 can run `octo-cli` and therefore decrypt the store; the encryption defends against

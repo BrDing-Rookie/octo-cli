@@ -253,11 +253,14 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 }
 
 func (s *ManagedStore) persist(cfg *config.ProfileConfig, previous *config.Profile) profileWrite {
-	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if !cfg.IsPublished() {
+		// Only this migration can publish a retirement record.
+		cfg.V1Retirement = nil
+	}
+	raw, err := marshalProfileConfig(cfg)
 	if err != nil {
 		return profileWrite{err: err}
 	}
-	raw = append(raw, '\n')
 	if !cfg.IsPublished() {
 		return s.publishProfileConfig(cfg, previous, raw)
 	}
@@ -267,6 +270,11 @@ func (s *ManagedStore) persist(cfg *config.ProfileConfig, previous *config.Profi
 	}
 	committed, err := s.writeConfig(path, raw)
 	return profileWrite{committed: committed, err: err}
+}
+
+func marshalProfileConfig(cfg *config.ProfileConfig) ([]byte, error) {
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	return append(raw, '\n'), err
 }
 
 func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous *config.Profile, data []byte) profileWrite {
@@ -300,6 +308,15 @@ func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous 
 		profiles: cfg, previous: previous,
 	}
 	warning := journal.prepareMigration(marker)
+	if cfg.V1Retirement != nil {
+		raw, err := marshalProfileConfig(cfg)
+		if err != nil {
+			return profileWrite{err: err}
+		}
+		if committed, err := writeManagedFile(path, raw); !committed || err != nil {
+			return profileWrite{err: err}
+		}
+	}
 	// Publishing the directory makes the metadata and its recovery intent
 	// visible together. Only a published journal may change config.json.
 	published, err = replaceManagedFile(staged, marker)

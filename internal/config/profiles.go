@@ -32,10 +32,17 @@ type ProfileConfig struct {
 	Version        json.RawMessage     `json:"version"`
 	CurrentProfile string              `json:"current_profile"`
 	Profiles       map[string]*Profile `json:"profiles"`
+	V1Retirement   *V1Retirement       `json:"v1_retirement,omitempty"`
 	dir            string
 	file           string
 	fileInfo       os.FileInfo
 	v1Digest       [sha256.Size]byte
+}
+
+// V1Retirement identifies the backup created by a published migration.
+type V1Retirement struct {
+	Backup string            `json:"backup"`
+	Digest [sha256.Size]byte `json:"sha256"`
 }
 
 // Profile binds a request target to a credential reference.
