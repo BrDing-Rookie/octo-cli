@@ -62,10 +62,10 @@ type Factory struct {
 	MailCredentialFunc     func(context.Context) (*credential.MailCredential, error)
 	MailClientFunc         func(context.Context) (*client.Client, error)
 	RegistryFunc           func() *registry.Registry
+	ManagedStoreFunc       func() (*authstore.ManagedStore, error)
 
-	// ErrorEmitted is set to true after EmitError writes an envelope to
-	// stderr. The top-level main func checks this to avoid double-emitting
-	// when RunE returns the same error that was already rendered.
+	// ErrorEmitted records an attempted stderr envelope. The top-level main
+	// func checks it to avoid retrying an error already handled by RunE.
 	ErrorEmitted bool
 
 	// Cached resolutions.
@@ -131,19 +131,12 @@ func NewDefaultFactory() *Factory {
 		if f.cli != nil {
 			return f.cli, nil
 		}
-		opts := client.Options{
-			Verbose: f.Globals.Verbose,
-			DryRun:  f.Globals.DryRun,
-			NoRetry: f.Globals.NoRetry,
-			Timeout: f.Globals.Timeout,
-			ErrOut:  f.IOStreams.ErrOut,
-		}
 		business, err := f.BusinessCredential()
 		if err != nil {
 			return nil, err
 		}
 		if business != nil {
-			f.cli = client.NewBusiness(business, opts)
+			f.cli = f.NewBusinessClient(business)
 			return f.cli, nil
 		}
 		cfg, err := f.ConfigFunc()
@@ -154,7 +147,7 @@ func NewDefaultFactory() *Factory {
 		if err != nil {
 			return nil, err
 		}
-		cli := client.New(cfg, cred, opts)
+		cli := client.New(cfg, cred, f.clientOptions())
 		f.cli = cli
 		return cli, nil
 	}
@@ -381,6 +374,14 @@ func (f *Factory) buildTaskCredential() (*credential.BotCredential, error) {
 	return &credential.BotCredential{Token: resolved.Token, Source: resolved.Source, BotKind: "agent_task"}, nil
 }
 
+// ManagedStore opens the versioned profile store without creating any files.
+func (f *Factory) ManagedStore() (*authstore.ManagedStore, error) {
+	if f.ManagedStoreFunc != nil {
+		return f.ManagedStoreFunc()
+	}
+	return authstore.OpenManaged()
+}
+
 // AuthStore lazily constructs and caches the credential store.
 func (f *Factory) AuthStore() (*authstore.Store, error) {
 	if f.store != nil {
@@ -450,6 +451,28 @@ func (f *Factory) RedactUnifiedBearer(s string) string {
 		return s
 	}
 	return client.RedactBearer(s, f.business.Token)
+}
+
+// NewBusinessClient applies the same runtime options to an already selected bearer.
+func (f *Factory) NewBusinessClient(cred *credential.BusinessContext) *client.Client {
+	return f.NewBusinessClientContext(context.Background(), cred)
+}
+
+// NewBusinessClientContext applies ctx to the client's diagnostic writes.
+func (f *Factory) NewBusinessClientContext(ctx context.Context, cred *credential.BusinessContext) *client.Client {
+	opts := f.clientOptions()
+	opts.ErrOut = f.IOStreams.StderrWithContext(ctx)
+	return client.NewBusiness(cred, opts)
+}
+
+func (f *Factory) clientOptions() client.Options {
+	return client.Options{
+		Verbose: f.Globals.Verbose,
+		DryRun:  f.Globals.DryRun,
+		NoRetry: f.Globals.NoRetry,
+		Timeout: f.Globals.Timeout,
+		ErrOut:  f.IOStreams.ErrOut,
+	}
 }
 
 // Config returns the resolved config (cached).
@@ -640,13 +663,12 @@ func (f *Factory) PreflightOutput(format string) error {
 // EmitSuccess renders a success envelope, applying --jq first (if set) and
 // then the configured output format. Non-nil raw is placed inside the envelope.
 func (f *Factory) EmitSuccess(raw []byte) error {
-	rm := normalizeRaw(raw)
-	return f.emit(rm, output.EnvelopeMeta{})
+	return f.EmitSuccessWithMeta(raw, output.EnvelopeMeta{})
 }
 
 // EmitSuccessWithMeta is EmitSuccess plus envelope meta (rate limit, notice).
 func (f *Factory) EmitSuccessWithMeta(raw []byte, meta output.EnvelopeMeta) error {
-	return f.emit(normalizeRaw(raw), meta)
+	return f.WriteSuccessWithMeta(context.Background(), f.IOStreams.Out, raw, meta)
 }
 
 // identityValue builds the envelope's identity field from the credential
@@ -693,14 +715,16 @@ func (f *Factory) identityValue() any {
 	return id
 }
 
-func (f *Factory) emit(raw []byte, meta output.EnvelopeMeta) error {
+// WriteSuccessWithMeta renders the success response to w and uses ctx for jq
+// evaluation. A mutating command can buffer the response before committing.
+func (f *Factory) WriteSuccessWithMeta(ctx context.Context, w io.Writer, raw []byte, meta output.EnvelopeMeta) error {
 	if meta.Identity == nil {
 		meta.Identity = f.identityValue()
 	}
 	// Build the success envelope into an in-memory buffer first so --jq can
 	// operate on the canonical envelope shape (not the backend shape).
 	var envBuf bytes.Buffer
-	if err := output.WriteSuccess(&envBuf, raw, meta); err != nil {
+	if err := output.WriteSuccess(&envBuf, normalizeRaw(raw), meta); err != nil {
 		return err
 	}
 	// Re-parse into any so Format/ApplyJQ can work with it. UseNumber keeps every
@@ -717,13 +741,15 @@ func (f *Factory) emit(raw []byte, meta output.EnvelopeMeta) error {
 	}
 
 	if f.Globals != nil && f.Globals.JQ != "" {
-		var results []any
-		var err error
-		if f.jqProgram != nil && f.jqExpression == f.Globals.JQ {
-			results, err = f.jqProgram.Apply(envelope)
-		} else {
-			results, err = output.ApplyJQ(envelope, f.Globals.JQ)
+		program := f.jqProgram
+		if program == nil || f.jqExpression != f.Globals.JQ {
+			var err error
+			program, err = output.CompileJQ(f.Globals.JQ)
+			if err != nil {
+				return err
+			}
 		}
+		results, err := program.ApplyContext(ctx, envelope)
 		if err != nil {
 			return err
 		}
@@ -734,17 +760,29 @@ func (f *Factory) emit(raw []byte, meta output.EnvelopeMeta) error {
 			envelope = results
 		}
 	}
-	return output.Format(f.IOStreams.Out, f.Format(), envelope)
+	return output.Format(w, f.Format(), envelope)
 }
 
-// EmitError renders an error envelope to stderr. Non-ExitError values are
-// classified via WrapCLIError before rendering so the envelope always carries
-// a proper taxonomy. Sets ErrorEmitted so the top-level main func can avoid
-// double-emitting. Always returns nil so cobra doesn't print its own error
-// on top of ours; the caller sets the process exit code separately.
+// EmitError renders an error envelope to stderr.
 func (f *Factory) EmitError(err error) error {
+	return f.EmitErrorContext(context.Background(), err)
+}
+
+// EmitErrorContext gives stderr a short grace period after cancellation.
+// Record the attempt so the caller does not retry a blocked write.
+func (f *Factory) EmitErrorContext(ctx context.Context, err error) error {
 	f.ErrorEmitted = true
-	return output.WriteError(f.IOStreams.ErrOut, WrapCLIError(err))
+	wrapped := WrapCLIError(err)
+	out := standardPipeWriter{out: f.IOStreams.ErrOut}
+	if ctx.Done() == nil {
+		return output.WriteError(out, wrapped)
+	}
+	var rendered bytes.Buffer
+	if err := output.WriteError(&rendered, wrapped); err != nil {
+		return err
+	}
+	_, writeErr := writeStream(ctx, out, rendered.Bytes(), canceledErrorWriteGrace)
+	return writeErr
 }
 
 // --- helpers ---

@@ -10,13 +10,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func lockManagedFile(f *os.File) error {
-	for {
-		err := unix.Flock(int(f.Fd()), unix.LOCK_EX)
-		if !errors.Is(err, unix.EINTR) {
-			return err
-		}
+func tryLockManagedFile(f *os.File) (bool, error) {
+	err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EINTR) {
+		return false, nil
 	}
+	return err == nil, err
 }
 
 func replaceManagedFile(from, to string) (bool, error) {

@@ -1,6 +1,7 @@
 package output
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -46,19 +47,30 @@ func ApplyJQ(v any, expr string) ([]any, error) {
 
 // Apply runs the compiled expression against v and returns its resulting values.
 func (program *JQProgram) Apply(v any) ([]any, error) {
+	return program.ApplyContext(context.Background(), v)
+}
+
+// ApplyContext runs the compiled expression until it finishes or ctx is cancelled.
+func (program *JQProgram) ApplyContext(ctx context.Context, v any) ([]any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	input, err := normalizeForJQ(v)
 	if err != nil {
 		return nil, fmt.Errorf("normalize input: %w", err)
 	}
 
-	iter := program.code.Run(input)
+	iter := program.code.RunWithContext(ctx, input)
 	var results []any
 	for {
 		r, ok := iter.Next()
 		if !ok {
 			break
 		}
-		if e, ok := r.(error); ok {
+		if _, ok := r.(error); ok {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			// gojq's runtime errors quote the value they choked on, and that value is
 			// *response data* — which on a share command is the share token itself. So
 			// `--jq '.data.share_token|tonumber'` printed the token on stderr while
@@ -69,7 +81,6 @@ func (program *JQProgram) Apply(v any) ([]any, error) {
 			// This is also why it must be an *ExitError: as a plain error it fell to
 			// WrapCLIError's generic fallback, which both echoed the text and filed it
 			// as a config error rather than a validation one.
-			_ = e
 			return nil, ErrWithHint("validation", "JQ_RUNTIME_ERROR",
 				"the --jq program failed while evaluating the response",
 				"check the filter against the unfiltered output first; the value it failed on is "+

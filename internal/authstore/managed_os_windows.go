@@ -9,8 +9,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func lockManagedFile(f *os.File) error {
-	return windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &windows.Overlapped{})
+func tryLockManagedFile(f *os.File) (bool, error) {
+	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
+	err := windows.LockFileEx(windows.Handle(f.Fd()), flags, 0, 1, 0, &windows.Overlapped{})
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func replaceManagedFile(from, to string) (bool, error) {

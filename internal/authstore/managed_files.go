@@ -1,6 +1,7 @@
 package authstore
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -10,6 +11,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 const (
@@ -88,7 +90,7 @@ func (s *ManagedStore) writeEncrypted(entry, token string) error {
 	if err != nil {
 		return err
 	}
-	committed, err := writeManagedFile(s.encryptedPath(entry), append([]byte{location}, blob...))
+	committed, err := writeManagedFile(s.encryptedPath(entry), append([]byte{location}, blob...), replaceManagedFile)
 	if committed && err != nil {
 		return errors.Join(err, os.Remove(s.encryptedPath(entry)))
 	}
@@ -154,7 +156,7 @@ func (s *ManagedStore) masterKeyForWrite() (key [32]byte, location byte, err err
 	key, err = s.masterKey(keyInFile)
 	if errors.Is(err, fs.ErrNotExist) {
 		if _, err = rand.Read(key[:]); err == nil {
-			_, err = writeManagedFile(s.masterKeyPath(), key[:])
+			_, err = writeManagedFile(s.masterKeyPath(), key[:], replaceManagedFile)
 		}
 	}
 	return key, keyInFile, err
@@ -197,7 +199,7 @@ func readPrivateFile(path string, limit int64) ([]byte, error) {
 	return data, errors.Join(readErr, closeErr)
 }
 
-func openManagedLock(path string) (*os.File, error) {
+func openManagedLock(ctx context.Context, path string) (*os.File, error) {
 	if info, err := os.Lstat(path); err == nil {
 		if !info.Mode().IsRegular() {
 			return nil, errors.New("managed lock must be a regular file")
@@ -209,15 +211,25 @@ func openManagedLock(path string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := lockManagedFile(lock); err != nil {
-		return nil, errors.Join(err, lock.Close())
+	for ctx.Err() == nil {
+		acquired, err := tryLockManagedFile(lock)
+		if err != nil {
+			return nil, errors.Join(err, lock.Close())
+		}
+		if acquired {
+			return lock, nil
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(25 * time.Millisecond):
+		}
 	}
-	return lock, nil
+	return nil, errors.Join(ctx.Err(), lock.Close())
 }
 
 // writeManagedFile returns true once replacement is visible, even if a
 // subsequent directory sync fails.
-func writeManagedFile(path string, data []byte) (bool, error) {
+func writeManagedFile(path string, data []byte, replace func(from, to string) (bool, error)) (bool, error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".managed-*")
 	if err != nil {
@@ -235,7 +247,14 @@ func writeManagedFile(path string, data []byte) (bool, error) {
 	if err := errors.Join(err, tmp.Close()); err != nil {
 		return false, err
 	}
-	return replaceManagedFile(tmp.Name(), path)
+	return replace(tmp.Name(), path)
+}
+
+func replaceManagedConfig(ctx context.Context, from, to string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return replaceManagedFile(from, to)
 }
 
 func secureManagedTemp(tmp *os.File) error {
