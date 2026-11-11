@@ -147,14 +147,14 @@ func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
 func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	var withToken bool
 	var tokenFile string
-	var apiBaseURL, expectedOwnerID, ownerIDAlias string
+	var apiBaseURL string
 	var unified bool
 
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Store a credential read from stdin, a file, or a hidden prompt",
 		Long: "In unified mode, verify and import a CLI Token using --with-token for stdin or --token-file for a file. " +
-			"Select the target with --profile and optionally verify its owner with --expected-owner-id. " +
+			"Select the target with --profile. " +
 			"In legacy mode, identify a bot with --bot-id " +
 			"(its robot id, recommended) and/or --profile (a friendly name). The " +
 			"token is read from a hidden prompt on a terminal, or from stdin with " +
@@ -175,12 +175,8 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			ownerID, err := authLoginExpectedOwner(cmd, unified, expectedOwnerID, ownerIDAlias)
-			if err != nil {
-				return failErrContext(cmd.Context(), f, err)
-			}
 			if unified {
-				if err := runUnifiedAuthLogin(cmd, f, withToken, tokenFile, apiBaseURL, ownerID); err != nil {
+				if err := runUnifiedAuthLogin(cmd, f, withToken, tokenFile, apiBaseURL); err != nil {
 					return failErrContext(cmd.Context(), f, err)
 				}
 				return nil
@@ -191,33 +187,8 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	cmd.Flags().BoolVar(&withToken, "with-token", false, "read the token from stdin instead of a prompt")
 	cmd.Flags().StringVar(&tokenFile, "token-file", "", "read the token from this file")
 	cmd.Flags().StringVar(&apiBaseURL, "api-base-url", "", "store this profile's API base URL (takes precedence over OCTO_API_BASE_URL)")
-	cmd.Flags().StringVar(&expectedOwnerID, "expected-owner-id", "", "verify the expected owner ID when importing a unified CLI Token")
-	cmd.Flags().StringVar(&ownerIDAlias, "owner-id", "", "alias for --expected-owner-id")
 	cmd.MarkFlagsMutuallyExclusive("with-token", "token-file")
 	return cmd
-}
-
-func authLoginExpectedOwner(cmd *cobra.Command, unified bool, expectedOwnerID, ownerIDAlias string) (string, error) {
-	var ownerID string
-	for _, flag := range []struct{ name, value string }{
-		{"expected-owner-id", expectedOwnerID},
-		{"owner-id", ownerIDAlias},
-	} {
-		if !cmd.Flags().Changed(flag.name) {
-			continue
-		}
-		if !unified {
-			return "", output.ErrValidation("--"+flag.name+" requires unified credentials", "set OCTO_CREDENTIAL_MODE=unified")
-		}
-		if strings.TrimSpace(flag.value) == "" {
-			return "", output.ErrValidation("--"+flag.name+" is empty", "pass the expected owner ID")
-		}
-		if ownerID != "" && ownerID != flag.value {
-			return "", output.ErrValidation("--expected-owner-id and --owner-id must match", "pass the same expected owner ID")
-		}
-		ownerID = flag.value
-	}
-	return ownerID, nil
 }
 
 func runLegacyAuthLogin(f *cmdutil.Factory, withToken bool, tokenFile, apiBaseURL string) error {

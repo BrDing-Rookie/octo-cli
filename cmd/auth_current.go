@@ -173,7 +173,7 @@ func runAuthGet(ctx context.Context, f *cmdutil.Factory) error {
 	return err
 }
 
-func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, tokenFile, apiBaseURL, ownerID string) error {
+func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, tokenFile, apiBaseURL string) error {
 	if err := validateUnifiedAuthLogin(cmd, f, withToken, tokenFile, apiBaseURL); err != nil {
 		return err
 	}
@@ -207,7 +207,7 @@ func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool,
 	if err != nil {
 		return err
 	}
-	if err := self.Token.verifyImport(target.SpaceID, ownerID); err != nil {
+	if err := self.Token.verifyImport(target.SpaceID); err != nil {
 		return err
 	}
 	return importVerifiedToken(ctx, f, store, baseline, target, token, source)
@@ -403,7 +403,7 @@ func (p authPermission) valid() bool {
 	return true
 }
 
-func (m *authTokenMetadata) verifyImport(spaceID, ownerID string) error {
+func (m *authTokenMetadata) verifyImport(spaceID string) error {
 	if m.Status == "revoked" {
 		return output.ErrWithHint("auth_error", "TOKEN_REVOKED", "the candidate CLI Token is revoked", "provide an active CLI Token")
 	}
@@ -412,9 +412,6 @@ func (m *authTokenMetadata) verifyImport(spaceID, ownerID string) error {
 	}
 	if m.SpaceID != spaceID {
 		return output.ErrValidation("candidate CLI Token belongs to a different Space", "select the Token's target Space")
-	}
-	if ownerID != "" && m.OwnerID != ownerID {
-		return output.ErrValidation("candidate CLI Token belongs to a different owner", "provide a Token owned by the expected account")
 	}
 	return nil
 }

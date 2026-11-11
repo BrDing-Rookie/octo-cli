@@ -27,7 +27,7 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 	store := authstore.NewManagedStore(dir, nil)
 	candidate := authCurrentFixtureCandidateToken
 	old := authCurrentFixtureStoredToken
-	reply := authCurrentFixtureSuccess("candidate-id", "owner", "new-space").withVersion("0").withEnvelopeError("null")
+	reply := authCurrentFixtureSuccess("candidate-id", "candidate-owner", "new-space").withVersion("0").withEnvelopeError("null")
 	reply.body = strings.Replace(reply.body, `"name":"fixture"`, `"name":"prefix`+candidate+`suffix"`, 1)
 	permissions := `[{"domain":"Loop.task-2","actions":["Loop.task-2:Read_1.v2","Loop.task-2:*"]},` +
 		`{"domain":"*","actions":["*:read","*","*:*"]},{"domain":"task","actions":[]}]`
@@ -35,7 +35,7 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 	reply.body = strings.Replace(reply.body, `"bot_name":"Fixture Bot"`,
 		`"bot_name":"`+url.QueryEscape(candidate)+`","relation_id":9007199254740993,"Label":"one","label":"two","token_hash":"private"`, 1)
 	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
-		old:       authCurrentFixtureSuccess("old-id", "owner", "old-space"),
+		old:       authCurrentFixtureSuccess("old-id", "previous-owner", "old-space"),
 		candidate: reply,
 	})
 	seedAuthCurrentProfile(t, store, "target", server.URL, "old-space", old)
@@ -47,7 +47,7 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 		t.Setenv(config.EnvAPIBaseURL, "https://unused.example.invalid")
 		stdout, stderr, err := runUnifiedAuthCurrentContext(t.Context(), store, strings.NewReader(candidate+"\n"),
 			"--verbose", "--timeout", "invalid-duration", "--profile", "target", "--space", "new-space",
-			"auth", "login", "--api-base-url", server.URL, "--owner-id", "owner", "--with-token")
+			"auth", "login", "--api-base-url", server.URL, "--with-token")
 		if err != nil || !strings.Contains(stdout, "managed_store") {
 			t.Fatalf("import: %v (%s %s)", err, stdout, stderr)
 		}
@@ -79,6 +79,7 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 		Data struct {
 			Token struct {
 				ID         string          `json:"token_id"`
+				OwnerID    string          `json:"owner_id"`
 				Version    *uint64         `json:"version"`
 				Remark     json.RawMessage `json:"remark"`
 				ExpiresAt  json.RawMessage `json:"expires_at"`
@@ -90,7 +91,7 @@ func TestUnifiedAuthCurrentImportAndRead(t *testing.T) {
 		}
 	}
 	if err := json.Unmarshal([]byte(stdout), &result); err != nil || !result.OK ||
-		result.Data.Token.ID != "candidate-id" ||
+		result.Data.Token.ID != "candidate-id" || result.Data.Token.OwnerID != "candidate-owner" ||
 		len(result.Data.BotBindings) != 1 || result.Data.NestedData != nil {
 		t.Fatalf("unexpected TokenSelf envelope: %s (%v)", stdout, err)
 	}
@@ -331,7 +332,6 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 		{"missing expiration", candidate, "INVALID_TOKEN_SELF", "api_error", withoutNullableField("expires_at"), true},
 		{"missing last use", candidate, "INVALID_TOKEN_SELF", "api_error", withoutNullableField("last_used_at"), true},
 		{"space", candidate, "VALIDATION_ERROR", "validation", authCurrentFixtureSuccess("id", "owner", "other-space"), true},
-		{"owner", candidate, "VALIDATION_ERROR", "validation", authCurrentFixtureSuccess("id", "other-owner", "space"), true},
 		{"expired", candidate, "TOKEN_EXPIRED", "auth_error", expired, true},
 		{"revoked", candidate, "TOKEN_REVOKED", "auth_error", revoked, true},
 		{"legacy", "bf_fixture-old-token", "UNAUTHORIZED", "auth_error", active, false},
@@ -343,7 +343,7 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{tc.token: tc.reply})
 			before := seedAuthCurrentProfile(t, store, "target", server.URL, "space", authCurrentFixtureStoredToken)
 			stdout, stderr, err := runUnifiedAuthCurrent(store, strings.NewReader(tc.token), "--profile", "target",
-				"--verbose", "--timeout", "250ms", "--no-retry", "auth", "login", "--owner-id", "owner", "--with-token")
+				"--verbose", "--timeout", "250ms", "--no-retry", "auth", "login", "--with-token")
 			exit := output.AsExitError(err)
 			if exit == nil || exit.Code != tc.code || exit.Type != tc.typ || stdout != "" {
 				t.Fatalf("login error = %v, stdout = %q, stderr = %q, want %s/%s", err, stdout, stderr, tc.typ, tc.code)
@@ -427,7 +427,6 @@ func TestUnifiedAuthCurrentImportTokenFile(t *testing.T) {
 		wantCalls  int
 	}{
 		{"valid", "", 1},
-		{"wrong owner", "VALIDATION_ERROR", 1},
 		{"empty path", "VALIDATION_ERROR", 0},
 		{"missing file", "VALIDATION_ERROR", 0},
 		{"directory", "VALIDATION_ERROR", 0},
@@ -449,10 +448,8 @@ func TestUnifiedAuthCurrentImportTokenFile(t *testing.T) {
 			}
 
 			path := filepath.Join(t.TempDir(), "candidate.token")
-			content, owner := "\t"+candidate+"\r\n", "owner"
+			content := "\t" + candidate + "\r\n"
 			switch tc.name {
-			case "wrong owner":
-				owner = "other-owner"
 			case "empty path":
 				path = ""
 			case "directory":
@@ -467,7 +464,7 @@ func TestUnifiedAuthCurrentImportTokenFile(t *testing.T) {
 			}
 			stdin := strings.NewReader("unused stdin")
 			stdout, stderr, err := runUnifiedAuthCurrent(store, stdin, "--profile", "target",
-				"auth", "login", "--token-file", path, "--expected-owner-id", owner)
+				"auth", "login", "--token-file", path)
 			wantToken := candidate
 			if tc.code == "" {
 				var result struct{ Identity struct{ Source string } }
@@ -596,87 +593,20 @@ func TestUnifiedAuthCurrentAcceptsEscapedTimestamps(t *testing.T) {
 	}
 }
 
-func TestUnifiedAuthCurrentExpectedOwnerFlags(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		flags     []string
-		message   string
-		wantCalls int
-	}{
-		{"expected owner", []string{"--expected-owner-id", "owner"}, "", 1},
-		{"legacy alias", []string{"--owner-id", "owner"}, "", 1},
-		{"matching flags", []string{"--owner-id", "owner", "--expected-owner-id", "owner"}, "", 1},
-		{"conflicting flags", []string{"--expected-owner-id", "owner", "--owner-id", "different"}, "must match", 0},
-		{"empty expected owner", []string{"--expected-owner-id=", "--owner-id", "owner"}, "--expected-owner-id is empty", 0},
-		{"empty alias", []string{"--owner-id=", "--expected-owner-id", "owner"}, "--owner-id is empty", 0},
-		{"owner mismatch", []string{"--expected-owner-id", "different"}, "belongs to a different owner", 1},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := phaseOneEnv(t)
-			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
-			store := authstore.NewManagedStore(dir, nil)
-			candidate, old := authCurrentFixtureCandidateToken, authCurrentFixtureStoredToken
-			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
-				candidate: authCurrentFixtureSuccess("candidate-id", "owner", "space"),
+func TestAuthLoginRejectsRemovedOwnerFlags(t *testing.T) {
+	for _, mode := range []string{"", config.CredentialModeUnified} {
+		for _, flag := range []string{"--expected-owner-id", "--owner-id"} {
+			t.Run(mode+"/"+flag, func(t *testing.T) {
+				phaseOneEnv(t)
+				t.Setenv(config.EnvCredentialMode, mode)
+				stdin := strings.NewReader(authCurrentFixtureCandidateToken)
+				stdout, stderr, err := runUnifiedAuthCurrent(nil, stdin,
+					"--profile", "target", "auth", "login", "--with-token", flag, "owner")
+				if err == nil || err.Error() != "unknown flag: "+flag || stdout != "" || stdin.Len() != len(authCurrentFixtureCandidateToken) {
+					t.Fatalf("expected removed flag rejection before reading stdin: %v (%s %s)", err, stdout, stderr)
+				}
 			})
-			seedAuthCurrentProfile(t, store, "target", server.URL, "space", old)
-			before, err := os.ReadFile(authCurrentConfigPath(t, dir))
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			stdin := strings.NewReader(candidate)
-			args := append([]string{"--profile", "target", "auth", "login", "--with-token"}, tc.flags...)
-			stdout, stderr, err := runUnifiedAuthCurrent(store, stdin, args...)
-			wantToken := candidate
-			if tc.message == "" {
-				if err != nil || !strings.Contains(stdout, "managed_store") {
-					t.Errorf("expected successful import: %v (%s %s)", err, stdout, stderr)
-				}
-			} else {
-				wantToken = old
-				exit := output.AsExitError(err)
-				if exit == nil || exit.Code != "VALIDATION_ERROR" || !strings.Contains(exit.Message, tc.message) || stdout != "" {
-					t.Errorf("expected validation error %q: %v (%s %s)", tc.message, err, stdout, stderr)
-				}
-				after, err := os.ReadFile(authCurrentConfigPath(t, dir))
-				if err != nil || !bytes.Equal(before, after) {
-					t.Errorf("failed import changed the published Profile: %v", err)
-				}
-			}
-			if got := len(requests()); got != tc.wantCalls {
-				t.Errorf("got %d _current calls, want %d", got, tc.wantCalls)
-			}
-			if tc.wantCalls == 0 && stdin.Len() != len(candidate) {
-				t.Error("invalid flags consumed stdin")
-			}
-			cfg, err := config.LoadProfileConfig()
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, profile, err := cfg.SelectProfile("target", true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			token, err := authstore.ReadManagedToken(cfg, profile.TokenSource)
-			if err != nil || token != wantToken {
-				t.Errorf("Profile does not resolve the expected Token: %v", err)
-			}
-		})
-	}
-}
-
-func TestAuthLoginOwnerFlagsRequireUnifiedMode(t *testing.T) {
-	for _, flag := range []string{"--expected-owner-id", "--owner-id"} {
-		t.Run(flag, func(t *testing.T) {
-			phaseOneEnv(t)
-			stdin := strings.NewReader(authCurrentFixtureCandidateToken)
-			stdout, stderr, err := runUnifiedAuthCurrent(nil, stdin, "--profile", "target", "auth", "login", "--with-token", flag, "owner")
-			exit := output.AsExitError(err)
-			if exit == nil || exit.Code != "VALIDATION_ERROR" || exit.Message != flag+" requires unified credentials" || stdout != "" || stdin.Len() != len(authCurrentFixtureCandidateToken) {
-				t.Fatalf("expected legacy-mode validation before reading stdin: %v (%s %s)", err, stdout, stderr)
-			}
-		})
+		}
 	}
 }
 

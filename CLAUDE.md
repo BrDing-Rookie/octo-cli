@@ -148,10 +148,11 @@ without registry access. Upgrade requires no Octo credentials.
 
 In unified mode, `octo-cli auth login --with-token` verifies the stdin
 Token against the target gateway and Space before saving it to the selected
-Profile. `--owner-id` adds an expected account check. `octo-cli auth get`
+Profile. `octo-cli auth get`
 resolves the unified credential and queries `GET /v1/auth/tokens/_current`.
 The success envelope contains Token metadata, effective permissions, and Bot
-bindings under `data`.
+bindings under `data`. The server-provided `owner_id` remains available for
+OctoBuddy; the CLI does not make ownership decisions from this metadata.
 
 In legacy mode, `octo-cli auth login` stores a bot token (read from a hidden prompt, `--with-token` stdin, or `--token-file` — never argv) under a profile keyed by `--bot-id`/`--profile`. `update` changes non-secret profile settings such as the API base URL without re-entering or rewriting the token, and `--clear-api-base-url` removes the stored origin so the environment or default applies again. `status`/`list` show metadata only (tokens always masked); `logout` removes a profile.
 
