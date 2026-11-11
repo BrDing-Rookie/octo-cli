@@ -66,9 +66,12 @@ with `OCTO_CONFIG_DIR`):
 
 Unified profiles are stored in **`profiles.json`** inside a private directory
 allocated under the configured CLI directory (`~/.octo/cli` by default). A
-publication marker identifies the authoritative directory, including when its
-metadata is unreadable. A readable original v1 `config.json` can disqualify a
-publication when it references its directory, marker, or metadata as a Token.
+publication anchor at `.managed-profile` selects the authoritative directory
+by a hard link to its immutable `.authority` file. The CLI refuses a missing
+or damaged selected configuration. A readable original v1 `config.json` can
+disqualify a publication when it reserves a publication path as a Token.
+Older directories with only a `.published` marker require manual recovery
+from verified metadata before migration.
 The CLI can migrate the original v1 `config.json`.
 Before publication, unmarked dedicated metadata with profiles requires the
 same bindings and default selection in the original v1 file. An empty
@@ -83,9 +86,12 @@ including targets that are temporarily missing. Relative Token paths and
 managed credential references keep their original base.
 
 Unified, current Bot and Mail credential writes share `.managed.lock`. They
-protect referenced Token paths and aliases from conflicting writes. Mail and
-Bot reads leave a missing encryption salt alone. The encrypted-file
-backend leaves an external `master.key` alone. On macOS, Keychain creation and
+protect referenced Token paths and aliases from conflicting writes. Mail
+checks its local storage before starting or exchanging a device code and
+rechecks write destinations under the lock. Mail and Bot reads leave a
+missing encryption salt alone. The encrypted-file backend leaves an external
+`master.key` alone and excludes known external Token files from its scan for
+existing ciphertext. On macOS, Keychain creation and
 cleanup also protect locator files. Cleanup leaves an obsolete Keychain item
 in place when a profile still uses its locator path as an external Token.
 
@@ -95,9 +101,9 @@ the new configuration together with the recovery marker. Once the publication
 is durable, the CLI clears the verified v1 file into an empty Bot store.
 A legacy writer that replaces `config.json` keeps its active file. Recovery
 requires a retirement record published with the profile metadata, a matching
-active inode, and the recorded backup digest. A retry after
-interrupted staging removes an old pin only when it still links to the
-verified migration source and its backup matches the source bytes. Detached
+active inode, and the recorded backup digest. A retry after interrupted
+staging also requires a matching staging anchor and the migration record
+persisted before the hard link was created. Detached
 markers and files without a published retirement record remain in place,
 including files whose Token reference was previously removed. An older
 migration interrupted without a record may require manual recovery before

@@ -270,6 +270,9 @@ func TestManagedProfileMigrationPreservesCredential(t *testing.T) {
 	if err := os.RemoveAll(filepath.Dir(managedPath)); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Remove(filepath.Join(dir, config.OwnedProfileAnchor)); err != nil {
+		t.Fatal(err)
+	}
 	snap, err = store.Snapshot("target", true)
 	if err != nil || !snap.Exists {
 		t.Fatalf("read old v1 layout: %v", err)
@@ -630,14 +633,28 @@ func TestV1RetirementLeavesHardLinkedSourceUntouched(t *testing.T) {
 	}
 	parent := filepath.Join(dir, config.OwnedProfileDirPrefix+"unproven")
 	writeOwnershipFixture(t, filepath.Join(parent, config.ManagedProfileFile), v1)
-	stage := filepath.Join(parent, publicationStagePrefix+"unproven")
+	stage := filepath.Join(parent, ".publication-unproven")
 	if err := os.Mkdir(stage, dirPerm); err != nil {
 		t.Fatal(err)
 	}
 	const backupName = "config.v1-1.bak"
-	writeOwnershipFixture(t, filepath.Join(dir, backupName), []byte(`{"version":1,"profiles":{"different":{}}}`))
+	writeOwnershipFixture(t, filepath.Join(dir, backupName), v1)
 	marker := filepath.Join(stage, backupName+retirementSuffix)
 	if err := os.Link(active, marker); err != nil {
+		t.Fatal(err)
+	}
+	anchoredStage := filepath.Join(dir, config.OwnedProfileDirPrefix+"123")
+	writeOwnershipFixture(t, filepath.Join(anchoredStage, config.ManagedProfileFile), v1)
+	if err := stageProfileAuthority(anchoredStage, filepath.Join(dir, config.OwnedProfileStagePrefix+filepath.Base(anchoredStage)),
+		filepath.Join(anchoredStage, config.OwnedProfileSeal)); err != nil {
+		t.Fatal(err)
+	}
+	journalDir := filepath.Join(anchoredStage, config.OwnedProfileMarker)
+	if err := os.Mkdir(journalDir, dirPerm); err != nil {
+		t.Fatal(err)
+	}
+	unrecorded := filepath.Join(journalDir, backupName+retirementSuffix)
+	if err := os.Link(active, unrecorded); err != nil {
 		t.Fatal(err)
 	}
 	cfg, err := config.LoadWritableProfileConfigIn(dir, true)
@@ -645,13 +662,14 @@ func TestV1RetirementLeavesHardLinkedSourceUntouched(t *testing.T) {
 		t.Fatalf("load v1 profiles: %v", err)
 	}
 	journal := v1RetirementJournal{active: active, owned: t.TempDir(), profiles: cfg}
-	if warning := journal.prepareMigration(journal.owned); !strings.Contains(warning, "retained") {
+	if warning := journal.prepareMigration(func() error { return nil }); !strings.Contains(warning, "retained") {
 		t.Fatalf("hard-linked v1 config must retain a recovery file: %s", warning)
 	}
 	if got, err := os.ReadFile(alias); err != nil || !bytes.Equal(got, v1) {
 		t.Fatalf("hard link was modified: %v", err)
 	}
 	assertOwnershipFixture(t, marker, v1)
+	assertOwnershipFixture(t, unrecorded, v1)
 }
 
 func TestManagedMutationKeepsExternalTokenNamedLikeRetirementMarker(t *testing.T) {
@@ -671,11 +689,12 @@ func TestManagedMutationKeepsExternalTokenNamedLikeRetirementMarker(t *testing.T
 					t.Fatal(err)
 				}
 				raw := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":"https://gateway.example","token_source":{"type":"token_file","path":%q}}}}`, name)
-				owned := filepath.Join(dir, config.OwnedProfileDirPrefix+"fixture")
+				owned := filepath.Join(dir, config.OwnedProfileDirPrefix+"123")
 				if err := os.MkdirAll(filepath.Join(owned, config.OwnedProfileMarker), dirPerm); err != nil {
 					t.Fatal(err)
 				}
 				writeOwnershipFixture(t, filepath.Join(owned, config.ManagedProfileFile), []byte(raw))
+				linkPublicationFixture(t, owned)
 				legacy := &Store{dir: dir}
 				if active == "different inode" {
 					if err := legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}}); err != nil {
@@ -837,6 +856,7 @@ func TestManagedRemoveRejectsSymlinkedCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeOwnershipFixture(t, filepath.Join(copied, config.ManagedProfileFile), raw)
+	linkPublicationFixture(t, copied)
 	snap, err = copyStore.Snapshot("target", true)
 	if err != nil || !snap.Exists {
 		t.Fatalf("select copied profile: %v", err)
@@ -1060,7 +1080,7 @@ func TestManagedKeychainFallbackPolicy(t *testing.T) {
 }
 
 func TestManagedImportRejectsMissingMasterKey(t *testing.T) {
-	for _, location := range []string{"file", "file with available Keychain", "Keychain"} {
+	for _, location := range []string{"file", "file with orphaned entry", "file with available Keychain", "Keychain"} {
 		t.Run(location, func(t *testing.T) {
 			keychain := &fixtureKeychain{entries: map[string][]byte{}}
 			store := NewManagedStore(t.TempDir(), nil)
@@ -1080,6 +1100,13 @@ func TestManagedImportRejectsMissingMasterKey(t *testing.T) {
 				t.Fatalf("read first profile: %v", err)
 			}
 			ref := cfg.Profiles["existing"].TokenSource
+			if location == "file with orphaned entry" {
+				delete(cfg.Profiles, "existing")
+				cfg.CurrentProfile = ""
+				if write := store.persist(cfg, nil); !write.committed || write.err != nil {
+					t.Fatalf("leave ciphertext without a profile: %v", write.err)
+				}
+			}
 			configPath := filepath.Join(store.dir, cfg.WriteFile())
 			before, err := os.ReadFile(configPath)
 			if err != nil {

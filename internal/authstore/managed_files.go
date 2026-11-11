@@ -206,7 +206,7 @@ func (s *ManagedStore) masterKeyForWrite(cfg *config.ProfileConfig) (key [32]byt
 	fileMissing := errors.Is(fileErr, fs.ErrNotExist)
 	keychainMissing := errors.Is(err, fs.ErrNotExist)
 	if fileMissing || keychainMissing {
-		if checkErr := s.checkMissingMasterKeys(fileMissing, keychainMissing); checkErr != nil {
+		if checkErr := s.checkMissingMasterKeys(cfg, fileMissing, keychainMissing); checkErr != nil {
 			return key, 0, checkErr
 		}
 	}
@@ -235,7 +235,7 @@ func (s *ManagedStore) masterKeyForWrite(cfg *config.ProfileConfig) (key [32]byt
 
 // Check the on-disk headers, including ciphertext restored without a profile.
 // Imports hold the write lock throughout this check and key initialization.
-func (s *ManagedStore) checkMissingMasterKeys(fileMissing, keychainMissing bool) error {
+func (s *ManagedStore) checkMissingMasterKeys(cfg *config.ProfileConfig, fileMissing, keychainMissing bool) error {
 	root, err := openCredentialRoot(s.dir)
 	if err != nil {
 		return err
@@ -249,7 +249,15 @@ func (s *ManagedStore) checkMissingMasterKeys(fileMissing, keychainMissing bool)
 		if !strings.EqualFold(filepath.Ext(entry.Name()), ".enc") {
 			continue
 		}
-		blob, err := readPrivateFile(root, filepath.Join(credentialsDir, entry.Name()), maxManagedToken+64)
+		name := filepath.Join(credentialsDir, entry.Name())
+		external, err := externalEncryptedFile(cfg, s.dir, entry.Name())
+		if err != nil {
+			return err
+		}
+		if external {
+			continue
+		}
+		blob, err := readPrivateFile(root, name, maxManagedToken+64)
 		if err != nil {
 			return err
 		}
@@ -261,6 +269,19 @@ func (s *ManagedStore) checkMissingMasterKeys(fileMissing, keychainMissing bool)
 		}
 	}
 	return nil
+}
+
+func externalEncryptedFile(cfg *config.ProfileConfig, dir, name string) (bool, error) {
+	for _, profile := range cfg.Profiles {
+		if profile == nil || profile.TokenSource == nil {
+			continue
+		}
+		ref := profile.TokenSource
+		if ref.Type == "managed_store" && ref.Backend == BackendEncryptedFile && strings.EqualFold(ref.Entry+".enc", name) {
+			return false, nil
+		}
+	}
+	return cfg.ReferencesTokenFile(filepath.Join(dir, credentialsDir, name))
 }
 
 func ensurePrivateDir(path string) error {

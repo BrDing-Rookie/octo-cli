@@ -102,6 +102,21 @@ func matchingMailBindings(keys []string, robotID, spaceID, botToken, apiOrigin s
 func (s *Store) mailCredPath() string    { return filepath.Join(s.dir, mailCredFile) }
 func (s *Store) mailPendingPath() string { return filepath.Join(s.dir, mailPendingFile) }
 
+// CheckMailAuthorizationStorage checks the local destinations before a server
+// creates or consumes a device code. Mutations recheck ownership under the lock.
+func (s *Store) CheckMailAuthorizationStorage() error {
+	lock, err := s.lockProfiles(mailPendingFile, mailCredFile, saltFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+	if _, err := s.loadPendingMailAuthorizations(); err != nil {
+		return err
+	}
+	_, err = s.loadMailTokens()
+	return err
+}
+
 // PendingMailAuthorization is the local proof material for an in-progress
 // device flow. DeviceCode and CodeVerifier are secrets and are only persisted
 // in the encrypted credential directory.

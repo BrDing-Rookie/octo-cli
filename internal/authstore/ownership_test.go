@@ -27,6 +27,15 @@ func writeOwnershipFixture(t *testing.T, path string, data []byte) {
 	}
 }
 
+func linkPublicationFixture(t *testing.T, owned string) {
+	t.Helper()
+	seal := filepath.Join(owned, config.OwnedProfileSeal)
+	writeOwnershipFixture(t, seal, []byte(filepath.Base(owned)+"\n"))
+	if err := os.Link(seal, filepath.Join(filepath.Dir(owned), config.OwnedProfileAnchor)); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func publishOwnershipFixture(t *testing.T, dir, reference string) *config.ProfileConfig {
 	t.Helper()
 	cfg, err := config.LoadWritableProfileConfigIn(dir, true)
@@ -265,12 +274,22 @@ func TestManagedMigrationStagingProcess(t *testing.T) {
 	}
 	writeOwnershipFixture(t, filepath.Join(parent, config.ManagedProfileFile),
 		[]byte(`{"version":1,"profiles":{"work":{"api_base_url":"https://gateway.example"}}}`))
-	staged, err := os.MkdirTemp(parent, publicationStagePrefix)
-	if err != nil {
+	staged := filepath.Join(parent, config.OwnedProfileMarker)
+	if err := os.Mkdir(staged, dirPerm); err != nil {
 		t.Fatal(err)
 	}
 	journal := v1RetirementJournal{active: filepath.Join(dir, configFile), owned: staged, profiles: cfg}
-	if warning := journal.prepareMigration(filepath.Join(parent, config.OwnedProfileMarker)); warning != "" {
+	if err := stageProfileAuthority(parent, filepath.Join(dir, config.OwnedProfileStagePrefix+filepath.Base(parent)), filepath.Join(parent, config.OwnedProfileSeal)); err != nil {
+		t.Fatal(err)
+	}
+	if warning := journal.prepareMigration(func() error {
+		raw, err := marshalProfileConfig(cfg)
+		if err != nil {
+			return err
+		}
+		_, err = writeManagedFile(filepath.Join(parent, config.ManagedProfileFile), raw)
+		return err
+	}); warning != "" {
 		t.Fatal(warning)
 	}
 	markers, err := filepath.Glob(filepath.Join(staged, "config.v1-*.bak.pending"))
@@ -398,4 +417,39 @@ func TestMailReadDoesNotCreateMissingSalt(t *testing.T) {
 		t.Fatal("encrypted data unexpectedly loaded without its salt")
 	}
 	assertOwnershipFixture(t, store.saltPath(), nil)
+}
+
+func TestManagedFirstImportIgnoresExternalEncryptedFilename(t *testing.T) {
+	for _, alias := range []bool{false, true} {
+		t.Run(fmt.Sprintf("alias=%t", alias), func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, credentialsDir, "provider.enc")
+			token := []byte("external-provider-token")
+			writeOwnershipFixture(t, path, token)
+			ref := path
+			if alias {
+				ref = filepath.Join(dir, "provider-link")
+				if err := os.Link(path, ref); err != nil {
+					t.Fatal(err)
+				}
+			}
+			publishOwnershipFixture(t, dir, ref)
+			store := NewManagedStore(dir, nil)
+			snap, err := store.Snapshot("new", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Import(snap, managedFixtureProfile(), "new-managed", BackendEncryptedFile); err != nil {
+				t.Fatalf("first import failed beside an external Token: %v", err)
+			}
+			assertOwnershipFixture(t, path, token)
+			got, err := store.Snapshot("new", true)
+			if err != nil || !got.Exists {
+				t.Fatalf("imported profile unavailable: %v", err)
+			}
+			if token, err := store.readEntry(got.Profile.TokenSource); err != nil || token != "new-managed" {
+				t.Fatalf("managed entry unreadable: %v", err)
+			}
+		})
+	}
 }

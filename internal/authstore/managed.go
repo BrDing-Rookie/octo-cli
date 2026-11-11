@@ -288,10 +288,16 @@ func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous 
 			_ = os.RemoveAll(dir) //nolint:errcheck // discard only our unpublished staging directory
 		}
 	}()
+	name := filepath.Base(dir)
 	path := filepath.Join(dir, config.ManagedProfileFile)
-	marker := filepath.Join(dir, config.OwnedProfileMarker)
-	if err := checkProfileWritePaths(cfg, dir, path, marker); err != nil {
-		return profileWrite{err: err}
+	journalDir := filepath.Join(dir, config.OwnedProfileMarker)
+	seal := filepath.Join(dir, config.OwnedProfileSeal)
+	stage := filepath.Join(s.dir, config.OwnedProfileStagePrefix+name)
+	anchor := filepath.Join(s.dir, config.OwnedProfileAnchor)
+	for _, target := range []string{dir, path, journalDir, seal, stage, anchor} {
+		if reserved, err := cfg.ReferencesTokenFile(target, previous); err != nil || reserved {
+			return profileWrite{err: errors.New("publication path may be a referenced Token file")}
+		}
 	}
 	if err := ensurePrivateDir(dir); err != nil {
 		return profileWrite{err: err}
@@ -299,32 +305,58 @@ func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous 
 	if committed, err := s.writeConfig(path, data); !committed || err != nil {
 		return profileWrite{err: err}
 	}
-	staged, err := os.MkdirTemp(dir, publicationStagePrefix)
-	if err != nil {
+	if err := stageProfileAuthority(dir, stage, seal); err != nil {
+		return profileWrite{err: err}
+	}
+	defer func() { _ = os.Remove(stage) }() //nolint:errcheck // a leftover staging link cannot replace the publication anchor
+	if err := os.Mkdir(journalDir, dirPerm); err != nil {
 		return profileWrite{err: err}
 	}
 	journal := v1RetirementJournal{
-		active: filepath.Join(s.dir, configFile), owned: staged,
+		active: filepath.Join(s.dir, configFile), owned: journalDir,
 		profiles: cfg, previous: previous,
 	}
-	warning := journal.prepareMigration(marker)
-	if cfg.V1Retirement != nil {
+	warning := journal.prepareMigration(func() error {
 		raw, err := marshalProfileConfig(cfg)
 		if err != nil {
-			return profileWrite{err: err}
+			return err
 		}
-		if committed, err := writeManagedFile(path, raw); !committed || err != nil {
-			return profileWrite{err: err}
-		}
-	}
-	// Publishing the directory makes the metadata and its recovery intent
-	// visible together. Only a published journal may change config.json.
-	published, err = replaceManagedFile(staged, marker)
-	if !published {
+		_, err = writeManagedFile(path, raw)
+		return err
+	})
+	if err := syncManagedDirectory(dir); err != nil {
 		return profileWrite{err: err}
 	}
-	cfg.SetPublishedFile(filepath.Join(filepath.Base(dir), config.ManagedProfileFile))
-	return profileWrite{committed: true, err: errors.Join(err, syncManagedDirectory(s.dir)), retirementWarning: warning}
+	// The non-replacing hard link is the publication point. Both the
+	// prepared metadata and the selected directory precede it on disk.
+	if err := os.Link(seal, anchor); err != nil {
+		return profileWrite{err: err}
+	}
+	published = true
+	cfg.SetPublishedFile(filepath.Join(name, config.ManagedProfileFile))
+	return profileWrite{committed: true, err: syncManagedDirectory(s.dir), retirementWarning: warning}
+}
+
+func stageProfileAuthority(dir, stage, seal string) error {
+	file, err := os.CreateTemp(dir, ".authority-")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(file.Name()) }() //nolint:errcheck // transient name before the authority is linked
+	_, err = file.WriteString(filepath.Base(dir) + "\n")
+	if err == nil {
+		err = file.Sync()
+	}
+	if err := errors.Join(err, file.Close()); err != nil {
+		return err
+	}
+	if err := os.Link(file.Name(), stage); err != nil {
+		return err
+	}
+	if err := os.Link(file.Name(), seal); err != nil {
+		return errors.Join(err, os.Remove(stage))
+	}
+	return syncManagedDirectory(filepath.Dir(stage))
 }
 
 func checkProfileWritePaths(cfg *config.ProfileConfig, paths ...string) error {

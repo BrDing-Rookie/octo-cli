@@ -255,14 +255,30 @@ func TestPhaseOneTokenDirectoryCannotPublishProfile(t *testing.T) {
 	phaseOneWrite(t, filepath.Join(dir, token), "provider-token")
 	phaseOneWrite(t, filepath.Join(dir, path), fmt.Sprintf(
 		`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1"}}}`, untrusted))
-	out, err := phaseOneRun("--profile", "work", "api", "GET", "/probe")
-	select {
-	case call := <-calls:
-		t.Fatalf("sent a request using a Token directory: %s", strings.Fields(call)[0])
-	default:
-	}
-	if err == nil {
-		t.Fatalf("ambiguous publication must fail profile resolution: %s", out)
+	for _, scenario := range []string{"missing original", "unreadable original", "copied authority"} {
+		t.Run(scenario, func(t *testing.T) {
+			original := filepath.Join(dir, "config.json")
+			switch scenario {
+			case "missing original":
+				if err := os.Remove(original); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable original":
+				phaseOneWrite(t, original, "{")
+			case "copied authority":
+				phaseOneWrite(t, filepath.Join(dir, ".managed-profile"), candidate+"\n")
+				phaseOneWrite(t, filepath.Join(dir, candidate, ".authority"), candidate+"\n")
+			}
+			out, err := phaseOneRun("--profile", "work", "api", "GET", "/probe")
+			select {
+			case call := <-calls:
+				t.Fatalf("sent a request using a Token directory: %s", strings.Fields(call)[0])
+			default:
+			}
+			if err == nil {
+				t.Fatalf("ambiguous publication must fail profile resolution: %s", out)
+			}
+		})
 	}
 }
 

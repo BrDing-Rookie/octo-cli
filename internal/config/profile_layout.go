@@ -14,8 +14,15 @@ import (
 const (
 	// OwnedProfileDirPrefix names directories allocated exclusively by the CLI.
 	OwnedProfileDirPrefix = ".octo-managed-profile-"
-	// OwnedProfileMarker publishes a staged configuration after it is durable.
-	OwnedProfileMarker = ".published"
+	// OwnedProfileMarker holds the journal for the selected store.
+	OwnedProfileMarker = ".retirement"
+	// OwnedProfileAnchor is the single publication point at the config root.
+	OwnedProfileAnchor = ".managed-profile"
+	// OwnedProfileSeal is the immutable file that the anchor hard-links to.
+	OwnedProfileSeal = ".authority"
+	// OwnedProfileStagePrefix names temporary root links before publication.
+	OwnedProfileStagePrefix = ".managed-profile-stage-"
+	legacyPublishedMarker   = ".published"
 )
 
 func loadProfileConfigIn(dir string, allowLegacy, writable bool) (*ProfileConfig, error) {
@@ -31,34 +38,20 @@ func loadProfileConfigIn(dir string, allowLegacy, writable bool) (*ProfileConfig
 }
 
 func loadPublishedProfiles(dir string) (*ProfileConfig, error) {
-	entries, err := os.ReadDir(dir)
+	anchor := filepath.Join(dir, OwnedProfileAnchor)
+	name, err := readPublicationAnchor(anchor)
 	if os.IsNotExist(err) {
-		return nil, nil
+		unverified := rejectUnverifiedPublications(dir)
+		name, err = readPublicationAnchor(anchor)
+		if os.IsNotExist(err) {
+			return nil, unverified
+		}
 	}
 	if err != nil {
 		return nil, err
 	}
-	var file string
-	for _, entry := range entries {
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), OwnedProfileDirPrefix) {
-			continue
-		}
-		marker, err := os.Lstat(filepath.Join(dir, entry.Name(), OwnedProfileMarker))
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return nil, err
-		}
-		if !marker.IsDir() || file != "" {
-			return nil, errors.New("invalid or ambiguous managed profile ownership")
-		}
-		file = filepath.Join(entry.Name(), ManagedProfileFile)
-	}
-	if file == "" {
-		return nil, nil
-	}
-	if err := checkPublishedProfileOwnership(dir, file); err != nil {
+	file := filepath.Join(name, ManagedProfileFile)
+	if err := checkPublishedProfileOwnership(dir, name); err != nil {
 		return nil, err
 	}
 	cfg, err := loadProfileConfigFile(dir, file, false, true)
@@ -68,16 +61,80 @@ func loadPublishedProfiles(dir string) (*ProfileConfig, error) {
 	return cfg, err
 }
 
-func checkPublishedProfileOwnership(dir, file string) error {
-	// During migration the original v1 file may still be active. Its
-	// Token references can disprove ownership of a proposed publication.
-	// An absent, retired or damaged original cannot authorize a fallback.
+func readPublicationAnchor(anchor string) (string, error) {
+	info, err := os.Lstat(anchor)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 128 {
+		return "", errors.New("invalid managed profile publication anchor")
+	}
+	raw, err := os.ReadFile(anchor)
+	if err != nil {
+		return "", fmt.Errorf("read managed profile publication anchor: %v", err)
+	}
+	name, newline := strings.CutSuffix(string(raw), "\n")
+	suffix, prefix := strings.CutPrefix(name, OwnedProfileDirPrefix)
+	if !newline || !prefix || suffix == "" || strings.Trim(suffix, "0123456789") != "" {
+		return "", errors.New("invalid managed profile publication directory")
+	}
+	parent := filepath.Join(filepath.Dir(anchor), name)
+	parentInfo, err := os.Lstat(parent)
+	if err != nil || !parentInfo.IsDir() {
+		return "", errors.New("managed profile publication directory is missing or invalid")
+	}
+	seal, err := os.Lstat(filepath.Join(parent, OwnedProfileSeal))
+	if err != nil || !seal.Mode().IsRegular() || !os.SameFile(info, seal) {
+		return "", errors.New("managed profile publication has no matching authority file")
+	}
+	return name, nil
+}
+
+func rejectUnverifiedPublications(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), OwnedProfileDirPrefix) {
+			continue
+		}
+		parent := filepath.Join(dir, entry.Name())
+		_, err := os.Lstat(filepath.Join(parent, legacyPublishedMarker))
+		if !os.IsNotExist(err) {
+			return errors.New("previous managed profile publication has no verified authority")
+		}
+		seal, err := os.Lstat(filepath.Join(parent, OwnedProfileSeal))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil || !seal.Mode().IsRegular() {
+			return errors.New("invalid managed profile authority")
+		}
+		stage, err := os.Lstat(filepath.Join(dir, OwnedProfileStagePrefix+entry.Name()))
+		if err != nil || !stage.Mode().IsRegular() || !os.SameFile(stage, seal) {
+			return errors.New("managed profile publication anchor is missing")
+		}
+	}
+	return nil
+}
+
+func checkPublishedProfileOwnership(dir, name string) error {
+	// The original v1 configuration can disqualify even an anchored store
+	// when it reserves one of its paths for an external provider.
 	old, err := loadProfileConfigFile(dir, oldProfileFile, true, false)
 	if err != nil || old == nil {
 		return nil
 	}
-	profileDir := filepath.Join(dir, filepath.Dir(file))
-	for _, path := range []string{profileDir, filepath.Join(profileDir, OwnedProfileMarker), filepath.Join(dir, file)} {
+	profileDir := filepath.Join(dir, name)
+	for _, path := range []string{
+		filepath.Join(dir, OwnedProfileAnchor), profileDir,
+		filepath.Join(profileDir, OwnedProfileSeal), filepath.Join(profileDir, OwnedProfileMarker),
+		filepath.Join(profileDir, ManagedProfileFile),
+	} {
 		reserved, err := old.ReferencesTokenFile(path)
 		if err != nil {
 			return err
