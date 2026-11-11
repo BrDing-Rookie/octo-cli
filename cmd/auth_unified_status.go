@@ -1,10 +1,8 @@
 package cmd
 
 import (
-	"os"
 	"strings"
 
-	"github.com/Mininglamp-OSS/octo-cli/internal/client"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
@@ -56,19 +54,7 @@ func runUnifiedAuthStatus(f *cmdutil.Factory, readToken func(*config.ProfileConf
 		}
 	}
 
-	// Environment bearers are relevant to redaction even when a local Profile
-	// supplies the credential or the canonical variable shadows the Bot alias.
-	bearers := []string{
-		token,
-		strings.TrimSpace(os.Getenv(config.EnvToken)),
-		strings.TrimSpace(os.Getenv(config.EnvBotToken)),
-	}
-	redact := func(value string) string {
-		for _, bearer := range bearers {
-			value = client.RedactBearer(value, bearer)
-		}
-		return value
-	}
+	redact := unifiedProfileRedactor(token)
 	payload := map[string]any{
 		"status":              status,
 		"profile":             redact(name),

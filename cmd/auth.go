@@ -15,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
+	"github.com/Mininglamp-OSS/octo-cli/internal/client"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
@@ -453,6 +454,7 @@ func listUnifiedProfiles(f *cmdutil.Factory) error {
 	}
 	sort.Strings(names)
 	entries := make([]map[string]any, 0, len(names))
+	redact := unifiedProfileRedactor("")
 	for _, name := range names {
 		p := profiles.Profiles[name]
 		// An invalid origin can contain credentials or a query secret.
@@ -461,13 +463,29 @@ func listUnifiedProfiles(f *cmdutil.Factory) error {
 			origin = ""
 		}
 		entries = append(entries, map[string]any{
-			"profile": name, "api_base_url": origin, "space_id": p.SpaceID,
+			"profile": redact(name), "api_base_url": redact(origin), "space_id": redact(p.SpaceID),
 		})
 	}
 	return emitJSON(f, map[string]any{
 		"profiles": entries, "count": len(entries),
-		"current_profile": nullableString(profiles.CurrentProfile),
+		"current_profile": nullableString(redact(profiles.CurrentProfile)),
 	})
+}
+
+// unifiedProfileRedactor masks known bearers without resolving credentials.
+// Both environment aliases matter even when a profile or OCTO_TOKEN wins.
+func unifiedProfileRedactor(token string) func(string) string {
+	bearers := []string{
+		token,
+		strings.TrimSpace(os.Getenv(config.EnvToken)),
+		strings.TrimSpace(os.Getenv(config.EnvBotToken)),
+	}
+	return func(value string) string {
+		for _, bearer := range bearers {
+			value = client.RedactBearer(value, bearer)
+		}
+		return value
+	}
 }
 
 // promptBotID asks for the bot id interactively when no selector was given and
