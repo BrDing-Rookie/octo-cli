@@ -100,7 +100,7 @@ func loadProfileConfigFile(dir, name string, allowLegacy, writable bool) (*Profi
 	path := filepath.Join(dir, name)
 	info, err := os.Lstat(path)
 	if os.IsNotExist(err) {
-		return nil, nil
+		return nil, checkProfileDirectory(dir)
 	}
 	if err != nil {
 		return nil, err
@@ -152,6 +152,36 @@ func decodeProfileConfig(name string, raw []byte, allowLegacy bool) (*ProfileCon
 		return nil, fmt.Errorf("%s must contain a profiles object", name)
 	}
 	return cfg, nil
+}
+
+// checkProfileDirectory distinguishes an absent path from a dangling symlink
+// that made the config lookup return ENOENT. Missing directory components are
+// valid as long as the nearest existing ancestor resolves to a directory.
+func checkProfileDirectory(dir string) error {
+	for {
+		info, err := os.Lstat(dir)
+		if os.IsNotExist(err) {
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				return err
+			}
+			dir = parent
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			info, err = os.Stat(dir)
+			if err != nil {
+				return err
+			}
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("profile directory path must resolve to a directory")
+		}
+		return nil
+	}
 }
 
 // Directory returns the directory from which this profile config was loaded.
