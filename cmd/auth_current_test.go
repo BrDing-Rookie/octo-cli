@@ -381,6 +381,8 @@ func TestUnifiedAuthCurrentRejectsInvalidTimestamp(t *testing.T) {
 		{"timezone hour", `"2026-11-04T06:00:00+24:00"`},
 		{"timezone minute", `"2026-11-04T06:00:00+08:60"`},
 		{"escaped negative timezone minute", `"2026-11-04T06:00:00\u002d08:\u00360"`},
+		{"single-digit hour", `"2026-11-04T6:00:00Z"`},
+		{"comma fraction", `"2026-11-04T06:00:00,5Z"`},
 	} {
 		t.Run(timestamp.name, func(t *testing.T) {
 			for _, tc := range []struct {
@@ -467,8 +469,8 @@ func TestUnifiedAuthCurrentAcceptsEscapedTimestamps(t *testing.T) {
 	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
 	store := authstore.NewManagedStore(dir, nil)
 	candidate := authCurrentFixtureCandidateToken
-	const escaped = `"2026-11-04T06:00:00\u002b08:00"`
-	const timestamp = `"2026-11-04T06:00:00+08:00"`
+	const escaped = `"2026-11-04T06:00:00.5\u002b08:00"`
+	const timestamp = `"2026-11-04T06:00:00.5+08:00"`
 	reply := authCurrentFixtureSuccess("candidate-id", "owner", "space")
 	reply.body = strings.NewReplacer(
 		`"2026-11-04T06:00:00Z"`, escaped,

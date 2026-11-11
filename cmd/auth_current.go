@@ -27,7 +27,7 @@ import (
 const authCurrentPath = "/v1/auth/tokens/_current"
 
 var authPermissionField = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+|\*)$`)
-var authInvalidOffsetMinute = regexp.MustCompile(`[+-]\d{2}:[6-9]\d$`)
+var authTimestampPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$`)
 
 type authTokenSelf struct {
 	Token       authTokenMetadata `json:"token"`
@@ -67,9 +67,9 @@ func (timestamp *authTimestamp) UnmarshalJSON(data []byte) error {
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-	// Go's fallback parser normalizes a timezone minute of 60.
-	if authInvalidOffsetMinute.MatchString(value) {
-		return errors.New("invalid timestamp timezone minute")
+	// Go's fallback parser accepts forms outside RFC 3339.
+	if !authTimestampPattern.MatchString(value) {
+		return errors.New("invalid RFC 3339 timestamp")
 	}
 	if err := timestamp.UnmarshalText([]byte(value)); err != nil {
 		return err

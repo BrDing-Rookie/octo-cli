@@ -90,7 +90,7 @@ func (s *ManagedStore) writeEncrypted(entry, token string) error {
 	if err != nil {
 		return err
 	}
-	committed, err := writeManagedFile(s.encryptedPath(entry), append([]byte{location}, blob...))
+	committed, err := writeManagedFile(s.encryptedPath(entry), append([]byte{location}, blob...), replaceManagedFile)
 	if committed && err != nil {
 		return errors.Join(err, os.Remove(s.encryptedPath(entry)))
 	}
@@ -156,7 +156,7 @@ func (s *ManagedStore) masterKeyForWrite() (key [32]byte, location byte, err err
 	key, err = s.masterKey(keyInFile)
 	if errors.Is(err, fs.ErrNotExist) {
 		if _, err = rand.Read(key[:]); err == nil {
-			_, err = writeManagedFile(s.masterKeyPath(), key[:])
+			_, err = writeManagedFile(s.masterKeyPath(), key[:], replaceManagedFile)
 		}
 	}
 	return key, keyInFile, err
@@ -229,7 +229,7 @@ func openManagedLock(ctx context.Context, path string) (*os.File, error) {
 
 // writeManagedFile returns true once replacement is visible, even if a
 // subsequent directory sync fails.
-func writeManagedFile(path string, data []byte) (bool, error) {
+func writeManagedFile(path string, data []byte, replace func(from, to string) (bool, error)) (bool, error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".managed-*")
 	if err != nil {
@@ -247,7 +247,14 @@ func writeManagedFile(path string, data []byte) (bool, error) {
 	if err := errors.Join(err, tmp.Close()); err != nil {
 		return false, err
 	}
-	return replaceManagedFile(tmp.Name(), path)
+	return replace(tmp.Name(), path)
+}
+
+func replaceManagedConfig(ctx context.Context, from, to string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	return replaceManagedFile(from, to)
 }
 
 func secureManagedTemp(tmp *os.File) error {

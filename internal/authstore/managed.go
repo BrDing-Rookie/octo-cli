@@ -30,10 +30,10 @@ var ErrProfileConflict = errors.New("profile changed while validating the creden
 
 // ManagedStore owns the versioned configuration and its managed entries.
 type ManagedStore struct {
-	dir         string
-	allowLegacy bool
-	keychain    Keychain
-	writeConfig func(string, []byte) (bool, error)
+	dir           string
+	allowLegacy   bool
+	keychain      Keychain
+	replaceConfig func(context.Context, string, string) (bool, error)
 }
 
 // ProfileSnapshot captures the target before online verification. Its private
@@ -79,7 +79,7 @@ func NewManagedStore(dir string, keychain Keychain) *ManagedStore {
 	if keychain == nil {
 		keychain = unavailableKeychain{}
 	}
-	return &ManagedStore{dir: dir, keychain: keychain, writeConfig: writeManagedFile}
+	return &ManagedStore{dir: dir, keychain: keychain, replaceConfig: replaceManagedConfig}
 }
 
 // Snapshot reads only metadata. A missing target has Exists=false, while an
@@ -127,7 +127,8 @@ func (s *ManagedStore) Import(snap ProfileSnapshot, profile config.Profile, toke
 	return s.ImportContext(context.Background(), snap, profile, token, backend)
 }
 
-// ImportContext can be cancelled until the local write transaction starts.
+// ImportContext checks for cancellation up to the atomic replacement of the
+// Profile configuration. Once replaced, it keeps the published credential.
 func (s *ManagedStore) ImportContext(ctx context.Context, snap ProfileSnapshot, profile config.Profile, token, backend string) (CommitResult, error) {
 	if err := ctx.Err(); err != nil {
 		return CommitResult{}, err
@@ -145,7 +146,7 @@ func (s *ManagedStore) ImportContext(ctx context.Context, snap ProfileSnapshot, 
 		if cfg.CurrentProfile == "" {
 			cfg.CurrentProfile = snap.baseline.name
 		}
-		committed, err := s.persist(cfg)
+		committed, err := s.persist(ctx, cfg)
 		if !committed {
 			return CommitResult{}, errors.Join(err, s.removeEntry(ref))
 		}
@@ -177,7 +178,8 @@ func validateImport(profile config.Profile, token, backend string) error {
 
 // Remove deletes the selected reference before cleaning up its managed entry.
 func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
-	return s.modify(context.Background(), snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
+	ctx := context.Background()
+	return s.modify(ctx, snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
 		if snap.baseline.original == nil {
 			return CommitResult{}, errors.New("selected profile does not exist")
 		}
@@ -185,7 +187,7 @@ func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
 		if cfg.CurrentProfile == snap.baseline.name {
 			cfg.CurrentProfile = ""
 		}
-		committed, err := s.persist(cfg)
+		committed, err := s.persist(ctx, cfg)
 		if !committed {
 			return CommitResult{}, err
 		}
@@ -249,12 +251,17 @@ func (s *ManagedStore) loadWritableConfig() (*config.ProfileConfig, error) {
 	return config.LoadProfileConfigIn(s.dir, false)
 }
 
-func (s *ManagedStore) persist(cfg *config.ProfileConfig) (bool, error) {
+func (s *ManagedStore) persist(ctx context.Context, cfg *config.ProfileConfig) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	raw, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return false, err
 	}
-	return s.writeConfig(filepath.Join(s.dir, configFile), append(raw, '\n'))
+	return writeManagedFile(filepath.Join(s.dir, configFile), append(raw, '\n'), func(from, to string) (bool, error) {
+		return s.replaceConfig(ctx, from, to)
+	})
 }
 
 func (s *ManagedStore) afterCommit(cfg *config.ProfileConfig, old *config.Profile, syncErr error) CommitResult {
