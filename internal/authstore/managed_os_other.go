@@ -9,6 +9,8 @@ import (
 
 func syncManagedDirectory(string) error { return nil }
 
+func checkAtomicReplaceTarget(string) error { return nil }
+
 func openExistingManagedFile(string) (*os.File, error) {
 	return nil, errors.New("managed credential writes are unavailable on this platform")
 }

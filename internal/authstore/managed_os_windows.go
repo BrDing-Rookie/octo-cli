@@ -100,6 +100,33 @@ func moveManagedFile(from, to string, flags uint32) (bool, error) {
 // Managed file publication requests write-through in MoveFileEx.
 func syncManagedDirectory(string) error { return nil }
 
+func checkAtomicReplaceTarget(path string) error {
+	native, err := managedWindowsPath(path)
+	if err != nil {
+		return err
+	}
+	name, err := windows.UTF16PtrFromString(native)
+	if err != nil {
+		return err
+	}
+	// os.Rename uses MoveFileEx with replacement. Probe delete access and
+	// exclusive sharing without changing the destination directory entry.
+	handle, err := windows.CreateFile(name, windows.DELETE|windows.FILE_READ_ATTRIBUTES,
+		0, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var info windows.ByHandleFileInformation
+	err = windows.GetFileInformationByHandle(handle, &info)
+	if err == nil && info.FileAttributes&windows.FILE_ATTRIBUTE_READONLY != 0 {
+		err = windows.ERROR_ACCESS_DENIED
+	}
+	return errors.Join(err, windows.CloseHandle(handle))
+}
+
 func protectManagedPath(path string, _ os.FileInfo, _ os.FileMode) error {
 	path, err := managedWindowsPath(path)
 	if err != nil {

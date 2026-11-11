@@ -55,6 +55,10 @@ func syncManagedDirectory(path string) error {
 	return errors.Join(dir.Sync(), dir.Close())
 }
 
+// Replacing a file on Unix does not require delete access on the file or
+// exclusive sharing. Mail separately checks that its directory is writable.
+func checkAtomicReplaceTarget(string) error { return nil }
+
 func protectManagedPath(path string, info os.FileInfo, perm os.FileMode) error {
 	if err := checkManagedACL(path); err != nil {
 		return err

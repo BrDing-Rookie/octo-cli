@@ -116,6 +116,11 @@ func (s *Store) CheckMailAuthorizationStorage() error {
 	if _, err := s.loadMailTokens(); err != nil {
 		return err
 	}
+	for _, target := range []string{s.mailCredPath(), s.mailPendingPath()} {
+		if err := checkAtomicReplaceTarget(target); err != nil {
+			return fmt.Errorf("check Mail authorization storage can replace %s: %w", filepath.Base(target), err)
+		}
+	}
 	// The advisory lock and existing ciphertext can remain accessible when
 	// the directory ACL disallows creating the temp file used by atomicWrite.
 	probe, err := os.CreateTemp(s.dir, ".tmp-*")

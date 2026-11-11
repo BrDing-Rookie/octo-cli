@@ -90,13 +90,19 @@ managed credential references keep their original base.
 
 Unified, current Bot and Mail credential writes share `.managed.lock`. They
 protect referenced Token paths and aliases from conflicting writes. Mail
-checks its local storage and tests temp-file creation before starting or exchanging a device code and
-rechecks write destinations under the lock. Mail and Bot reads leave a
+checks its local storage and tests temp-file creation before starting or
+exchanging a device code. On Windows it also checks existing destinations
+for delete access, exclusive sharing and the read-only attribute. Writes
+recheck destination ownership under the lock. Mail and Bot reads leave a
 missing encryption salt alone. The encrypted-file backend leaves an external
 `master.key` alone and excludes known external Token files from its scan for
 existing ciphertext. On macOS, Keychain creation and
 cleanup also protect locator files. Cleanup leaves an obsolete Keychain item
 in place when a profile still uses its locator path as an external Token.
+When the encrypted-file backend cannot use the system Keychain, it stores
+the plaintext `master.key` alongside the ciphertext under `credentials/`.
+A whole-directory backup, sync or accidental commit can expose both and
+allow offline decryption.
 
 When migrating directly from the original v1 configuration, the CLI verifies
 the source inode and bytes, archives them as `config.v1-*.bak`, and publishes
@@ -115,9 +121,11 @@ migration interrupted without a record may require manual recovery before
 using the Bot CLI.
 
 **Trust boundary: the OS user account.** Any process running as the same user
-can run `octo-cli` and therefore decrypt the store; the encryption defends against
-off-machine leakage (accidental commit, backup, cloud sync), not a co-resident
-process. Isolate mutually-distrusting bots with separate OS users or separate
+can run `octo-cli` and therefore decrypt the store. Keychain-backed storage
+protects an off-machine copy of the CLI directory when the Keychain data stays
+on the source machine. The legacy Bot store's machine-bound key protects an
+off-machine copy when the source machine ID is unavailable to its recipient.
+Isolate mutually-distrusting bots with separate OS users or separate
 `OCTO_CONFIG_DIR` values. The CLI's anti-misuse guards (ambiguous selection is a
 hard error, `--bot-id` assertion, `identity` echoed on every response) prevent
 *accidental* wrong-identity use, not a malicious same-user process.
