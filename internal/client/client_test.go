@@ -51,55 +51,6 @@ func TestDo_SetsAuthAndSpaceHeaders(t *testing.T) {
 	}
 }
 
-func TestDo_LoopSelectsPublicAPIContract(t *testing.T) {
-	t.Parallel()
-
-	var gotAccept string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAccept = r.Header.Get("Accept")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := newTestClient(srv)
-	_, err := c.Do(context.Background(), &Request{
-		Service: "loop",
-		Method:  http.MethodGet,
-		Path:    "/fleet/api/v1/workspaces",
-	})
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if gotAccept != loopAcceptMediaType {
-		t.Fatalf("Accept = %q, want %q", gotAccept, loopAcceptMediaType)
-	}
-}
-
-func TestDo_LoopPreservesExplicitAccept(t *testing.T) {
-	t.Parallel()
-
-	var gotAccept string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAccept = r.Header.Get("Accept")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := newTestClient(srv)
-	_, err := c.Do(context.Background(), &Request{
-		Service: "loop",
-		Method:  http.MethodGet,
-		Path:    "/fleet/api/v1/workspaces",
-		Headers: map[string]string{"Accept": "application/vnd.octo+json"},
-	})
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if gotAccept != "application/vnd.octo+json" {
-		t.Fatalf("Accept = %q, want application/vnd.octo+json", gotAccept)
-	}
-}
-
 func TestDo_SuppressSpaceHeader(t *testing.T) {
 	var sawSpaceHeader bool
 	var gotSpace string
@@ -183,7 +134,7 @@ func TestDo_BuildsQueryString(t *testing.T) {
 func TestDo_BackendErrorParsed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
-		w.Write([]byte(`{"error":{"code":"MATTER_NOT_FOUND","message":"matter not found"}}`))
+		w.Write([]byte(`{"error":{"code":"NOT_FOUND","message":"matter not found"}}`))
 	}))
 	defer srv.Close()
 
@@ -196,41 +147,11 @@ func TestDo_BackendErrorParsed(t *testing.T) {
 	if ee == nil {
 		t.Fatalf("error is not *ExitError: %T", err)
 	}
-	if ee.Code != "MATTER_NOT_FOUND" {
+	if ee.Code != "NOT_FOUND" {
 		t.Errorf("code = %q", ee.Code)
 	}
 	if ee.Type != "api_error" {
 		t.Errorf("type = %q", ee.Type)
-	}
-}
-
-func TestDo_SelectsBackendErrorProtocolByService(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`{"error":{"code":"BRAND_NEW_CODE","message":"bad thing","hint":"do better"}}`))
-	}))
-	defer srv.Close()
-
-	for _, tc := range []struct {
-		service  string
-		wantType string
-		wantExit int
-	}{
-		{service: "loop", wantType: "validation", wantExit: 2},
-		{service: "thread", wantType: "api_error", wantExit: 1},
-	} {
-		t.Run(tc.service, func(t *testing.T) {
-			c := newTestClient(srv)
-			_, err := c.Do(context.Background(), &Request{Service: tc.service, Method: http.MethodGet, Path: "/error"})
-			ee := output.AsExitError(err)
-			if ee == nil {
-				t.Fatalf("Do error = %v, want ExitError", err)
-			}
-			if ee.Type != tc.wantType || ee.ExitCode() != tc.wantExit || ee.Hint != "do better" {
-				t.Fatalf("error = %+v (exit %d), want type=%s exit=%d with server hint",
-					ee, ee.ExitCode(), tc.wantType, tc.wantExit)
-			}
-		})
 	}
 }
 
@@ -514,7 +435,7 @@ func TestDo_RedactsWriteOnlyJSONFields(t *testing.T) {
 	}
 }
 
-func TestDo_ServiceURLRouting(t *testing.T) {
+func TestDo_GatewayPathRouting(t *testing.T) {
 	// With the unified API base URL model, all services route to APIBaseURL.
 	var hitService string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -528,19 +449,19 @@ func TestDo_ServiceURLRouting(t *testing.T) {
 	c := New(cfg, cred, Options{})
 	c.httpClient = srv.Client()
 
-	_, _ = c.Do(context.Background(), &Request{Service: "matters", Method: "GET", Path: "/api/v1/matters"})
-	if hitService != "/api/v1/matters" {
-		t.Errorf("matters service should route to gateway, got path %q", hitService)
+	_, _ = c.Do(context.Background(), &Request{Method: "GET", Path: "/v1/records"})
+	if hitService != "/v1/records" {
+		t.Errorf("records should route to gateway, got path %q", hitService)
 	}
 
-	_, _ = c.Do(context.Background(), &Request{Service: "dmworkim", Method: "GET", Path: "/v1/bot/info"})
-	if hitService != "/v1/bot/info" {
-		t.Errorf("dmworkim service should route to gateway, got path %q", hitService)
+	_, _ = c.Do(context.Background(), &Request{Method: "GET", Path: "/v1/info"})
+	if hitService != "/v1/info" {
+		t.Errorf("info should route to gateway, got path %q", hitService)
 	}
 
 	_, _ = c.Do(context.Background(), &Request{Method: "GET", Path: "/fallback"})
 	if hitService != "/fallback" {
-		t.Errorf("default service should route to gateway, got path %q", hitService)
+		t.Errorf("arbitrary paths should route to gateway, got path %q", hitService)
 	}
 }
 
@@ -630,7 +551,7 @@ func TestDo_ResponseSecretTransportErrorFailsClosedBeforeRetryLog(t *testing.T) 
 
 	_, err := c.Do(ctx, &Request{
 		Method:               http.MethodPost,
-		Path:                 "/v1/user/drive/files/42/upload/parts-presign",
+		Path:                 "/v1/artifacts/42/prepare",
 		ResponseSecretFields: []string{"parts[].url"},
 	})
 	if err == nil {
@@ -968,11 +889,11 @@ func TestBuildURL_NoLeadingSlash(t *testing.T) {
 }
 
 func TestBuildURL_NormalizesBoundarySlashes(t *testing.T) {
-	u, err := buildURL("https://example.com/", "/fleet/api/v1/tasks", nil)
+	u, err := buildURL("https://example.com/", "/v1/records", nil)
 	if err != nil {
 		t.Fatalf("buildURL: %v", err)
 	}
-	if u != "https://example.com/fleet/api/v1/tasks" {
+	if u != "https://example.com/v1/records" {
 		t.Errorf("buildURL = %q", u)
 	}
 }
@@ -1090,13 +1011,13 @@ func TestDo_VerboseLogsRequestBody(t *testing.T) {
 
 // --- unknown service base URL ---
 
-func TestDo_UnknownServiceBaseURL(t *testing.T) {
+func TestDo_MissingBaseURL(t *testing.T) {
 	cfg := &config.Config{} // no URLs set
 	cred := &credential.BotCredential{Token: "t"}
 	c := New(cfg, cred, Options{})
 
 	_, err := c.Do(context.Background(), &Request{
-		Service: "matters", Method: "GET", Path: "/x",
+		Method: "GET", Path: "/x",
 	})
 	if err == nil {
 		t.Fatal("expected error for missing base URL")
@@ -1178,7 +1099,7 @@ func TestSecretValues_RedactedInVerboseButSentOnTheWire(t *testing.T) {
 	)
 	if _, err := c.Do(context.Background(), &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/bot/drive/shares/" + token + "/download",
+		Path:         "/v1/keys/" + token + "/download",
 		Body:         map[string]any{"password": password},
 		SecretValues: []string{token, password},
 	}); err != nil {
@@ -1216,7 +1137,7 @@ func TestSecretValues_RedactedInDryRun(t *testing.T) {
 	)
 	body, err := c.Do(context.Background(), &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/bot/drive/shares/" + token + "/access",
+		Path:         "/v1/keys/" + token + "/access",
 		Body:         map[string]any{"password": password},
 		SecretValues: []string{token, password},
 	})
@@ -1246,7 +1167,7 @@ func TestDryRun_PreservesUint64Precision(t *testing.T) {
 	)
 	body, err := c.Do(context.Background(), &Request{
 		Method: http.MethodPost,
-		Path:   "/v1/bot/drive/folders",
+		Path:   "/v1/records",
 		Body:   map[string]any{"parent_id": json.Number("18446744073709551615")},
 	})
 	if err != nil {
@@ -1257,109 +1178,7 @@ func TestDryRun_PreservesUint64Precision(t *testing.T) {
 	}
 }
 
-func TestDo_LoopOverridesGenericJSONAccept(t *testing.T) {
-	t.Parallel()
-
-	var gotAccept string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotAccept = r.Header.Get("Accept")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	c := newTestClient(srv)
-	_, err := c.Do(context.Background(), &Request{
-		Service: "loop",
-		Method:  http.MethodGet,
-		Path:    "/fleet/api/v1/workspaces",
-		Headers: map[string]string{"accept": "application/json"},
-	})
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	if gotAccept != "application/vnd.octo+json" {
-		t.Fatalf("Accept = %q, want application/vnd.octo+json", gotAccept)
-	}
-}
-
-func TestDo_LoopUnstructuredNotFoundReportsUnsupportedAPI(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		body string
-	}{
-		{name: "empty", body: ""},
-		{name: "plain text", body: "404 page not found\n"},
-		{name: "HTML", body: "<html><body>Not Found</body></html>"},
-		{name: "gateway JSON", body: `{"message":"route not found"}`},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				w.WriteHeader(http.StatusNotFound)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer srv.Close()
-
-			c := newTestClient(srv)
-			_, err := c.Do(context.Background(), &Request{
-				Service: "loop",
-				Method:  http.MethodGet,
-				Path:    "/fleet/api/v1/tasks/missing",
-			})
-			ee := output.AsExitError(err)
-			if ee == nil {
-				t.Fatalf("error = %T %v, want *output.ExitError", err, err)
-			}
-			if ee.Type != "api_error" || ee.Code != "LOOP_API_UNSUPPORTED" {
-				t.Fatalf("error = %+v, want api_error/LOOP_API_UNSUPPORTED", ee)
-			}
-			if ee.Message != "this Octo server version does not support Loop" {
-				t.Errorf("message = %q", ee.Message)
-			}
-			if !strings.Contains(ee.Hint, "/fleet/api/v1") {
-				t.Errorf("hint = %q, want Fleet API path", ee.Hint)
-			}
-			if len(ee.Detail) != 0 {
-				t.Errorf("detail = %s, want omitted gateway response", ee.Detail)
-			}
-		})
-	}
-}
-
-func TestDo_LoopStructuredNotFoundPreservesBackendError(t *testing.T) {
-	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":{"code":"NOT_FOUND","message":"task not found","details":{}}}`))
-	}))
-	defer srv.Close()
-
-	c := newTestClient(srv)
-	_, err := c.Do(context.Background(), &Request{
-		Service: "loop",
-		Method:  http.MethodGet,
-		Path:    "/fleet/api/v1/tasks/missing",
-	})
-	ee := output.AsExitError(err)
-	if ee == nil {
-		t.Fatalf("error = %T %v, want *output.ExitError", err, err)
-	}
-	if ee.Code != "NOT_FOUND" || ee.Message != "task not found" {
-		t.Fatalf("error = %+v, want backend NOT_FOUND preserved", ee)
-	}
-	if len(ee.Detail) == 0 {
-		t.Error("structured backend error detail must be preserved")
-	}
-}
-
-func TestDo_NonLoopUnstructuredNotFoundRemainsNotFound(t *testing.T) {
+func TestDo_UnstructuredNotFound(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -1370,9 +1189,9 @@ func TestDo_NonLoopUnstructuredNotFoundRemainsNotFound(t *testing.T) {
 
 	c := newTestClient(srv)
 	_, err := c.Do(context.Background(), &Request{
-		Service: "docs",
-		Method:  http.MethodGet,
-		Path:    "/docs/missing",
+
+		Method: http.MethodGet,
+		Path:   "/docs/missing",
 	})
 	ee := output.AsExitError(err)
 	if ee == nil {

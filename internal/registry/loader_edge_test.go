@@ -4,13 +4,17 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/fstest"
 )
 
 // TestEmptyRegistryDoesNotPanic verifies that a Registry with zero specs
 // doesn't panic on any public accessor. Helpful for tests that stub the
 // registry via the Factory.
 func TestEmptyRegistryDoesNotPanic(t *testing.T) {
-	r := &Registry{specs: map[string]map[string]any{}}
+	r, err := Load(fstest.MapFS{"README.md": {Data: []byte("No service definitions.")}})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if got := r.ListServices(); len(got) != 0 {
 		t.Errorf("ListServices: got %v, want empty", got)
@@ -35,7 +39,12 @@ func TestEmptyRegistryDoesNotPanic(t *testing.T) {
 // If a future change adds mutation, this test will surface the race under
 // `go test -race`.
 func TestRegistryConcurrentReads(t *testing.T) {
-	r := MustNew()
+	r, err := Load(fstest.MapFS{
+		"example.json": {Data: []byte("{\"paths\":{\"/records\":{\"get\":{\"operationId\":\"example.list\"}}}}")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	const workers = 16
 	var wg sync.WaitGroup
 	wg.Add(workers)
@@ -44,9 +53,9 @@ func TestRegistryConcurrentReads(t *testing.T) {
 			defer wg.Done()
 			_ = r.ListServices()
 			_ = r.ListAllOperations()
-			_ = r.ListOperations("matter")
-			if _, ok := r.GetOperation("matter.create"); !ok {
-				t.Errorf("matter.create not found")
+			_ = r.ListOperations("example")
+			if _, ok := r.GetOperation("example.list"); !ok {
+				t.Errorf("example.list not found")
 			}
 		}()
 	}
@@ -56,8 +65,7 @@ func TestRegistryConcurrentReads(t *testing.T) {
 // TestCheckDuplicateOperationIDs pins the global-uniqueness guard in New():
 // an operationId claimed by two specs would make GetOperation's map-iteration
 // lookup (and thus command routing) non-deterministic, so registry
-// construction must fail instead. The loop-vs-marketplace `expert.*` collision
-// is the incident this guards against.
+// construction must reject the duplicate.
 func TestCheckDuplicateOperationIDs(t *testing.T) {
 	op := func(id string) map[string]any {
 		return map[string]any{

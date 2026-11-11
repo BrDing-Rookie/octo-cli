@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      # Keep documentation-only skips, but test README/CHANGELOG/release-gate contracts and
+      # Keep documentation-only skips, but test README/CHANGELOG contracts and
       # embedded skills. Positive exceptions must follow the exclusions.
       - '**'
       - '!*.md'
@@ -12,7 +12,6 @@ on:
       - '!.github/ISSUE_TEMPLATE/**'
       - 'README.md'
       - 'CHANGELOG.md'
-      - 'docs/ppt-release-gate.md'
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
     branches: [main, 'dev/v*']
@@ -39,7 +38,7 @@ jobs:
       pull-requests: read
     outputs:
       # code=true when at least one changed file is runtime code or an embedded
-      # Skill Markdown file, or README/CHANGELOG/release-gate (inputs to executable guards).
+      # Skill Markdown file, or README/CHANGELOG (inputs to executable guards).
       # Push events always run once the workflow-level
       # path filter admits them.
       # predicate-quantifier:every + negation patterns (no bare '**'):
@@ -83,7 +82,7 @@ jobs:
             embedded_skills:
               - 'skills/**/*.md'
             tested_docs:
-              - '{README.md,CHANGELOG.md,docs/ppt-release-gate.md}'
+              - '{README.md,CHANGELOG.md}'
 
   build:
     name: build & test
@@ -189,9 +188,9 @@ jobs:
           node-version: "22"
       - name: npm test
         run: npm test
-      - name: Release workflow and PPT contract tests
+      - name: Release workflow tests
         working-directory: .
-        run: node --test scripts/release-workflows.test.mjs scripts/ppt-media-guidance.test.mjs
+        run: node --test scripts/release-workflows.test.mjs
 
   release-tools-test:
     name: COS release tools (no publishing)

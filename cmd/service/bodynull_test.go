@@ -8,26 +8,6 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/registry"
 )
 
-// Round-17: an explicit JSON `null` used to bypass the enum and uint64 gates.
-//
-// validateObject originally skipped present null children, so constrained values reached the
-// wire unchecked. The fix walks present nulls and lets each field's explicit schema contract
-// decide: an enum permits null only when null is an enum member, and a uint64 permits null only
-// when its type explicitly includes null.
-//
-// Required fields remain reported as missing when set to null. Non-nullable constrained fields
-// still reject null; unconstrained optional fields retain the historical clearing-value
-// passthrough.
-//
-// Reproduced against a binary built from 2153838 before the fix:
-//
-//	drive doc mount    --dry-run --data '{…,"source":null}'    -> ok:true, body carried "source":null
-//	drive folder create --dry-run --data '{…,"parent_id":null}' -> ok:true, body carried "parent_id":null
-//
-// parent_id remains a required safety boundary: it is a non-nullable uint64 id, so null cannot
-// be forwarded as the backend's zero value (folder 0).
-//
-
 // TestNullIsRefusedOnAConstrainedField is the direct behavioural pin, using a synthetic
 // schema so every combination of (required, optional) × (enum, uint64) is present whether or
 // not a spec happens to declare it today.
@@ -120,170 +100,12 @@ func TestNullIsRefusedOnAConstrainedField(t *testing.T) {
 	for _, body := range []map[string]any{
 		{"req_enum": "a", "free_text": nil},
 		{"req_enum": "a", "nested": map[string]any{}},
-		{"req_enum": "a", "opt_enum": "b", "opt_id": mustJSONNumber("18446744073709551615")},
+		{"req_enum": "a", "opt_enum": "b", "opt_id": json.Number("18446744073709551615")},
 	} {
 		if err := v.validate(schema, body, "", ""); err != nil {
 			t.Errorf("body %#v must still be accepted: %v", body, err)
 		}
 	}
-}
-
-// TestNullConstrainedSpecFieldsFollowSchemaContract is the derived form: every request-body
-// field with an enum or `format: uint64` is checked against its explicit nullable contract.
-// Nullable enums still require null to be an enum member; non-nullable constrained fields must
-// reject it. In particular, parent_id remains in this census as a non-nullable uint64.
-func TestNullConstrainedSpecFieldsFollowSchemaContract(t *testing.T) {
-	reg := registry.MustNew()
-	var checked int
-
-	for _, svc := range reg.ListServices() {
-		for _, info := range reg.ListOperations(svc) {
-			d, ok := reg.GetOperation(info.ID)
-			if !ok || d.RequestBody == nil {
-				continue
-			}
-			for _, field := range constrainedLeaves(d.RequestBody, nil) {
-				checked++
-				body := bodyWithNullAt(d.RequestBody, field)
-				err := (bodySchemaValidator{}).validate(d.RequestBody, body, "", "")
-				leaf := constrainedSchemaAt(d.RequestBody, field)
-				if constrainedNullAllowed(leaf) {
-					if err != nil {
-						t.Errorf("%s: explicitly nullable %s rejected null: %v",
-							info.ID, strings.Join(field, "."), err)
-					}
-					continue
-				}
-				if err == nil {
-					t.Errorf("%s: non-nullable %s accepted explicit null and would send it upstream",
-						info.ID, strings.Join(field, "."))
-				}
-			}
-		}
-	}
-	if checked == 0 {
-		t.Fatal("no constrained body field was found in any spec, so this census asserted nothing")
-	}
-	t.Logf("census covered %d constrained request-body leaves across all embedded specs", checked)
-}
-
-// constrainedLeaves returns the path to every request-body property that carries an enum or
-// a uint64 format, descending through objects and through an array's item schema.
-//
-// An array item is addressed by the array's own path: bodyWithNullAt wraps the value in a
-// one-element slice, which is the smallest body that reaches an item schema.
-func constrainedLeaves(schema *registry.SchemaInfo, at []string) [][]string {
-	var out [][]string
-	for name := range schema.Properties {
-		prop := schema.Properties[name]
-		path := append(append([]string{}, at...), name)
-		if len(prop.Enum) > 0 || prop.Format == uint64Format {
-			out = append(out, path)
-			continue
-		}
-		if prop.Type == "object" || prop.Items != nil {
-			out = append(out, constrainedLeaves(&prop, path)...)
-		}
-	}
-	if schema.Items != nil {
-		out = append(out, constrainedLeaves(schema.Items, at)...)
-	}
-	return out
-}
-
-func constrainedSchemaAt(schema *registry.SchemaInfo, field []string) *registry.SchemaInfo {
-	current := schema
-	for _, name := range field {
-		for current.Items != nil && len(current.Properties) == 0 {
-			current = current.Items
-		}
-		next := current.Properties[name]
-		current = &next
-	}
-	return current
-}
-
-func constrainedNullAllowed(schema *registry.SchemaInfo) bool {
-	if !schema.Nullable {
-		return false
-	}
-	for _, member := range schema.Enum {
-		if member == nil {
-			return true
-		}
-	}
-	return len(schema.Enum) == 0
-}
-
-// bodyWithNullAt builds the smallest body that places an explicit null at field, filling in
-// every required property along the way so the walk reaches the leaf instead of stopping at
-// a missing-required-field error.
-func bodyWithNullAt(schema *registry.SchemaInfo, field []string) map[string]any {
-	body := fillRequired(schema, field[0])
-	if len(field) == 1 {
-		body[field[0]] = nil
-		return body
-	}
-	child := schema.Properties[field[0]]
-	inner := bodyWithNullAt(childObjectSchema(&child), field[1:])
-	if child.Type == "array" || (child.Items != nil && child.Type != "object") {
-		body[field[0]] = []any{inner}
-		return body
-	}
-	body[field[0]] = inner
-	return body
-}
-
-// childObjectSchema unwraps an array schema to the object schema its items carry.
-func childObjectSchema(schema *registry.SchemaInfo) *registry.SchemaInfo {
-	if schema.Type != "object" && schema.Items != nil {
-		return schema.Items
-	}
-	return schema
-}
-
-// fillRequired supplies a schema-satisfying placeholder for every required property except
-// the one under test, so the missing-required-field check does not mask the constraint being
-// exercised.
-func fillRequired(schema *registry.SchemaInfo, except string) map[string]any {
-	body := map[string]any{}
-	for _, name := range schema.Required {
-		if name == except {
-			continue
-		}
-		prop := schema.Properties[name]
-		body[name] = placeholderFor(&prop)
-	}
-	return body
-}
-
-// placeholderFor returns a value the validator accepts for a schema, so a required field can
-// be filled without tripping the very gates under test.
-func placeholderFor(schema *registry.SchemaInfo) any {
-	if len(schema.Enum) > 0 {
-		return schema.Enum[0]
-	}
-	if schema.Format == uint64Format {
-		return mustJSONNumber("1")
-	}
-	switch schema.Type {
-	case "object":
-		return fillRequired(schema, "")
-	case "array":
-		return []any{}
-	case "integer", "number":
-		return mustJSONNumber("1")
-	case "boolean":
-		return true
-	}
-	return "x"
-}
-
-// mustJSONNumber mirrors how --data reaches the validator: decoded with UseNumber, so every
-// number is a json.Number rather than a float64. The validator distinguishes the two, so a
-// placeholder of the wrong type would make the census fail for the wrong reason.
-func mustJSONNumber(digits string) any {
-	return json.Number(digits)
 }
 
 // TestRequiredParameterRejectsAnEmptyValue is round-17 P1-C.
@@ -335,37 +157,4 @@ func TestRequiredParameterRejectsAnEmptyValue(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestRequiredParameterGuardCoversEveryRequiredQueryAndHeader is the derived half: rather
-// than trusting that buildQuery and buildHeaders call the guard, it asserts that every
-// required query or header parameter in every embedded spec is one the guard would refuse an
-// empty value for — so a new required parameter is covered the moment it is declared.
-func TestRequiredParameterGuardCoversEveryRequiredQueryAndHeader(t *testing.T) {
-	reg := registry.MustNew()
-	var required int
-
-	for _, svc := range reg.ListServices() {
-		for _, info := range reg.ListOperations(svc) {
-			d, ok := reg.GetOperation(info.ID)
-			if !ok {
-				continue
-			}
-			for i := range d.Parameters {
-				p := &d.Parameters[i]
-				if !p.Required || (p.In != "query" && p.In != "header") {
-					continue
-				}
-				required++
-				if err := rejectEmptyRequiredValue("--"+p.Name, "", p.Required); err == nil {
-					t.Errorf("%s: required %s parameter %q would accept an empty value",
-						info.ID, p.In, p.Name)
-				}
-			}
-		}
-	}
-	if required == 0 {
-		t.Fatal("no required query or header parameter was found, so this asserted nothing")
-	}
-	t.Logf("census covered %d required query/header parameters across all embedded specs", required)
 }

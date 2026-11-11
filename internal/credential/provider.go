@@ -16,8 +16,7 @@ import (
 // Profile is populated only for stored credentials. RobotID may come from a
 // stored profile or OCTO_BOT_ID, while BotKind is derived from the token prefix.
 // An OCTO_BOT_ID beside an environment token remains an unverified claim: it is
-// emitted as robot_id_claimed rather than robot_id and can select only a Mail
-// credential whose encrypted local binding matches the active token.
+// exposed as robot_id_claimed in the output envelope.
 type BotCredential struct {
 	Token   string
 	SpaceID string

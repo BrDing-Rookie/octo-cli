@@ -11,15 +11,6 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/registry"
 )
 
-// The lossless-uint64 contract used to hold on the promoted-flag path and lapse
-// on --data: resolveBody decoded with a plain json.Unmarshal, so every number
-// became a float64 and an id above 2^53 was rounded before anything could check
-// it. A rounded id is a *valid* id pointing at a different row, so for
-// parent_id — which selects the destination folder of drive file move / folder
-// move / doc mount — the request succeeds and the file lands somewhere the
-// caller did not ask for. These tests pin both halves of the fix: UseNumber in
-// resolveBody, and the format:uint64 branch in the body schema walker.
-
 // TestBodyUint64_DataPathIsLossless asserts an id above 2^53 supplied through
 // --data reaches the wire with its exact digits, matching the promoted flag.
 func TestBodyUint64_DataPathIsLossless(t *testing.T) {
@@ -31,12 +22,12 @@ func TestBodyUint64_DataPathIsLossless(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"via --data", []string{"drive", "file", "move", "42", "--data", `{"parent_id":` + beyondFloat64 + `}`}},
-		{"via the promoted flag", []string{"drive", "file", "move", "42", "--parent-id", beyondFloat64}},
+		{"via --data", []string{"example", "record", "update", "42", "--data", `{"parent_id":` + beyondFloat64 + `}`}},
+		{"via the promoted flag", []string{"example", "record", "update", "42", "--parent-id", beyondFloat64}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotBody string
-			root, _ := rootWithDriveToken(t, "bf_bot", func(w http.ResponseWriter, r *http.Request) {
+			root, _, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
 				raw, _ := io.ReadAll(r.Body)
 				gotBody = string(raw)
 				_, _ = w.Write([]byte(`{"id":42}`))
@@ -73,10 +64,10 @@ func TestBodyUint64_DataPathRejectsBadIDs(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var called bool
-			root, _ := rootWithDriveToken(t, "bf_bot", func(w http.ResponseWriter, r *http.Request) {
+			root, _, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
 				called = true
 			})
-			root.SetArgs([]string{"drive", "file", "move", "42", "--data", tc.data})
+			root.SetArgs([]string{"example", "record", "update", "42", "--data", tc.data})
 			err := root.Execute()
 			if err == nil {
 				t.Fatal("expected a local validation error")
@@ -158,10 +149,10 @@ func TestBodyUint64_DataStaysAsStrictAsUnmarshal(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var called bool
-			root, _ := rootWithDriveToken(t, "bf_bot", func(w http.ResponseWriter, r *http.Request) {
+			root, _, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
 				called = true
 			})
-			root.SetArgs([]string{"drive", "file", "move", "42", "--data", tc.data})
+			root.SetArgs([]string{"example", "record", "update", "42", "--data", tc.data})
 			if err := root.Execute(); err == nil {
 				t.Fatal("expected a local validation error")
 			}

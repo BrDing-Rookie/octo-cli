@@ -1,9 +1,4 @@
-// Package registry loads the embedded OpenAPI 3.x specs for each Octo service
-// domain (matter, message, group, thread, file, bot, event, marketplace). Consumers read
-// operation metadata — parameters, request body shape, response shape, risk,
-// pagination — to drive flag generation, request building, and `octo-cli schema`.
-//
-// Specs are embedded at build time; no filesystem access at runtime.
+// Package registry loads OpenAPI operations for command generation and discovery.
 package registry
 
 import (
@@ -15,13 +10,13 @@ import (
 	"strings"
 )
 
-//go:embed specs/*.json
+//go:embed specs
 var specsFS embed.FS
 
 // Registry holds the parsed OpenAPI documents keyed by service name.
 // Values are retained as map[string]any rather than strongly-typed structs so
 // the CLI tolerates additive spec changes and unknown x-octo-* extensions
-// without code churn (architecture §5.3–5.5).
+// without code churn.
 type Registry struct {
 	specs map[string]map[string]any
 }
@@ -29,9 +24,18 @@ type Registry struct {
 // New loads and parses every embedded spec. It is not called at init time — the
 // Factory invokes it lazily so tests can construct a Registry directly.
 func New() (*Registry, error) {
+	source, err := fs.Sub(specsFS, "specs")
+	if err != nil {
+		return nil, err
+	}
+	return Load(source)
+}
+
+// Load reads OpenAPI JSON specs from the root of source.
+func Load(source fs.FS) (*Registry, error) {
 	r := &Registry{specs: map[string]map[string]any{}}
 
-	entries, err := fs.ReadDir(specsFS, "specs")
+	entries, err := fs.ReadDir(source, ".")
 	if err != nil {
 		return nil, fmt.Errorf("registry: read embed fs: %w", err)
 	}
@@ -39,7 +43,7 @@ func New() (*Registry, error) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		data, err := fs.ReadFile(specsFS, "specs/"+e.Name())
+		data, err := fs.ReadFile(source, e.Name())
 		if err != nil {
 			return nil, fmt.Errorf("registry: read %s: %w", e.Name(), err)
 		}
@@ -259,12 +263,10 @@ type ParamInfo struct {
 	Pattern   string `json:"pattern,omitempty"`
 	// RequiredUnlessQuery makes an otherwise optional query parameter required
 	// unless another query parameter equals the declared value. It is populated
-	// by x-octo-required-unless-query for contracts such as Marketplace's
-	// plugin_type, which is optional only when mode=mine.
+	// by x-octo-required-unless-query.
 	RequiredUnlessQuery *ConditionalQueryRequirement `json:"required_unless_query,omitempty"`
 	// Secret records the x-octo-secret extension. A secret parameter's value is
-	// masked in --verbose traces and --dry-run output (share/invite tokens,
-	// share passwords) so a credential-equivalent value never lands in a log.
+	// masked in --verbose traces and --dry-run output.
 	Secret bool `json:"secret,omitempty"`
 	// FlagName is the optional CLI flag override from the x-octo-flag
 	// extension on the parameter. It lets a spec expose a header/query param
@@ -308,10 +310,8 @@ type SchemaInfo struct {
 	Description string `json:"description,omitempty"`
 	WriteOnly   bool   `json:"write_only,omitempty"`
 	// These constraints are surfaced for schema introspection. The generic CLI
-	// validator enforces Required, MinItems and Enum for every service. Loop and
-	// explicitly strict services additionally enforce closed-object and minimum-
-	// property constraints, MinLength, MaxLength and MaxItems. Pattern stays
-	// descriptive because stateful backend exceptions cannot be represented here.
+	// validator enforces Required, MinItems and Enum. Strict request validation
+	// also enforces closed objects, minimum property counts and length limits.
 	Minimum       *float64 `json:"minimum,omitempty"`
 	Maximum       *float64 `json:"maximum,omitempty"`
 	MinLength     int      `json:"min_length,omitempty"`
@@ -368,21 +368,11 @@ type OperationDetail struct {
 	RequestBodyRequired bool        `json:"request_body_required,omitempty"`
 	ResponseSchema      *SchemaInfo `json:"response_schema,omitempty"`
 	// StrictRequestSchema opts a service or individual operation into the extended JSON Schema request
-	// checks (closed objects, lengths, patterns and size constraints) that Loop's
-	// Public API always uses. It lets another strongly typed API request the same
-	// local guarantees without changing historical domains.
+	// checks such as closed objects, lengths, patterns, and size constraints.
 	StrictResponseSchema bool            `json:"strict_response_schema,omitempty"`
 	StrictRequestSchema  bool            `json:"strict_request_schema,omitempty"`
 	Pagination           *PaginationInfo `json:"pagination,omitempty"`
-	// BaseURLEnv is retained in schema output for compatibility with existing
-	// specs and tooling. Runtime routing is unified through OCTO_API_BASE_URL and
-	// intentionally does not select a different service URL from this metadata.
-	BaseURLEnv string `json:"base_url_env,omitempty"`
-	// Credential is the x-octo-credential boundary declared by the service.
-	// Empty means the active Bot credential; "mail" selects the mailbox token
-	// bound to the same Bot identity.
-	Credential  string `json:"credential,omitempty"`
-	SpaceHeader bool   `json:"space_header,omitempty"`
+	SpaceHeader          bool            `json:"space_header,omitempty"`
 	// SpaceHeaderSet records whether the spec declared x-octo-space-header at
 	// all. It lets the transport distinguish an explicit `false` (suppress the
 	// X-Space-Id header) from an omitted flag (keep the default behaviour of
@@ -393,28 +383,12 @@ type OperationDetail struct {
 	// BinaryBody is true only when the operation delivers a binary body inline
 	// on a 2xx success (declared via a 2xx response with a content body), so
 	// the CLI can write those bytes to disk with --output/-o. It is false for
-	// redirect-style binary ops such as file.download, which return a 302 with
-	// no consumable body — offering -o there is a silent no-op footgun.
+	// redirect-only binary operations, which return no body to write.
 	BinaryBody bool `json:"binary_body,omitempty"`
-	// ValidateElementsIndex captures the x-octo-validate-elements-index
-	// extension. When true, the CLI rejects a request whose body carries any
-	// `elements[]` entry missing a valid fractional-index `index` before it is
-	// sent — so index-less / garbage-index whiteboard elements (XIN-792) can no
-	// longer reach the backend and corrupt a board.
-	ValidateElementsIndex bool `json:"validate_elements_index,omitempty"`
-	// ValidateMarketplaceRelations captures x-octo-validate-marketplace-relations.
-	// When true the CLI rejects relation payloads that violate the marketplace
-	// matrix (connector pinned to a version, missing pin field type, duplicate
-	// target, invalid team wiring) before the request is sent.
-	ValidateMarketplaceRelations bool `json:"validate_marketplace_relations,omitempty"`
-
-	// ValidateMarketplaceReleaseVersion opts into resource-specific publication
-	// preflight. Draft operations never set this extension.
-	ValidateMarketplaceReleaseVersion bool `json:"validate_marketplace_release_version,omitempty"`
 	// RetryMode captures the optional x-octo-retry operation extension. Empty
 	// keeps the transport default; "never" disables automatic retries for the
 	// individual request. This is required for non-idempotent external side
-	// effects such as sending mail, where a lost response must be reported as an
+	// effects where a lost response must be reported as an
 	// unknown result rather than risking a duplicate action.
 	RetryMode string `json:"retry_mode,omitempty"`
 	// AllowedTokenKinds captures x-octo-allowed-token-kinds (spec top level or
@@ -432,9 +406,7 @@ type OperationDetail struct {
 	MountByTokenKind map[string]string `json:"mount_by_token_kind,omitempty"`
 	// ResponseFieldAliases captures x-octo-response-fields: source key →
 	// target keys. The CLI renames (one target) or duplicates (several) the
-	// value in the response before emitting it, so a backend DTO with a bare
-	// `id` can surface as the unambiguous `share_id` + `share_token` an Agent
-	// needs. Paths use the same syntax as LosslessIDFields.
+	// value in the response before emitting it. Paths use the same syntax as LosslessIDFields.
 	ResponseFieldAliases map[string][]string `json:"response_field_aliases,omitempty"`
 	// LosslessIDFields captures x-octo-lossless-id-fields: response paths whose
 	// uint64 ids are emitted as decimal strings so values above 2^53 survive an
@@ -565,8 +537,6 @@ func buildDetail(service string, doc map[string]any, pathStr, method string, op 
 			Description: stringOf(op["description"]),
 			Risk:        stringOf(op["x-octo-risk"]),
 		},
-		BaseURLEnv:           stringOf(doc["x-octo-base-url"]),
-		Credential:           stringOf(doc["x-octo-credential"]),
 		SpaceHeader:          boolOf(doc["x-octo-space-header"]),
 		StrictResponseSchema: truthy(op["x-octo-strict-response-schema"]),
 		StrictRequestSchema:  truthy(doc["x-octo-strict-request-schema"]) || truthy(op["x-octo-strict-request-schema"]),
@@ -575,9 +545,6 @@ func buildDetail(service string, doc map[string]any, pathStr, method string, op 
 
 	d.Multipart = boolOf(op["x-octo-multipart"])
 	d.BinaryResponse = boolOf(op["x-octo-binary-response"])
-	d.ValidateElementsIndex = boolOf(op["x-octo-validate-elements-index"])
-	d.ValidateMarketplaceRelations = boolOf(op["x-octo-validate-marketplace-relations"])
-	d.ValidateMarketplaceReleaseVersion = boolOf(op["x-octo-validate-marketplace-release-version"])
 	d.RetryMode = stringOf(op["x-octo-retry"])
 	// Identity routing is declared at the spec top level (every operation in a
 	// domain shares one mount table) but an operation may narrow the allowed
@@ -798,7 +765,7 @@ func extractJSONSchema(body map[string]any) map[string]any {
 }
 
 // hasSuccessBody reports whether any 2xx response declares a content body,
-// i.e. the operation returns bytes inline on success (docs.scene.export) rather
+// i.e. the operation returns bytes inline on success rather
 // than a bodyless redirect (file.download's 302-only). It gates the --output/-o
 // flag so -o is offered only where it can actually write something.
 //

@@ -4,63 +4,28 @@ import test from 'node:test';
 
 const read = path => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
-test('sharing response documentation names the stale-epoch conflict', () => {
-  const spec = JSON.parse(read('internal/registry/specs/docs.json'));
-  assert.match(spec.paths['/v1/bot/docs/{docId}/share'].put.responses['409'].description, /share_settings_conflict/);
-});
-
-test('PPT create response preserves the flat, backwards-compatible receipt contract', () => {
-  const spec = JSON.parse(read('internal/registry/specs/docs.json'));
-  const create = spec.paths['/v1/bot/docs'].post;
-  const schema = create.responses['201'].content['application/json'].schema;
-  for (const field of ['docId', 'docType', 'templateId', 'title', 'spaceId']) {
-    assert.equal(schema.properties[field]?.type, 'string', field);
-  }
-  for (const field of ['draftRevision', 'snapshotVersion']) {
-    assert.equal(schema.properties[field]?.type, 'integer', field);
-  }
-  assert.match(schema.properties.docId.description || '', /d_.*24.*hex/);
-  assert.equal(create['x-octo-response-unwrap'], undefined);
-  assert.equal(create['x-octo-strict-response-schema'], undefined);
-  assert.equal(schema.required, undefined, 'do not require PPT-only fields on other doc types');
-  assert.equal(schema.properties.templateId.enum, undefined, 'historical receipts may carry retired IDs');
-  assert.match(schema.example?.docId || '', /^d_[a-f0-9]{24}$/);
-  assert.equal(schema.example.docType, 'html_ppt');
-  assert.equal(schema.example.templateId, 'blank');
-  for (const [field, value] of Object.entries(schema.example)) {
-    const type = schema.properties[field]?.type;
-    assert.ok(type, `example field ${field} must be documented`);
-    assert.equal(type === 'integer' ? Number.isInteger(value) : typeof value === type, true, field);
-  }
-});
-
-test('CI re-includes tested Markdown and runs the replacement offline checks', () => {
+test('CI includes tested Markdown and runs release workflow checks', () => {
   const source = read('.github/workflows/ci.yml');
   const push = source.split('  push:\n')[1]?.split('  pull_request:\n')[0] || '';
   assert.match(push, /\n    paths:\n/);
   for (const path of ['README.md', 'CHANGELOG.md']) {
     assert.ok(push.indexOf(`- '${path}'`) > push.indexOf("- '!*.md'"));
   }
-  assert.ok(push.indexOf("- 'docs/ppt-release-gate.md'") > push.indexOf("- '!docs/**'"));
-  assert.match(source, /tested_docs:\n\s+- '\{README\.md,CHANGELOG\.md,docs\/ppt-release-gate\.md\}'/);
+  assert.match(source, /tested_docs:\n\s+- '\{README\.md,CHANGELOG\.md\}'/);
   const output = source.split('\n').find(line => line.trimStart().startsWith('code: ${{')) || '';
   assert.ok(output.includes("|| steps.filter.outputs.tested_docs == 'true'"));
   assert.match(source, /predicate-quantifier: 'every'/);
   assert.match(source, /run: node --test scripts\/release-workflows\.test\.mjs/);
 });
 
-test('all workflows are independent of the removed PPT environment and probe', () => {
+test('local reusable workflows exist', () => {
   const workflows = new URL('../.github/workflows/', import.meta.url);
   for (const file of readdirSync(workflows).filter(file => /\.ya?ml$/.test(file))) {
     const source = readFileSync(new URL(file, workflows), 'utf8');
-    assert.doesNotMatch(source, /PPT_RELEASE_|ppt-gallery-(?:release|dry-run)|ppt-preflight|ppt-release-preflight/, file);
     // A removed local reusable workflow must not leave a dangling caller.
     for (const match of source.matchAll(/uses:\s*\.\/(\.github\/workflows\/[^\s]+\.ya?ml)/g)) {
       assert.ok(existsSync(new URL(`../${match[1]}`, import.meta.url)), `${file}: missing ${match[1]}`);
     }
-  }
-  for (const path of ['.github/workflows/ppt-release-preflight.yml', 'scripts/ppt-release-preflight.mjs']) {
-    assert.equal(existsSync(new URL(`../${path}`, import.meta.url)), false, path);
   }
 });
 
@@ -91,10 +56,4 @@ test('npm retains its release, CI, checksum, packaging and dry-run protections',
   assert.match(source, /NODE_AUTH_TOKEN: \$\{\{ steps.version.outputs.DRY_RUN == '' && secrets.NPM_TOKEN \|\| '' \}\}/);
   assert.match(source, /npm publish .* --dry-run/);
   assert.match(source, /cancel-in-progress: false/);
-});
-
-test('published guidance does not require removed release configuration', () => {
-  for (const file of ['CHANGELOG.md', 'skills/octo-docs/ppt.md', 'docs/ppt-release-gate.md']) {
-    assert.doesNotMatch(read(file), /PPT_RELEASE_|ppt-gallery-(?:release|dry-run)|ppt-release-preflight/);
-  }
 });

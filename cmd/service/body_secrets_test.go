@@ -8,8 +8,8 @@ import (
 )
 
 func TestCollectBodySecrets_CollectsStringMapValues(t *testing.T) {
-	const first = "marketplace-secret-1"
-	const second = "marketplace-secret-2"
+	const first = "fixture-secret-1"
+	const second = "fixture-secret-2"
 	schema := &registry.SchemaInfo{
 		Type: "object",
 		Properties: map[string]registry.SchemaInfo{

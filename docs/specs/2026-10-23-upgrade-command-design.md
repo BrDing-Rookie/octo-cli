@@ -39,7 +39,7 @@ Outside scope:
 - `npm/scripts/prepare-packages.js` pins platform optional dependencies to the
   main package's exact release version. These dependencies contain the executable.
 - `cmd/root.go` owns registration, command preflight, credential-free commands,
-  global output flags and the Loop task-mode restriction.
+  global output flags.
 - Global layouts and command entries vary by manager and OS. pnpm's normal store
   links are valid package-manager installation structure, not source-checkout
   links. pnpm 11+ isolates global install groups: updating can replace both the
@@ -71,7 +71,6 @@ It uses existing output-format and jq preflight before mutation. It requires no
 Octo credential, does not resolve a profile and does not modify Octo configuration.
 Identity and Space selectors do not choose the installation to update.
 
-Loop task mode continues to reject `upgrade` through the existing root policy.
 Help performs no ownership probes or update operations.
 
 ## Installation ownership and manager selection
@@ -277,7 +276,7 @@ Use the existing stderr error envelope. Ownership/unsupported-installation
 errors and invalid registry version metadata are validation/configuration
 failures (exit 2). A missing required manager, manager execution, registry access,
 installation or post-install verification failure is operational (exit 1).
-Preserve existing argument, output-preflight and Loop task-mode error contracts.
+Preserve existing argument and output-preflight error contracts.
 
 Distinguish an unavailable owning manager from an installation-method mismatch
 when evidence permits. Give the relevant manager/install-method guidance without
@@ -319,7 +318,7 @@ claim rollback or that the old installation is intact.
    the documented operational failure and does not select another manager.
 7. **Dry run and preflight:** dry run returns an ownership-checked local plan
    without registry access or mutation. Invalid arguments/output options and
-   Loop task mode cannot initiate an install. Ordinary upgrade needs no Octo
+   Upgrade needs no Octo
    credential or profile resolution.
 8. **Failures and output:** inaccessible mirror, authentication failure,
    permissions/file locks, manager failure, stale installed manifest/platform

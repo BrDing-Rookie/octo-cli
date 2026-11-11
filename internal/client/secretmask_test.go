@@ -60,7 +60,7 @@ func TestSecretValues_JSONEscapingDoesNotDefeatTheMask(t *testing.T) {
 			)
 			if _, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodPost,
-				Path:         "/v1/bot/drive/shares",
+				Path:         "/v1/keys",
 				Body:         map[string]any{"file_id": json.Number("1"), "password": tc.value},
 				SecretValues: []string{tc.value},
 			}); err != nil {
@@ -94,7 +94,7 @@ func TestSecretValues_JSONEscapingDoesNotDefeatTheDryRunMask(t *testing.T) {
 			)
 			body, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodPost,
-				Path:         "/v1/bot/drive/shares",
+				Path:         "/v1/keys",
 				Body:         map[string]any{"password": tc.value},
 				SecretValues: []string{tc.value},
 			})
@@ -168,7 +168,7 @@ func TestTransportError_DoesNotLeakASecretPathParameter(t *testing.T) {
 	)
 	_, err := c.Do(context.Background(), &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/user/drive/invites/" + token + "/accept",
+		Path:         "/v1/keys/" + token + "/accept",
 		SecretValues: []string{token},
 	})
 	if err == nil {
@@ -211,7 +211,7 @@ func TestTransportError_RedactionSurvivesRetries(t *testing.T) {
 	defer cancel()
 	_, err := c.Do(ctx, &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/user/drive/shares/" + token + "/access",
+		Path:         "/v1/keys/" + token + "/access",
 		SecretValues: []string{token},
 	})
 	if err == nil {
@@ -277,7 +277,7 @@ func TestBackendError_DoesNotLeakASecretItEchoes(t *testing.T) {
 	)
 	_, err := c.Do(context.Background(), &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/user/drive/shares/" + token + "/access",
+		Path:         "/v1/keys/" + token + "/access",
 		Body:         map[string]any{"password": password},
 		SecretValues: []string{token, password},
 	})
@@ -385,7 +385,7 @@ func TestBackendError_RedactionKeepsTheBodyParseable(t *testing.T) {
 		t.Run(strconv.Quote(password), func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"wrong_password","message":"the share password is incorrect"}`))
+				_, _ = w.Write([]byte(`{"error":"permission_denied","message":"the resource permission was denied"}`))
 			}))
 			defer srv.Close()
 
@@ -396,7 +396,7 @@ func TestBackendError_RedactionKeepsTheBodyParseable(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodPost,
-				Path:         "/v1/user/drive/shares/TOKENABC/access",
+				Path:         "/v1/keys/TOKENABC/access",
 				Body:         map[string]any{"password": password},
 				SecretValues: []string{password},
 			})
@@ -409,8 +409,8 @@ func TestBackendError_RedactionKeepsTheBodyParseable(t *testing.T) {
 			}
 			// The backend's machine-readable code must survive redaction: it is
 			// what an agent branches on.
-			if ee.Code != "wrong_password" {
-				t.Errorf("code: got %q, want wrong_password (redaction must not break parsing)", ee.Code)
+			if ee.Code != "permission_denied" {
+				t.Errorf("code: got %q, want permission_denied (redaction must not break parsing)", ee.Code)
 			}
 			if len(ee.Detail) == 0 {
 				t.Error("detail was lost; redaction must not make the body unparseable")
@@ -430,7 +430,7 @@ func TestBackendError_RedactionSurvivesForeignJSONEscaping(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		// `\/` is legal JSON and is what several non-Go encoders emit.
-		_, _ = w.Write([]byte(`{"error":"wrong_password","message":"bad password a\/b for share"}`))
+		_, _ = w.Write([]byte(`{"error":"permission_denied","message":"bad password a\/b for share"}`))
 	}))
 	defer srv.Close()
 
@@ -441,7 +441,7 @@ func TestBackendError_RedactionSurvivesForeignJSONEscaping(t *testing.T) {
 	)
 	_, err := c.Do(context.Background(), &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/user/drive/shares/TOKENABC/access",
+		Path:         "/v1/keys/TOKENABC/access",
 		Body:         map[string]any{"password": password},
 		SecretValues: []string{password},
 	})
@@ -455,8 +455,8 @@ func TestBackendError_RedactionSurvivesForeignJSONEscaping(t *testing.T) {
 	if strings.Contains(ee.Message, password) || strings.Contains(string(ee.Detail), password) {
 		t.Errorf("a foreign-escaped secret survived redaction: %s / %s", ee.Message, ee.Detail)
 	}
-	if ee.Code != "wrong_password" {
-		t.Errorf("code: got %q, want wrong_password", ee.Code)
+	if ee.Code != "permission_denied" {
+		t.Errorf("code: got %q, want permission_denied", ee.Code)
 	}
 }
 
@@ -479,7 +479,7 @@ func TestBackendError_NonJSONBodyStillRedacted(t *testing.T) {
 	)
 	_, err := c.Do(context.Background(), &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/user/drive/shares/" + token + "/access",
+		Path:         "/v1/keys/" + token + "/access",
 		SecretValues: []string{token},
 	})
 	if err == nil {
@@ -505,9 +505,9 @@ func TestReplaceSecretForm_ShortSecretsUseTokenBoundaries(t *testing.T) {
 		masked bool
 	}{
 		// Must NOT mask: the letters occur inside unrelated words.
-		{"single letter inside a word", `{"error":"wrong_password"}`, "a", false},
-		{"single letter inside prose", "the share password is incorrect", "e", false},
-		{"short run inside a word", `{"error":"wrong_password"}`, "pass", false},
+		{"single letter inside a word", `{"error":"permission_denied"}`, "i", false},
+		{"single letter inside prose", "the resource permission was denied", "e", false},
+		{"short run inside a word", `{"error":"permission_denied"}`, "miss", false},
 		// Must mask: a genuine echo of the value.
 		{"whole field value", `{"password":"abc123"}`, "abc123", true},
 		{"delimited in prose", "bad password abc123 for share", "abc123", true},
@@ -542,7 +542,7 @@ func TestReplaceSecretForm_ShortSecretIsStillMaskedInEveryEchoShape(t *testing.T
 		`password: pw7`,
 		`"pw7"`,
 		`bad password 'pw7' rejected`,
-		`/v1/user/drive/shares/pw7/access`,
+		`/v1/keys/pw7/access`,
 		`pw7`,
 		`[pw7]`,
 		`pw7 at the start`,
@@ -560,7 +560,7 @@ func TestReplaceSecretForm_ShortSecretIsStillMaskedInEveryEchoShape(t *testing.T
 // corrupting the body's syntax; round 8 found it still destroys the body's
 // *meaning*. redactResponseBody preserves object keys and masks string values —
 // and the drive error envelope carries its machine-readable code in a value
-// ({"error":"wrong_password"}). A masked code fails looksLikeErrorCode, parsing
+// ({"error":"permission_denied"}). A masked code fails looksLikeErrorCode, parsing
 // falls back to codeFromStatus, and that branch set no Detail at all.
 //
 // The consequence is behavioural, not cosmetic: on `share access` the caller
@@ -579,12 +579,11 @@ func TestBackendError_MachineReadableCodeSurvivesRedaction(t *testing.T) {
 		// The two from the round-8 report: 8 runes takes the unconditional
 		// substring path, and 5 runes passes the token-boundary rule because "_"
 		// is not a word byte.
-		{"exactly the short-secret threshold", "password"},
-		{"a boundary-delimited component of the code", "wrong"},
+		{"exactly the short-secret threshold", "permissi"},
+		{"a boundary-delimited component of the code", "denied"},
 		// Every other component of a realistic code vocabulary.
 		{"component: not", "not"},
 		{"component: found", "found"},
-		{"component: denied", "denied"},
 		{"component: expired", "expired"},
 		{"component: invalid", "invalid"},
 	}
@@ -592,7 +591,7 @@ func TestBackendError_MachineReadableCodeSurvivesRedaction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":"wrong_password","message":"the share password is incorrect"}`))
+				_, _ = w.Write([]byte(`{"error":"permission_denied","message":"the resource permission was denied"}`))
 			}))
 			defer srv.Close()
 
@@ -603,7 +602,7 @@ func TestBackendError_MachineReadableCodeSurvivesRedaction(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodPost,
-				Path:         "/v1/user/drive/shares/TOKENABC/access",
+				Path:         "/v1/keys/TOKENABC/access",
 				Body:         map[string]any{"password": tc.password},
 				SecretValues: []string{tc.password},
 			})
@@ -615,11 +614,10 @@ func TestBackendError_MachineReadableCodeSurvivesRedaction(t *testing.T) {
 				t.Fatalf("expected a structured error, got %v", err)
 			}
 			// Case-sensitive on purpose: the fallback produces FORBIDDEN, and an
-			// EqualFold comparison against "wrong_password" would not have noticed
+			// EqualFold comparison against "permission_denied" would not have noticed
 			// that the real code was gone.
-			if ee.Code != "wrong_password" {
-				t.Errorf("code = %q, want exactly \"wrong_password\"; the caller branches on this to tell "+
-					"a retryable wrong password from a terminal permission failure", ee.Code)
+			if ee.Code != "permission_denied" {
+				t.Errorf("code = %q, want permission_denied", ee.Code)
 			}
 			if len(ee.Detail) == 0 {
 				t.Error("detail is empty; the fallback branch must carry the backend payload")
@@ -705,7 +703,7 @@ func TestBackendError_CodeExemptionFollowsTheRule(t *testing.T) {
 		},
 		{
 			name: "clause 1: a recognised code unrelated to the secret stays",
-			code: "wrong_password", secret: "hunter2hunter2", wantMasked: false,
+			code: "permission_denied", secret: "hunter2hunter2", wantMasked: false,
 			clause: "recognised code",
 		},
 		{
@@ -777,7 +775,7 @@ func TestBackendError_CodeExemptionFollowsTheRule(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodDelete,
-				Path:         "/v1/user/drive/shares/" + tc.secret,
+				Path:         "/v1/keys/" + tc.secret,
 				SecretValues: []string{tc.secret},
 			})
 			if err == nil {
@@ -833,7 +831,7 @@ func TestBackendError_CodePositionAgreesWithOtherCodeKeys(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodDelete,
-				Path:         "/v1/user/drive/shares/" + secret,
+				Path:         "/v1/keys/" + secret,
 				SecretValues: []string{secret},
 			})
 			ee := output.AsExitError(err)
@@ -888,7 +886,7 @@ func TestResponseMask_ASecretInAKeyPositionIsMasked(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodDelete,
-				Path:         "/v1/user/drive/shares/" + secret,
+				Path:         "/v1/keys/" + secret,
 				SecretValues: []string{secret},
 			})
 			ee := output.AsExitError(err)
@@ -952,7 +950,7 @@ func TestResponseMask_KeyMaskingDoesNotDestroyTheContract(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodPost,
-				Path:         "/v1/user/drive/shares/x/access",
+				Path:         "/v1/keys/x/access",
 				Body:         map[string]any{"password": secret},
 				SecretValues: []string{secret},
 			})
@@ -1057,7 +1055,7 @@ func TestBackendError_AShortSecretNeverSurvivesInTheCodePosition(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodPost,
-				Path:         "/v1/user/drive/shares/tok/access",
+				Path:         "/v1/keys/tok/access",
 				Body:         map[string]any{"password": password},
 				SecretValues: []string{password},
 			})
@@ -1086,7 +1084,7 @@ func TestBackendError_AShortSecretNeverSurvivesInTheCodePosition(t *testing.T) {
 // failure of their kind, so masking one hides nothing and destroys what callers branch on.
 // It is the reason clause 1 comes first.
 func TestBackendError_ARecognisedCodeIsStillExemptFromTheNewRule(t *testing.T) {
-	for _, secret := range []string{"not_found", "wrong_password"} {
+	for _, secret := range []string{"not_found", "permission_denied"} {
 		t.Run("secret="+secret, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				w.WriteHeader(http.StatusNotFound)
@@ -1101,7 +1099,7 @@ func TestBackendError_ARecognisedCodeIsStillExemptFromTheNewRule(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodDelete,
-				Path:         "/v1/user/drive/shares/" + secret,
+				Path:         "/v1/keys/" + secret,
 				SecretValues: []string{secret},
 			})
 			ee := output.AsExitError(err)
@@ -1193,7 +1191,7 @@ func TestBackendError_AShortSecretNeverSurvivesANonJSONBody(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodPost,
-				Path:         "/v1/user/drive/shares/tok/access",
+				Path:         "/v1/keys/tok/access",
 				Body:         map[string]any{"password": password},
 				SecretValues: []string{password},
 			})
@@ -1238,7 +1236,7 @@ func TestBackendError_ANonJSONBodyWithoutASecretKeepsItsDiagnostic(t *testing.T)
 	)
 	_, err := c.Do(context.Background(), &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/user/drive/shares/" + token + "/access",
+		Path:         "/v1/keys/" + token + "/access",
 		SecretValues: []string{token},
 	})
 	ee := output.AsExitError(err)
@@ -1287,7 +1285,7 @@ func TestBackendError_AJSONPrefixDoesNotTruncateTheDiagnostic(t *testing.T) {
 				Method: http.MethodPost,
 				// A declared secret is required for redaction to run at all, and it
 				// appears nowhere in the body — so nothing here should be suppressed.
-				Path:         "/v1/user/drive/shares/" + token + "/access",
+				Path:         "/v1/keys/" + token + "/access",
 				SecretValues: []string{token},
 			})
 			ee := output.AsExitError(err)
@@ -1336,7 +1334,7 @@ func TestResponseMask_ADeclaredSecretIsMaskedInEveryJSONScalarKind(t *testing.T)
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodPost,
-				Path:         "/v1/user/drive/shares/tok/access",
+				Path:         "/v1/keys/tok/access",
 				SecretValues: []string{tc.secret},
 			})
 			ee := output.AsExitError(err)
@@ -1376,7 +1374,7 @@ func TestResponseMask_OrdinaryNumbersAreNotSuppressed(t *testing.T) {
 	)
 	_, err := c.Do(context.Background(), &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/user/drive/shares/" + secret + "/access",
+		Path:         "/v1/keys/" + secret + "/access",
 		SecretValues: []string{secret},
 	})
 	ee := output.AsExitError(err)
@@ -1415,7 +1413,7 @@ func TestResponseMask_AShortSecretNeverSurvivesInAKeyPosition(t *testing.T) {
 			)
 			_, err := c.Do(context.Background(), &Request{
 				Method:       http.MethodPost,
-				Path:         "/v1/user/drive/shares/tok/access",
+				Path:         "/v1/keys/tok/access",
 				SecretValues: []string{password},
 			})
 			ee := output.AsExitError(err)

@@ -29,11 +29,10 @@ import (
 
 // Retry defaults per architecture-design.md §6.2.
 const (
-	defaultMaxRetries   = 3
-	defaultBaseDelay    = 500 * time.Millisecond
-	defaultMaxDelay     = 10 * time.Second
-	defaultTimeout      = 30 * time.Second
-	loopAcceptMediaType = "application/vnd.octo+json"
+	defaultMaxRetries = 3
+	defaultBaseDelay  = 500 * time.Millisecond
+	defaultMaxDelay   = 10 * time.Second
+	defaultTimeout    = 30 * time.Second
 )
 
 // Options controls client runtime behaviour. Zero values are sensible defaults.
@@ -45,20 +44,13 @@ type Options struct {
 	ErrOut  io.Writer // verbose traces and dry-run output go here
 }
 
-// Request is a generic API request. Service identifies the logical domain for
-// diagnostics; Path is the module-qualified gateway suffix (for example,
-// "/fleet/api/v1/tasks/t1"). Body is JSON-encoded if non-nil. Query is merged
-// into the URL; headers take precedence over client defaults.
+// Request describes one HTTP call to the configured gateway.
+// Path is relative to the gateway origin, Query is merged into its URL, and
+// Headers take precedence over client defaults. Body is encoded as JSON.
 //
 // For non-JSON payloads (e.g. multipart uploads) set RawBody + ContentType.
 // When RawBody is non-nil, Body is ignored and no JSON marshaling is performed.
 type Request struct {
-	Service string
-	// Credential selects the authorization boundary used by the command layer.
-	// Empty means the active Bot credential; "mail" means the Agent Mail token
-	// bound to that same Bot identity. The transport itself never resolves
-	// secrets.
-	Credential  string
 	Method      string
 	Path        string
 	Query       url.Values
@@ -67,7 +59,7 @@ type Request struct {
 	RawBody     []byte
 	ContentType string
 	// BinaryResponse asks the client to treat 3xx/non-JSON responses as
-	// structured metadata envelopes rather than parsing JSON. See file.download.
+	// structured metadata rather than JSON payloads.
 	BinaryResponse bool
 	// OutputPath, when set together with BinaryResponse, makes the client WRITE
 	// a 2xx binary body to that file path (instead of only describing it) and
@@ -77,13 +69,11 @@ type Request struct {
 	OutputPath string
 	// SuppressSpaceHeader omits the X-Space-Id header even when the active
 	// credential carries a SpaceID. It is set for operations whose spec declares
-	// x-octo-space-header:false (e.g. the docs bot mount resolves the space
-	// server-side). The default (false) preserves the historical behaviour of
-	// sending X-Space-Id whenever the credential has a space.
+	// x-octo-space-header:false.
 	SuppressSpaceHeader bool
 	// DisableRetry prevents transport-level retries for this individual
 	// request. Use it for operations whose external side effect may already
-	// have succeeded when the response is lost (for example, sending mail).
+	// have succeeded when the response is lost.
 	// It is independent of the global --no-retry switch and deliberately lives
 	// on Request so operation metadata can enforce the safety contract.
 	DisableRetry bool
@@ -107,11 +97,6 @@ type Request struct {
 	// SensitiveJSONFields lists top-level writeOnly request properties that
 	// must be redacted from dry-run and verbose diagnostic output.
 	SensitiveJSONFields []string
-	// ResponseUnwrap is applied by the generated command layer on success.
-	ResponseUnwrap string
-	// UnwrapRequiredFields are the properties the success schema declares under
-	// ResponseUnwrap; a non-empty list refuses a null or scalar unwrapped value.
-	UnwrapRequiredFields []string
 }
 
 // secretMask replaces a redacted value in verbose / dry-run output. It is a
@@ -438,8 +423,7 @@ func redactResponseBody(b []byte, secrets []string) []byte {
 // code alone.
 //
 // The code is what a caller branches on — "wrong password, retry" versus "no
-// permission, stop" — and it lives in a *value*, not a key: the drive envelope is
-// {"error":"wrong_password"}, the matters envelope {"error":{"code":…}}. Masking it
+// permission, stop". Both bare and nested error codes are values. Masking one
 // made the value fail looksLikeErrorCode, so parsing fell through to a generic
 // status-derived code and the caller lost the distinction.
 //
@@ -519,7 +503,7 @@ func redactErrorEnvelope(v any, secrets []string) any {
 		case isCodeBearingKey(key) && isExemptCode(val, secrets):
 			out[outKey] = val
 		case key == "error":
-			// The matters envelope nests {"code":…,"message":…} under "error";
+			// A nested error envelope stores {"code":…,"message":…} under "error";
 			// recurse so its code is exempt too while its message is masked.
 			out[outKey] = redactErrorEnvelope(val, secrets)
 		default:
@@ -766,17 +750,6 @@ func New(cfg *config.Config, cred *credential.BotCredential, opts Options) *Clie
 	}
 }
 
-// NewMail constructs a client using an account-scoped Agent Mail credential.
-// The conversion is private to the transport boundary so mail credentials
-// cannot be selected by the Bot credential provider or echoed as a Bot kind.
-func NewMail(cfg *config.Config, cred *credential.MailCredential, opts Options) *Client {
-	var transportCredential *credential.BotCredential
-	if cred != nil {
-		transportCredential = &credential.BotCredential{Token: cred.Token, Source: cred.Source}
-	}
-	return New(cfg, transportCredential, opts)
-}
-
 // Do performs req against the service URL, applying auth, retry, and dry-run.
 // Returns the raw response body on 2xx; an *output.ExitError on non-2xx or
 // transport failure.
@@ -849,23 +822,10 @@ func redactSecretBytes(b []byte, secrets []string) []byte {
 // do is Do's body. It returns errors unredacted; Do is the single place that
 // masks them.
 func (c *Client) do(ctx context.Context, req *Request) ([]byte, error) {
-	if req.Service == "" {
-		req.Service = "default"
-	}
-
-	// Route the message-search family by chat-id scope and token kind
-	// (no channel_id → cross-session global; uk_ → /v1/user; app_ → error).
-	// Non-search paths pass through unchanged.
-	routedPath, err := routeSearchPath(c.cred, req.Path, req.Body)
-	if err != nil {
-		return nil, err
-	}
-	req.Path = routedPath
-
-	base := c.cfg.ServiceURL(req.Service)
+	base := c.cfg.APIBaseURL
 	if base == "" {
 		return nil, output.ErrValidation(
-			fmt.Sprintf("no base URL configured for service %q", req.Service),
+			"no API base URL configured",
 			fmt.Sprintf("set %s", config.EnvAPIBaseURL),
 		)
 	}
@@ -886,13 +846,6 @@ func (c *Client) do(ctx context.Context, req *Request) ([]byte, error) {
 			return nil, output.ErrWithHint("internal", "MARSHAL_FAILED", fmt.Sprintf("marshal request body: %v", err), "")
 		}
 		contentType = "application/json"
-	}
-
-	if req.Service == "loop" {
-		copyReq := *req
-		copyReq.Headers = cloneHeaders(req.Headers)
-		setHeader(copyReq.Headers, "Accept", loopAcceptMediaType)
-		req = &copyReq
 	}
 
 	if c.options.DryRun {
@@ -1048,7 +1001,7 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 				"size":         len(respBody),
 			}
 			// When the caller asked for a destination, WRITE the bytes to disk
-			// (docs.scene.export --output). A write failure is a hard, non-
+			// requested with --output. A write failure is a hard, non-
 			// retryable error — the request succeeded, so retrying would only
 			// re-download; the problem is local (bad path/permissions).
 			//
@@ -1071,25 +1024,9 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		return respBody, nil
 	}
 
-	// A backend error body can echo the value it was given, and a not-found
-	// message naming the requested id is the most natural thing for a backend to
-	// write — which for drive.share.access / drive.share.download /
-	// drive.invite.accept means the id *is* the secret. ParseBackendError copies
-	// the backend's message into the envelope and the whole body into Detail, so
-	// the response path is redacted here as the transport path already is. This is
-	// not a --verbose surface: it is the structured error on stderr, emitted
-	// unconditionally. The mask contains no quote or backslash, so Detail stays
-	// valid JSON.
-	if loopAPIUnsupported(req.Service, resp.StatusCode, respBody) {
-		return nil, output.ErrLoopAPIUnsupported()
-	}
-
+	// Redact known secrets before the backend error is included in diagnostics.
 	redactedBody := redactBackendErrorBody(respBody, req.SecretValues, req.ResponseSecretFields)
-	parseError := output.ParseBackendError
-	if req.Service == "loop" {
-		parseError = output.ParsePublicAPIError
-	}
-	ee := parseError(resp.StatusCode, redactedBody)
+	ee := output.ParseBackendError(resp.StatusCode, redactedBody)
 
 	if isRetryableStatus(resp.StatusCode) {
 		re := &retryableErr{ExitError: ee, status: resp.StatusCode}
@@ -1204,12 +1141,6 @@ func collectURLValues(node any, values *[]string) {
 			collectURLValues(child, values)
 		}
 	}
-}
-
-// WriteFileAtomic exposes the client's all-or-nothing local file writer for
-// commands that assemble export bytes locally.
-func WriteFileAtomic(path string, data []byte, perm os.FileMode) error {
-	return writeFileAtomic(path, data, perm)
 }
 
 // writeFileAtomic writes data to path atomically: it streams the bytes into a
@@ -1479,34 +1410,4 @@ func parseRetryAfter(h string) time.Duration {
 		}
 	}
 	return 0
-}
-
-func cloneHeaders(headers map[string]string) map[string]string {
-	cloned := make(map[string]string, len(headers)+1)
-	for key, value := range headers {
-		cloned[key] = value
-	}
-	return cloned
-}
-
-func setHeader(headers map[string]string, name, value string) {
-	for key := range headers {
-		if strings.EqualFold(key, name) {
-			delete(headers, key)
-		}
-	}
-	headers[name] = value
-}
-
-func loopAPIUnsupported(service string, status int, body []byte) bool {
-	if service != "loop" || status != http.StatusNotFound {
-		return false
-	}
-
-	var envelope struct {
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	return json.Unmarshal(body, &envelope) != nil || strings.TrimSpace(envelope.Error.Code) == ""
 }

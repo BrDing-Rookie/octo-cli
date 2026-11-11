@@ -18,6 +18,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
 	"github.com/Mininglamp-OSS/octo-cli/internal/registry"
+	"github.com/Mininglamp-OSS/octo-cli/internal/testfixture"
 )
 
 // TestMain isolates the whole package from the developer's own OCTO_
@@ -76,11 +77,10 @@ func sweepProxyEnv() {
 	}
 }
 
-// newTestFactoryWithReg returns a TestFactory with the real embedded registry
-// wired in — needed for any test that touches service commands or schema.
+// newTestFactoryWithReg injects synthetic service definitions.
 func newTestFactoryWithReg() *cmdutil.TestFactory {
 	f := cmdutil.NewTestFactory()
-	reg := registry.MustNew()
+	reg := testfixture.Registry()
 	f.RegistryFunc = func() *registry.Registry { return reg }
 	return f
 }
@@ -144,14 +144,14 @@ func TestCmd_SchemaListByDomain(t *testing.T) {
 	f := newTestFactoryWithReg()
 	f.SetConfig(&config.Config{Format: "json"})
 
-	out, _, err := execRoot(t, f, "schema", "--list", "matter")
+	out, _, err := execRoot(t, f, "schema", "--list", "example")
 	if err != nil {
-		t.Fatalf("schema --list matter: %v", err)
+		t.Fatalf("schema --list example: %v", err)
 	}
 	var env map[string]any
 	_ = json.Unmarshal([]byte(out), &env)
 	data, _ := env["data"].(map[string]any)
-	if data["service"] != "matter" {
+	if data["service"] != "example" {
 		t.Errorf("service = %v", data["service"])
 	}
 }
@@ -160,9 +160,9 @@ func TestCmd_SchemaGetOperation(t *testing.T) {
 	f := newTestFactoryWithReg()
 	f.SetConfig(&config.Config{Format: "json"})
 
-	out, _, err := execRoot(t, f, "schema", "matter.list")
+	out, _, err := execRoot(t, f, "schema", "example.record.list")
 	if err != nil {
-		t.Fatalf("schema matter.list: %v", err)
+		t.Fatalf("schema example.record.list: %v", err)
 	}
 	var env map[string]any
 	if jerr := json.Unmarshal([]byte(out), &env); jerr != nil {
@@ -172,7 +172,7 @@ func TestCmd_SchemaGetOperation(t *testing.T) {
 		t.Errorf("ok = %v", env["ok"])
 	}
 	data, _ := env["data"].(map[string]any)
-	if data["id"] != "matter.list" && data["operation_id"] != "matter.list" {
+	if data["id"] != "example.record.list" && data["operation_id"] != "example.record.list" {
 		// Detail struct field name may vary; just ensure non-empty.
 		if len(data) == 0 {
 			t.Errorf("schema detail is empty: %v", env)
@@ -296,57 +296,6 @@ func TestCmd_API_POSTBody(t *testing.T) {
 	}
 }
 
-func TestCmd_API_WorkspaceIDHeader(t *testing.T) {
-	const workspaceID = "00000000-0000-0000-0000-000000000001"
-	var gotWorkspaceID string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotWorkspaceID = r.Header.Get("X-Workspace-ID")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer srv.Close()
-
-	f := newTestFactoryWithReg()
-	cfg := &config.Config{APIBaseURL: srv.URL, BotToken: "app_test", Format: "json"}
-	cred := &credential.BotCredential{Token: "app_test"}
-	f.SetConfig(cfg)
-	f.SetCredential(cred)
-	f.SetClient(client.New(cfg, cred, client.Options{}))
-
-	_, _, err := execRoot(t, f, "api", "GET", "/fleet/api/v1/custom", "--workspace-id", workspaceID)
-	if err != nil {
-		t.Fatalf("api GET with workspace context: %v\n%s", err, f.ErrOut.String())
-	}
-	if gotWorkspaceID != workspaceID {
-		t.Errorf("X-Workspace-ID = %q, want %q", gotWorkspaceID, workspaceID)
-	}
-}
-
-func TestCmd_API_OmitsWorkspaceHeaderByDefault(t *testing.T) {
-	var gotWorkspaceHeader bool
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, gotWorkspaceHeader = r.Header[http.CanonicalHeaderKey("X-Workspace-ID")]
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"ok":true}`))
-	}))
-	defer srv.Close()
-
-	f := newTestFactoryWithReg()
-	cfg := &config.Config{APIBaseURL: srv.URL, BotToken: "app_test", Format: "json"}
-	cred := &credential.BotCredential{Token: "app_test"}
-	f.SetConfig(cfg)
-	f.SetCredential(cred)
-	f.SetClient(client.New(cfg, cred, client.Options{}))
-
-	_, _, err := execRoot(t, f, "api", "GET", "/test")
-	if err != nil {
-		t.Fatalf("api GET without workspace context: %v\n%s", err, f.ErrOut.String())
-	}
-	if gotWorkspaceHeader {
-		t.Error("X-Workspace-ID header is present by default")
-	}
-}
-
 func TestCmd_API_PathMustStartWithSlash(t *testing.T) {
 	f := newTestFactoryWithReg()
 	_, errOut, err := execRoot(t, f, "api", "GET", "no-slash")
@@ -427,7 +376,7 @@ func TestCmd_MissingTokenOnServiceCommand(t *testing.T) {
 	f := newTestFactoryWithReg()
 	f.SetConfig(&config.Config{APIBaseURL: "http://x", Format: "json"}) // no BotToken
 
-	_, _, err := execRoot(t, f, "event", "list")
+	_, _, err := execRoot(t, f, "example", "record", "list")
 	if err == nil {
 		t.Fatal("expected PersistentPreRunE to reject missing token")
 	}
@@ -537,23 +486,12 @@ func TestSkipValidation(t *testing.T) {
 	if !skipValidation(findCmd("auth")) {
 		t.Error("top-level auth should skip validation")
 	}
-	if skipValidation(findCmd("mail", "auth", "login")) {
-		t.Error("nested mail auth login should NOT skip validation")
-	}
-
-	// Pick any real service leaf — should NOT skip.
-	svcLeaf := findCmd("event", "list")
+	// Pick a generated service leaf — should NOT skip.
+	svcLeaf := findCmd("example", "record", "list")
 	if skipValidation(svcLeaf) {
 		t.Error("service leaf should NOT skip validation")
 	}
 }
-
-// --- x-octo-disabled withholding (matter) ---
-//
-// These lock the three consumption surfaces in place: a disabled service must
-// vanish from the command tree and from global discovery, yet stay reachable
-// for explicit introspection. Without them a refactor could silently re-expose
-// an unstable domain.
 
 func topLevelCmd(root *cobra.Command, name string) *cobra.Command {
 	for _, c := range root.Commands() {
@@ -566,17 +504,8 @@ func topLevelCmd(root *cobra.Command, name string) *cobra.Command {
 
 func TestDisabledServiceWithheldFromCommandTree(t *testing.T) {
 	root := NewRootCmd(newTestFactoryWithReg().Factory)
-	if topLevelCmd(root, "matter") != nil {
-		t.Error("disabled service `matter` must not appear in the command tree")
-	}
-	if topLevelCmd(root, "summary") != nil {
-		t.Error("disabled service `summary` must not appear in the command tree (see CHANGELOG withhold note)")
-	}
-	if topLevelCmd(root, "message") == nil {
-		t.Error("enabled service `message` must still appear")
-	}
-	if topLevelCmd(root, "event") == nil {
-		t.Error("enabled service `event` must still appear")
+	if topLevelCmd(root, "disabled") != nil || topLevelCmd(root, "example") == nil {
+		t.Fatal("expected the enabled fixture and no command for the disabled fixture")
 	}
 }
 
@@ -595,31 +524,20 @@ func TestDisabledServiceHiddenFromGlobalSchemaList(t *testing.T) {
 	data, _ := env["data"].(map[string]any)
 
 	for _, s := range data["services"].([]any) {
-		if s == "matter" {
-			t.Error("global schema --list must not list disabled service `matter`")
-		}
-		if s == "summary" {
-			t.Error("global schema --list must not list disabled service `summary`")
+		if s == "disabled" {
+			t.Error("global schema --list must not list disabled service `disabled`")
 		}
 	}
 	for _, op := range data["operations"].([]any) {
 		m, _ := op.(map[string]any)
-		if m["service"] == "matter" {
-			t.Errorf("global schema --list leaked a matter op: %v", m["id"])
-		}
-		if m["service"] == "summary" {
-			t.Errorf("global schema --list leaked a summary op: %v", m["id"])
+		if m["service"] == "disabled" {
+			t.Errorf("global schema --list leaked a disabled op: %v", m["id"])
 		}
 	}
 }
 
 func TestDisabledServiceStillIntrospectable(t *testing.T) {
-	// Both disabled services must remain introspectable — the schema
-	// surface is deliberately independent of the runtime command tree.
-	// Uses a fresh factory per iteration because TestFactory.Out is an
-	// accumulating buffer: reusing one factory would leave iter 2's
-	// unmarshal parsing two concatenated JSON envelopes and error out.
-	for _, svc := range []string{"matter", "summary"} {
+	for _, svc := range []string{"disabled"} {
 		f := newTestFactoryWithReg()
 		f.SetConfig(&config.Config{Format: "json"})
 

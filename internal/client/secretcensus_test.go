@@ -172,7 +172,7 @@ func TestSecretCensus_EveryPrintingSurfaceIsCovered(t *testing.T) {
 		{
 			name: "the verbose request trace",
 			run: func(t *testing.T) string {
-				srv := echo("application/json", `{"error":"wrong_password","message":"no"}`)
+				srv := echo("application/json", `{"error":"permission_denied","message":"no"}`)
 				defer srv.Close()
 				var errOut bytes.Buffer
 				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.BotCredential{Token: "uk_t"},
@@ -200,7 +200,7 @@ func TestSecretCensus_EveryPrintingSurfaceIsCovered(t *testing.T) {
 			name: "a JSON backend error body",
 			run: func(t *testing.T) string {
 				srv := echo("application/json",
-					`{"error":"wrong_password","message":"bad password `+password+`x","detail":{"`+token+`x":1}}`)
+					`{"error":"permission_denied","message":"bad password `+password+`x","detail":{"`+token+`x":1}}`)
 				defer srv.Close()
 				var errOut bytes.Buffer
 				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.BotCredential{Token: "uk_t"},
@@ -257,7 +257,7 @@ func TestSecretCensus_EveryPrintingSurfaceIsCovered(t *testing.T) {
 func censusRequest(token, password string) *Request {
 	return &Request{
 		Method:       http.MethodPost,
-		Path:         "/v1/user/drive/shares/" + token + "/access",
+		Path:         "/v1/keys/" + token + "/access",
 		Body:         map[string]any{"password": password},
 		SecretValues: []string{token, password},
 	}

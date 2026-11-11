@@ -1,15 +1,9 @@
 // Package cmd is the command tree. It wires cobra commands with the Factory DI
 // container and holds root-level persistent flags. Service-domain commands are
-// auto-registered from the embedded OpenAPI registry via cmd/service. Handwritten
-// command leaves are `schema`, `version`, `upgrade`, `api` (generic passthrough),
-// `config`, `skills`, `auth`, and `sheet-cell` (offline value→cell helper).
+// auto-registered from the embedded OpenAPI registry via cmd/service.
 package cmd
 
 import (
-	"fmt"
-	"os"
-	"strings"
-
 	"github.com/spf13/cobra"
 
 	"github.com/Mininglamp-OSS/octo-cli/cmd/service"
@@ -25,12 +19,9 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 
 	root := &cobra.Command{
 		Use:   "octo-cli",
-		Short: "Octo CLI — command-line interface for the Octo ecosystem",
-		Long:  "octo-cli is a CLI for AI Agent Bots to interact with Octo services.\nService commands are generated from the embedded OpenAPI registry.",
+		Short: "Octo CLI — an OpenAPI-driven command-line framework",
+		Long:  "octo-cli provides a generic HTTP client and generates service commands from embedded OpenAPI specs.",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if err := validateTaskModeCommand(cmd); err != nil {
-				return err
-			}
 			if skipValidation(cmd) {
 				// Help and completion render their own text, not a Factory
 				// success result. Other credential-free and local auth commands
@@ -66,7 +57,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	pf.BoolVar(&f.Globals.DryRun, "dry-run", false, "print request without executing")
 	pf.BoolVar(&f.Globals.Verbose, "verbose", false, "write request/response trace to stderr")
 	pf.StringVar(&f.Globals.Timeout, "timeout", "", "per-request timeout (default 30s; invalid values warn and use 30s)")
-	pf.BoolVar(&f.Globals.NoRetry, "no-retry", false, "disable retries, including multipart PUT, failure-triggered re-signing and completion; expired URLs may still be signed before the first PUT")
+	pf.BoolVar(&f.Globals.NoRetry, "no-retry", false, "disable automatic HTTP retries")
 	pf.StringVar(&f.Globals.Space, "space", "", "space id (for platform-scoped bots)")
 	pf.StringVar(&f.Globals.BotID, "bot-id", "", "select/assert the bot credential by robot id (env OCTO_BOT_ID)")
 	pf.StringVar(&f.Globals.Profile, "profile", "", "select the bot credential by profile name")
@@ -78,92 +69,24 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	root.AddCommand(newConfigCmd(f))
 	root.AddCommand(newSkillsCmd(f))
 	root.AddCommand(newAuthCmd(f))
-	root.AddCommand(newSheetCellCmd(f))
 	service.RegisterServiceCommands(root, f)
-	attachMailAuthCmd(root, f)
-	attachMailJMAPCommands(root, f)
-	registerDocsImportCmd(root, f)
-	registerDocsExportCmd(root, f)
-	registerDocsExcalidrawExportCmd(root, f)
-	registerDocsBoardCommentCmd(root, f)
-	registerDriveCmds(root, f)
-	withholdDisabledServices(root, f)
 
 	return root
 }
 
-// validateTaskModeCommand is defense in depth. It keeps daemon task processes
-// on the Loop surface without duplicating Fleet's route/action policy in the
-// CLI. Offline discovery commands remain available to agents.
-func validateTaskModeCommand(cmd *cobra.Command) error {
-	if strings.ToLower(strings.TrimSpace(os.Getenv(config.EnvCredentialMode))) != config.CredentialModeTask {
-		return nil
-	}
-	root := cmd.Root()
-	current := cmd
-	for current.Parent() != nil && current.Parent() != root {
-		current = current.Parent()
-	}
-	if current == root {
-		return nil
-	}
-	switch current.Name() {
-	case "loop", "help", "version", "schema", "skills", "completion":
-		return nil
-	default:
-		return fmt.Errorf("%s=task only allows Loop commands", config.EnvCredentialMode)
-	}
-}
-
-// withholdDisabledServices removes the command subtree for any service whose
-// spec sets x-octo-disabled (e.g. matter, whose backend API is not yet stable).
-// The spec stays embedded, so `octo-cli schema` and the metadata-driven engine
-// still see it — flip the flag in the spec to re-enable. Done here (after
-// registration) rather than inside RegisterServiceCommands so the engine tests
-// that drive it directly keep their full fixture coverage.
-func withholdDisabledServices(root *cobra.Command, f *cmdutil.Factory) {
-	reg := f.Registry()
-	if reg == nil {
-		return
-	}
-	for _, svc := range reg.ListServices() {
-		if !reg.ServiceDisabled(svc) {
-			continue
-		}
-		for _, c := range root.Commands() {
-			if c.Name() == svc {
-				root.RemoveCommand(c)
-				break
-			}
-		}
-	}
-}
-
-// skipValidation is true for commands that must run without a configured
-// credential (e.g. `octo-cli version`, `octo-cli upgrade`, `octo-cli help`,
-// `octo-cli schema`, `octo-cli config`, `octo-cli auth`, and cobra's generated
-// `completion`). Walks the parent chain so leaves like `config show` match
-// through their parent.
+// skipValidation allows local framework commands and service help to run
+// before a credential has been configured.
 func skipValidation(cmd *cobra.Command) bool {
-	// Per-command annotation, deliberately NOT inherited through the parent
-	// chain: service parents (`octo-cli thread`, `octo-cli group`, …) opt out of the
-	// auth gate so their help / unknown-subcommand path works without a token,
-	// but their leaf operations (`octo-cli thread create …`) must still authenticate.
+	// Service groups opt out for their own help and unknown-command paths.
 	if cmd.Annotations["skipValidation"] == "true" {
 		return true
 	}
-	for c := cmd; c != nil; c = c.Parent() {
-		switch c.Name() {
-		case "version", "help", "schema", "config", "completion", "skills", "sheet-cell", "":
-			return true
-		case "auth":
-			// Only the top-level `octo-cli auth` is credential-free. Nested
-			// service auth flows such as `mail auth login` require the active
-			// Bot credential and must pass the normal validation gate.
-			if c.Parent() != nil && c.Parent().Parent() == nil {
-				return true
-			}
-		}
+	for cmd.Parent() != nil && cmd.Parent().Parent() != nil {
+		cmd = cmd.Parent()
+	}
+	switch cmd.Name() {
+	case "octo-cli", "version", "help", "schema", "config", "completion", "skills", "auth":
+		return true
 	}
 	return false
 }

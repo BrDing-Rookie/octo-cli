@@ -1,0 +1,311 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Framework test fixture",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/records": {
+      "get": {
+        "operationId": "example.record.list",
+        "responses": {
+          "200": {
+            "description": "Fixture result"
+          }
+        },
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "owner",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "x-octo-pagination": {
+          "cursorParam": "cursor",
+          "limitParam": "limit"
+        }
+      },
+      "post": {
+        "operationId": "example.record.create",
+        "responses": {
+          "200": {
+            "description": "Fixture result"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "tags": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "priority": {
+                    "type": "integer",
+                    "enum": [
+                      1,
+                      2
+                    ]
+                  }
+                },
+                "required": [
+                  "title"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/records/{id}": {
+      "get": {
+        "operationId": "example.record.get",
+        "responses": {
+          "200": {
+            "description": "Fixture result"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "patch": {
+        "operationId": "example.record.update",
+        "responses": {
+          "200": {
+            "description": "Fixture result"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "parent_id": {
+                    "type": "integer",
+                    "format": "uint64"
+                  }
+                },
+                "required": [
+                  "parent_id"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "example.record.delete",
+        "responses": {
+          "200": {
+            "description": "Fixture result"
+          }
+        },
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/v1/keys/{key_id}": {
+      "delete": {
+        "operationId": "example.key.revoke",
+        "responses": {
+          "200": {
+            "description": "Fixture result"
+          }
+        },
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "x-octo-flag": "key-id",
+            "x-octo-secret": true
+          }
+        ]
+      }
+    },
+    "/v1/keys/{key_id}/verify": {
+      "post": {
+        "operationId": "example.key.verify",
+        "responses": {
+          "200": {
+            "description": "Fixture result"
+          }
+        },
+        "parameters": [
+          {
+            "name": "key_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "x-octo-flag": "key-id",
+            "x-octo-secret": true
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string",
+                    "x-octo-secret": true
+                  }
+                },
+                "required": []
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/artifacts": {
+      "post": {
+        "operationId": "example.artifact.upload",
+        "responses": {
+          "200": {
+            "description": "Fixture result"
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                },
+                "required": [
+                  "file"
+                ]
+              }
+            }
+          }
+        },
+        "x-octo-multipart": true
+      }
+    },
+    "/v1/records/search": {
+      "post": {
+        "operationId": "example.record.search",
+        "x-octo-pagination": {
+          "cursorParam": "cursor",
+          "limitParam": "limit"
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "keyword"
+                ],
+                "properties": {
+                  "keyword": {
+                    "type": "string"
+                  },
+                  "cursor": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Fixture page"
+          }
+        }
+      }
+    }
+  },
+  "x-octo-allowed-token-kinds": [
+    "app_bot",
+    "user_key"
+  ],
+  "x-octo-mount-by-token-kind": {
+    "app_bot": "/v1",
+    "user_key": "/v2"
+  }
+}

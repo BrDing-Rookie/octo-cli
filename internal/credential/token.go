@@ -1,13 +1,9 @@
 package credential
 
-// Token prefixes describe the credential format. They never determine a Loop
-// principal class; Fleet derives human/device/execution identity only after
-// server-side verification.
 const (
 	prefixApp     = "app_"
 	prefixUser    = "bf_"
 	prefixUserKey = "uk_"
-	prefixLoop    = "octo_loop_"
 )
 
 // TokenKind classifies only the token format. An empty token returns "".
@@ -21,8 +17,6 @@ func TokenKind(tok string) string {
 		return "user_bot"
 	case hasPrefix(tok, prefixUserKey):
 		return "user_key"
-	case hasPrefix(tok, prefixLoop):
-		return "loop_credential"
 	}
 	return "unknown"
 }
@@ -54,8 +48,6 @@ func MaskToken(tok string) string {
 		prefix = prefixUser
 	case hasPrefix(tok, prefixUserKey):
 		prefix = prefixUserKey
-	case hasPrefix(tok, prefixLoop):
-		prefix = prefixLoop
 	default:
 		// Unknown kind: reveal nothing. Without a recognized prefix there is no
 		// way to say what the revealed head/tail belong to, so don't leak it.

@@ -27,9 +27,8 @@ func TestMaskToken(t *testing.T) {
 		{"", ""},
 		{"app_abcdefgh12345678", "app_ab***5678"},
 		{"bf_something", "bf_so***hing"},
-		{"app_tiny", "app_***"}, // body "tiny" too short
-		{"bf_xx", "bf_***"},     // body too short
-		{"octo_loop_abcdefghijk", "octo_loop_ab***hijk"},
+		{"app_tiny", "app_***"},         // body "tiny" too short
+		{"bf_xx", "bf_***"},             // body too short
 		{"short", "***"},                // unknown prefix
 		{"unknown_format_token", "***"}, // unknown prefix: reveal nothing
 	}
@@ -42,12 +41,6 @@ func TestMaskToken(t *testing.T) {
 		if c.in != "" && got != "" && strings.Contains(got, "****") {
 			t.Errorf("MaskToken(%q) = %q leaks length via variable asterisks", c.in, got)
 		}
-	}
-}
-
-func TestTokenKindLoopDoesNotInferPrincipal(t *testing.T) {
-	if got := TokenKind("octo_loop_abcdefghijk"); got != "loop_credential" {
-		t.Fatalf("TokenKind = %q", got)
 	}
 }
 

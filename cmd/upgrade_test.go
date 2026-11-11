@@ -174,11 +174,10 @@ func TestUpgrade_HandoffWritesRequestWithoutCredentialsOrPublicOutput(t *testing
 	}
 }
 
-func TestUpgrade_PreflightAndTaskModeRefuseHandoff(t *testing.T) {
+func TestUpgrade_PreflightRefusesHandoff(t *testing.T) {
 	cases := []struct {
 		name       string
 		args       []string
-		mode       string
 		wantReason string
 	}{
 		{
@@ -196,19 +195,12 @@ func TestUpgrade_PreflightAndTaskModeRefuseHandoff(t *testing.T) {
 			args:       []string{"upgrade", "unexpected"},
 			wantReason: "unexpected",
 		},
-		{
-			name:       "Loop task mode",
-			args:       []string{"upgrade"},
-			mode:       config.CredentialModeTask,
-			wantReason: "only allows Loop commands",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			handoffDir := t.TempDir()
 			t.Setenv(upgradeHandoffEnv, handoffDir)
 			t.Setenv(upgradeReportEnv, "")
-			t.Setenv(config.EnvCredentialMode, tc.mode)
 			f := newUpgradeTestFactory()
 
 			_, _, err := execRoot(t, f, tc.args...)

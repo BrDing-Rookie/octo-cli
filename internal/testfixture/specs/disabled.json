@@ -1,0 +1,20 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Disabled fixture",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/v1/disabled": {
+      "get": {
+        "operationId": "disabled.list",
+        "responses": {
+          "200": {
+            "description": "Fixture result"
+          }
+        }
+      }
+    }
+  },
+  "x-octo-disabled": true
+}

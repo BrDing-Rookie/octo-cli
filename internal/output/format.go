@@ -172,10 +172,10 @@ func writeNDJSON(w io.Writer, v any) error {
 	return nil
 }
 
-// tableHeaders picks a deterministic column set. When common todo/matter keys
+// tableHeaders picks a deterministic column set. When common resource keys
 // are present they are ordered first; remaining keys are appended alphabetically.
 func tableHeaders(rows []map[string]any) []string {
-	priority := []string{"id", "title", "status", "assignee_id", "creator_id", "goal_id", "deadline", "created_at", "updated_at"}
+	priority := []string{"id", "title", "status", "created_at", "updated_at"}
 	seen := map[string]bool{}
 	var headers []string
 

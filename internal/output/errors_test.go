@@ -65,9 +65,9 @@ func TestAsExitError_NilAndPlainError(t *testing.T) {
 	}
 }
 
-// TestParseBackendError_MattersCodes exercises every entry in the backend
+// TestParseBackendError_NestedCodes exercises every entry in the backend
 // mapping table so we catch any accidental drift in taxonomy or hint wording.
-func TestParseBackendError_MattersCodes(t *testing.T) {
+func TestParseBackendError_NestedCodes(t *testing.T) {
 	cases := []struct {
 		code     string
 		wantType string
@@ -76,13 +76,9 @@ func TestParseBackendError_MattersCodes(t *testing.T) {
 		{"AUTH_REQUIRED", "auth_error"},
 		{"AUTH_UNAVAILABLE", "network"},
 		{"VALIDATION_ERROR", "validation"},
-		{"MATTER_NOT_FOUND", "api_error"},
 		{"NOT_FOUND", "api_error"},
-		{"ASSIGNEE_NOT_FOUND", "api_error"},
 		{"FORBIDDEN", "permission"},
-		{"BOT_WORKSPACE_MEMBERSHIP_REQUIRED", "permission"},
 		{"SPACE_FORBIDDEN", "permission"},
-		{"DUPLICATE_ASSIGNEE", "validation"},
 		{"DUPLICATE", "validation"},
 		{"UNSUPPORTED_MEDIA_TYPE", "validation"},
 		{"CLIENT_VERSION_TOO_OLD", "config"},
@@ -112,43 +108,7 @@ func TestParseBackendError_MattersCodes(t *testing.T) {
 	}
 }
 
-func TestParseBackendErrorWorkspaceBotMembershipHint(t *testing.T) {
-	body := []byte(`{"error":{"code":"BOT_WORKSPACE_MEMBERSHIP_REQUIRED","message":"bot must be added to workspace members"}}`)
-	ee := ParseBackendError(http.StatusForbidden, body)
-	if ee.Code != "BOT_WORKSPACE_MEMBERSHIP_REQUIRED" || ee.Type != "permission" {
-		t.Fatalf("error = %+v", ee)
-	}
-	if ee.Hint != "ask a Workspace owner or admin to add this Bot in Workspace Members" {
-		t.Fatalf("hint = %q", ee.Hint)
-	}
-}
-
-func TestParseBackendErrorBotDeleteForbidden(t *testing.T) {
-	for _, body := range []string{
-		`{"error":"bot_delete_forbidden"}`,
-		`{"error":{"code":"bot_delete_forbidden","message":"Bot deletion is forbidden","hint":"retry as admin"}}`,
-	} {
-		for _, parseError := range []func(int, []byte) *ExitError{ParseBackendError, ParsePublicAPIError} {
-			err := parseError(http.StatusForbidden, []byte(body))
-			if err.Code != "bot_delete_forbidden" || err.Type != "permission" || err.HTTPStatus != http.StatusForbidden {
-				t.Fatalf("error = %+v", err)
-			}
-			if err.ExitCode() != 1 || err.OutcomeUnknown() {
-				t.Fatalf("denial must be a definite failure: %+v", err)
-			}
-			for _, instruction := range []string{"even as owner/admin", "do not retry", "human"} {
-				if !strings.Contains(err.Hint, instruction) {
-					t.Errorf("hint %q must explain %q", err.Hint, instruction)
-				}
-			}
-			if string(err.Detail) != body {
-				t.Errorf("detail = %s, want %s", err.Detail, body)
-			}
-		}
-	}
-}
-
-func TestParseBackendError_MattersUnknownCode(t *testing.T) {
+func TestParseBackendError_NestedUnknownCode(t *testing.T) {
 	body := []byte(`{"error":{"code":"SOMETHING_NEW","message":"nope"}}`)
 	ee := ParseBackendError(418, body)
 	if ee.Code != "SOMETHING_NEW" {
@@ -162,14 +122,6 @@ func TestParseBackendError_MattersUnknownCode(t *testing.T) {
 	}
 	if ee.Message != "nope" {
 		t.Errorf("Message = %q", ee.Message)
-	}
-}
-
-func TestParseBackendError_PreservesServerHintForUnknownCode(t *testing.T) {
-	body := []byte(`{"error":{"code":"NEW_AUTH_CODE","message":"nope","hint":"refresh the task credential"}}`)
-	ee := ParsePublicAPIError(http.StatusUnauthorized, body)
-	if ee.Type != "auth_error" || ee.Hint != "refresh the task credential" {
-		t.Fatalf("error = %+v, want status taxonomy and server hint", ee)
 	}
 }
 
@@ -190,7 +142,7 @@ func TestParseBackendError_HintDoesNotChangeLegacyTaxonomy(t *testing.T) {
 	}
 }
 
-func TestParseBackendError_DmworkimFormat(t *testing.T) {
+func TestParseBackendError_StatusMessageFormat(t *testing.T) {
 	body := []byte(`{"msg":"中文错误","status":400}`)
 	ee := ParseBackendError(400, body)
 	if ee.Message != "中文错误" {
@@ -204,7 +156,7 @@ func TestParseBackendError_DmworkimFormat(t *testing.T) {
 	}
 }
 
-func TestParseBackendError_DmworkimAuth401(t *testing.T) {
+func TestParseBackendError_StatusMessageAuth401(t *testing.T) {
 	body := []byte(`{"msg":"认证失败","status":401}`)
 	ee := ParseBackendError(401, body)
 	if ee.Type != "auth_error" {
@@ -297,25 +249,6 @@ func TestParseBackendError_DetailRoundTrip(t *testing.T) {
 	}
 }
 
-func TestParseBackendError_DocsSheetRepairDetailAndHint(t *testing.T) {
-	body := []byte(`{"error":"sheet_too_large","baseVersion":"sv-1","repairDataValidationKey":"default!c","hint":"delete the returned checkbox validation key with PATCH, then retry the write"}`)
-	ee := ParseBackendError(http.StatusRequestEntityTooLarge, body)
-
-	if ee.Type != "validation" || ee.Code != "sheet_too_large" {
-		t.Fatalf("error = %+v", ee)
-	}
-	if ee.Hint != "delete the returned checkbox validation key with PATCH, then retry the write" {
-		t.Fatalf("hint = %q", ee.Hint)
-	}
-	var detail map[string]any
-	if err := json.Unmarshal(ee.Detail, &detail); err != nil {
-		t.Fatalf("Detail not valid JSON: %v", err)
-	}
-	if detail["baseVersion"] != "sv-1" || detail["repairDataValidationKey"] != "default!c" {
-		t.Fatalf("repair fields missing from detail: %v", detail)
-	}
-}
-
 func TestExitError_ExitCodes(t *testing.T) {
 	cases := []struct {
 		typ  string
@@ -372,7 +305,7 @@ func contains(s, sub string) bool {
 // "msg". These tests pin that shape and the lowercase code mapping, and confirm
 // the two older envelope families still classify exactly as before.
 
-func TestParseBackendError_DriveLowercaseCodes(t *testing.T) {
+func TestParseBackendError_StringCodes(t *testing.T) {
 	cases := []struct {
 		name     string
 		status   int
@@ -381,20 +314,10 @@ func TestParseBackendError_DriveLowercaseCodes(t *testing.T) {
 		wantCode string
 		wantExit int
 	}{
-		{"permission_denied", 403, `{"error":"permission_denied","message":"drive: permission denied"}`, "permission", "permission_denied", 1},
-		{"password_required", 403, `{"error":"password_required","message":"drive: password required"}`, "permission", "password_required", 1},
-		{"wrong_password", 403, `{"error":"wrong_password","message":"drive: wrong password"}`, "permission", "wrong_password", 1},
-		{"share_expired", 403, `{"error":"share_expired","message":"drive: share expired"}`, "permission", "share_expired", 1},
-		{"not_found", 404, `{"error":"not_found","message":"drive: not found"}`, "api_error", "not_found", 1},
-		{"conflict", 409, `{"error":"conflict","message":"drive: conflict"}`, "validation", "conflict", 2},
-		{"invalid_argument", 400, `{"error":"invalid_argument","message":"drive: invalid argument"}`, "validation", "invalid_argument", 2},
-		{"file_too_large", 413, `{"error":"file_too_large","message":"file exceeds limit","details":{"max_size_kb":1024,"size":2048}}`, "validation", "file_too_large", 2},
-		{"upload_mode_conflict", 409, `{"error":"upload_mode_conflict","message":"mode mismatch"}`, "validation", "upload_mode_conflict", 2},
-		{"client_capability_required", 409, `{"error":"client_capability_required","message":"capability missing"}`, "validation", "client_capability_required", 2},
-		{"object_size_mismatch", 409, `{"error":"object_size_mismatch","message":"size mismatch","details":{"actual_size":2048,"declared_size":1024}}`, "validation", "object_size_mismatch", 2},
-		{"upload_session_not_active", 409, `{"error":"upload_session_not_active","message":"session completed"}`, "validation", "upload_session_not_active", 2},
-		{"upload_policy_unavailable", 503, `{"error":"upload_policy_unavailable","message":"policy unavailable"}`, "api_error", "upload_policy_unavailable", 1},
-		{"too_many_upload_sessions", 429, `{"error":"too_many_upload_sessions","message":"session limit"}`, "rate_limited", "too_many_upload_sessions", 1},
+		{"permission_denied", 403, `{"error":"permission_denied","message":"permission denied"}`, "permission", "permission_denied", 1},
+		{"not_found", 404, `{"error":"not_found","message":"not found"}`, "api_error", "not_found", 1},
+		{"conflict", 409, `{"error":"conflict","message":"conflict"}`, "validation", "conflict", 2},
+		{"invalid_argument", 400, `{"error":"invalid_argument","message":"invalid argument"}`, "validation", "invalid_argument", 2},
 		{"unauthorized", 401, `{"error":"unauthorized","message":"missing token"}`, "auth_error", "unauthorized", 3},
 		{"auth_unavailable", 500, `{"error":"auth_unavailable","message":"upstream down"}`, "network", "auth_unavailable", 1},
 		{"internal", 500, `{"error":"internal","message":"boom"}`, "api_error", "internal", 1},
@@ -415,7 +338,7 @@ func TestParseBackendError_DriveLowercaseCodes(t *testing.T) {
 				t.Error("message must carry the backend text")
 			}
 			if ee.Hint == "" {
-				t.Error("a mapped drive code must carry an actionable hint")
+				t.Error("a mapped code must carry an actionable hint")
 			}
 		})
 	}
@@ -478,7 +401,7 @@ func TestParseBackendError_CrossFamilyTaxonomyIsIdentical(t *testing.T) {
 func TestBackendErrorMapping_CaseCounterpartsAgreeOnType(t *testing.T) {
 	for code, entry := range backendErrorMapping {
 		if code != strings.ToLower(code) {
-			continue // only walk the lowercase drive codes
+			continue // only walk the lowercase codes
 		}
 		counterpart, ok := backendErrorMapping[strings.ToUpper(code)]
 		if !ok {
@@ -487,24 +410,6 @@ func TestBackendErrorMapping_CaseCounterpartsAgreeOnType(t *testing.T) {
 		if entry.Type != counterpart.Type {
 			t.Errorf("%s is %q but %s is %q; a caller must not have to know which backend answered",
 				code, entry.Type, strings.ToUpper(code), counterpart.Type)
-		}
-	}
-}
-
-// file_too_large shares a Type and exit code with the generic 413 fallback, so
-// parsing that status alone cannot prove the drive-specific mapping still
-// exists. Pin the explicit entry and its actionable hint directly.
-func TestBackendErrorMapping_FileTooLargeIsExplicit(t *testing.T) {
-	entry, ok := backendErrorMapping["file_too_large"]
-	if !ok {
-		t.Fatal("file_too_large must have an explicit drive error mapping")
-	}
-	if entry.Type != "validation" {
-		t.Errorf("file_too_large type = %q, want validation", entry.Type)
-	}
-	for _, want := range []string{"max_size_kb", "size"} {
-		if !contains(entry.Hint, want) {
-			t.Errorf("file_too_large hint = %q, want it to mention %q", entry.Hint, want)
 		}
 	}
 }
@@ -541,9 +446,9 @@ func TestParseBackendError_FreeTextErrorIsNotACode(t *testing.T) {
 	}
 }
 
-// The dmworkim {msg,status} family must still be recognised — it has no "error"
+// The {msg,status} shape must still be recognised — it has no "error"
 // key, so the drive layer never sees it.
-func TestParseBackendError_DmworkimEnvelopeUnaffected(t *testing.T) {
+func TestParseBackendError_StatusMessageEnvelopeUnaffected(t *testing.T) {
 	ee := ParseBackendError(400, []byte(`{"msg":"bad request","status":400}`))
 	if ee.Message != "bad request" {
 		t.Errorf("message: got %q", ee.Message)

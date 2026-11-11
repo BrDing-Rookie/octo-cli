@@ -98,9 +98,6 @@ func TestAuth_UpdateAPIBaseURLPreservesCredentials(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authstore.New: %v", err)
 	}
-	if err := store.SaveMailCredential("cli_demo", "omb_mail_secret"); err != nil {
-		t.Fatalf("SaveMailCredential: %v", err)
-	}
 
 	f := newTestFactoryWithReg()
 	out, _, err := execRoot(t, f,
@@ -117,10 +114,6 @@ func TestAuth_UpdateAPIBaseURLPreservesCredentials(t *testing.T) {
 	botToken, err := store.GetToken("cli_demo")
 	if err != nil || botToken != "app_demo_token" {
 		t.Fatalf("Bot token changed: %q, %v", botToken, err)
-	}
-	mailToken, err := store.GetMailCredential("cli_demo")
-	if err != nil || mailToken != "omb_mail_secret" {
-		t.Fatalf("mail token changed: %q, %v", mailToken, err)
 	}
 
 	f = newAuthTestFactory()
@@ -246,7 +239,7 @@ func TestConfigShow_InvalidProfileURLSurfacesRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("authstore.New: %v", err)
 	}
-	if err := store.UpdateProfileAPIBaseURL("bad", "https://bad.example/fleet/api"); err != nil {
+	if err := store.UpdateProfileAPIBaseURL("bad", "https://bad.example/v1/records"); err != nil {
 		t.Fatalf("seed invalid API base URL: %v", err)
 	}
 
@@ -279,7 +272,7 @@ func TestAuth_UpdateAPIBaseURLRejectsInvalidOriginWithoutChangingProfile(t *test
 
 	for _, invalid := range []string{
 		"not a url at all",
-		"https://evil.example/fleet/api?x=1",
+		"https://evil.example/v1/records?x=1",
 	} {
 		t.Run(invalid, func(t *testing.T) {
 			f := newTestFactoryWithReg()

@@ -91,7 +91,7 @@ func TestMain_MissingTokenExitCode(t *testing.T) {
 		t.Fatalf("build: %v", err)
 	}
 
-	cmd := exec.Command(bin, "event", "list")
+	cmd := exec.Command(bin, "api", "GET", "/v1/records")
 	// Drop every OCTO_ token/selector variable and point at an empty credential
 	// store so no profile and no env token resolve, and Validate trips on the
 	// missing token instead of the command reaching the network.

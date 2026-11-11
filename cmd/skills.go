@@ -37,7 +37,7 @@ func loadSkills() ([]skillEntry, error) {
 			return nil, err
 		}
 		// Skills marked `disabled: true` in their frontmatter are withheld
-		// (e.g. octo-matter, whose backend API is not yet stable). The file
+		// from the command output. The file
 		// stays embedded — drop the flag to re-list it.
 		if skillDisabled(b) {
 			continue
@@ -239,7 +239,7 @@ func runSkillsShow(f *cmdutil.Factory, entries []skillEntry, name string) error 
 
 // runSkillsInstall writes every enabled skill's whole markdown set to
 // <dir>/<name>/ — SKILL.md plus any sibling progressive-disclosure reference
-// files (e.g. octo-docs/sheet.md) — and reports the files written.
+// files and reports the files written.
 func runSkillsInstall(f *cmdutil.Factory, entries []skillEntry, dir string) error {
 	written := make([]string, 0, len(entries))
 	seen := make(map[string]bool)

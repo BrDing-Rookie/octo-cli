@@ -20,7 +20,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-const outputPreflightMessageBody = `{"channel_id":"channel-1","channel_type":1,"payload":{"content":"hello"}}`
+const outputPreflightBody = `{"title":"sample"}`
 
 func newOutputPreflightServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	t.Helper()
@@ -28,7 +28,7 @@ func newOutputPreflightServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"client_msg_no":"client-1","message_id":42,"message_seq":7}`)
+		_, _ = io.WriteString(w, `{"client_ref":"client-1","record_id":42,"revision":7}`)
 	}))
 	t.Cleanup(server.Close)
 	return server, &calls
@@ -77,8 +77,6 @@ func configureOutputPreflightProfileEnv(t *testing.T, configDir string) {
 	t.Setenv(config.EnvToken, "")
 	t.Setenv(config.EnvBotToken, "")
 	t.Setenv(config.EnvBotID, "")
-	t.Setenv(config.EnvCredentialMode, "")
-	t.Setenv(config.EnvTaskToken, "")
 	t.Setenv(config.EnvAPIBaseURL, "")
 	t.Setenv(config.EnvSpaceID, "")
 }
@@ -100,7 +98,7 @@ func TestOutputPreflight_InvalidExplicitFormatDoesNotSendRequest(t *testing.T) {
 
 	_, err := executeOutputPreflightRoot(t, f.Factory,
 		"--format", "unsupported",
-		"message", "send", "--data", outputPreflightMessageBody,
+		"api", "POST", "/v1/records", "--data", outputPreflightBody,
 	)
 	requireOutputConfigError(t, err)
 	if got := calls.Load(); got != 0 {
@@ -121,7 +119,7 @@ func TestOutputPreflight_InvalidEnvironmentFormatWithProfileDoesNotSendRequest(t
 
 	f := cmdutil.NewDefaultFactory()
 	_, err = executeOutputPreflightRoot(t, f, "--profile", "agent",
-		"message", "send", "--data", outputPreflightMessageBody,
+		"api", "POST", "/v1/records", "--data", outputPreflightBody,
 	)
 	requireOutputConfigError(t, err)
 	if got := calls.Load(); got != 0 {
@@ -135,7 +133,7 @@ func TestOutputPreflight_InvalidJQDoesNotSendRequest(t *testing.T) {
 
 	_, err := executeOutputPreflightRoot(t, f.Factory,
 		"--jq", ".[",
-		"message", "send", "--data", outputPreflightMessageBody,
+		"api", "POST", "/v1/records", "--data", outputPreflightBody,
 	)
 	requireOutputConfigError(t, err)
 	if got := calls.Load(); got != 0 {
@@ -149,7 +147,7 @@ func TestOutputPreflight_UncompilableJQDoesNotSendRequest(t *testing.T) {
 
 	_, err := executeOutputPreflightRoot(t, f.Factory,
 		"--jq", "missing_audit_function",
-		"message", "send", "--data", outputPreflightMessageBody,
+		"api", "POST", "/v1/records", "--data", outputPreflightBody,
 	)
 	if got := calls.Load(); got != 0 {
 		t.Fatalf("business HTTP requests = %d, want 0 before rejecting --jq that fails compilation", got)
@@ -223,16 +221,16 @@ func TestOutputPreflight_LegitimateControlsRemainAvailable(t *testing.T) {
 				var got struct {
 					OK   bool `json:"ok"`
 					Data struct {
-						ClientMsgNo string `json:"client_msg_no"`
-						MessageID   int64  `json:"message_id"`
-						MessageSeq  int64  `json:"message_seq"`
+						ClientRef string `json:"client_ref"`
+						RecordID  int64  `json:"record_id"`
+						Revision  int64  `json:"revision"`
 					} `json:"data"`
 				}
 				if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 					t.Fatalf("decode JSON success result: %v", err)
 				}
-				if !got.OK || got.Data.ClientMsgNo != "client-1" || got.Data.MessageID != 42 || got.Data.MessageSeq != 7 {
-					t.Fatalf("JSON success result = %+v, want the message send response", got)
+				if !got.OK || got.Data.ClientRef != "client-1" || got.Data.RecordID != 42 || got.Data.Revision != 7 {
+					t.Fatalf("JSON success result = %+v, want the fixture response", got)
 				}
 			},
 		},
@@ -240,7 +238,7 @@ func TestOutputPreflight_LegitimateControlsRemainAvailable(t *testing.T) {
 			name:  "table",
 			flags: []string{"--format", "table"},
 			check: func(t *testing.T, stdout string) {
-				for _, want := range []string{"client-1", "message_id", "42", "7"} {
+				for _, want := range []string{"client-1", "record_id", "42", "7"} {
 					if !strings.Contains(stdout, want) {
 						t.Fatalf("table output lacks result field %q: %s", want, stdout)
 					}
@@ -262,8 +260,8 @@ func TestOutputPreflight_LegitimateControlsRemainAvailable(t *testing.T) {
 				for i, header := range rows[0] {
 					values[header] = rows[1][i]
 				}
-				if values["client_msg_no"] != "client-1" || values["message_id"] != "42" || values["message_seq"] != "7" {
-					t.Fatalf("CSV result = %#v, want the message send response", values)
+				if values["client_ref"] != "client-1" || values["record_id"] != "42" || values["revision"] != "7" {
+					t.Fatalf("CSV result = %#v, want the fixture response", values)
 				}
 			},
 		},
@@ -272,16 +270,16 @@ func TestOutputPreflight_LegitimateControlsRemainAvailable(t *testing.T) {
 			flags: []string{"--format", "ndjson"},
 			check: func(t *testing.T, stdout string) {
 				var got struct {
-					ClientMsgNo string `json:"client_msg_no"`
-					MessageID   int64  `json:"message_id"`
-					MessageSeq  int64  `json:"message_seq"`
+					ClientRef string `json:"client_ref"`
+					RecordID  int64  `json:"record_id"`
+					Revision  int64  `json:"revision"`
 				}
 				decoder := json.NewDecoder(strings.NewReader(stdout))
 				if err := decoder.Decode(&got); err != nil {
 					t.Fatalf("decode NDJSON result: %v", err)
 				}
-				if got.ClientMsgNo != "client-1" || got.MessageID != 42 || got.MessageSeq != 7 {
-					t.Fatalf("NDJSON result = %+v, want the message send response", got)
+				if got.ClientRef != "client-1" || got.RecordID != 42 || got.Revision != 7 {
+					t.Fatalf("NDJSON result = %+v, want the fixture response", got)
 				}
 				if err := decoder.Decode(new(any)); err != io.EOF {
 					t.Fatalf("NDJSON has extra records: %v", err)
@@ -290,7 +288,7 @@ func TestOutputPreflight_LegitimateControlsRemainAvailable(t *testing.T) {
 		},
 		{
 			name:  "valid jq",
-			flags: []string{"--jq", ".data.message_id"},
+			flags: []string{"--jq", ".data.record_id"},
 			check: func(t *testing.T, stdout string) {
 				var got int64
 				if err := json.Unmarshal([]byte(stdout), &got); err != nil {
@@ -307,7 +305,7 @@ func TestOutputPreflight_LegitimateControlsRemainAvailable(t *testing.T) {
 			server, _ := newOutputPreflightServer(t)
 			f := newOutputPreflightTestFactory(server.URL)
 			args := append(append([]string(nil), tc.flags...),
-				"message", "send", "--data", outputPreflightMessageBody,
+				"api", "POST", "/v1/records", "--data", outputPreflightBody,
 			)
 			stdout, err := executeOutputPreflightRoot(t, f.Factory, args...)
 			if err != nil {
@@ -324,10 +322,10 @@ func TestOutputPreflight_ServiceHelpIgnoresInvalidOutputControls(t *testing.T) {
 		commandPath   []string
 		outputControl string
 	}{
-		{name: "service parent with malformed jq", commandPath: []string{"thread"}, outputControl: "jq"},
-		{name: "service parent with invalid environment format", commandPath: []string{"thread"}, outputControl: "format"},
-		{name: "nested group with malformed jq", commandPath: []string{"docs", "comments"}, outputControl: "jq"},
-		{name: "nested group with invalid environment format", commandPath: []string{"docs", "comments"}, outputControl: "format"},
+		{name: "service parent with malformed jq", commandPath: []string{"example"}, outputControl: "jq"},
+		{name: "service parent with invalid environment format", commandPath: []string{"example"}, outputControl: "format"},
+		{name: "nested group with malformed jq", commandPath: []string{"example", "record"}, outputControl: "jq"},
+		{name: "nested group with invalid environment format", commandPath: []string{"example", "record"}, outputControl: "format"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -344,8 +342,8 @@ func TestOutputPreflight_ServiceHelpIgnoresInvalidOutputControls(t *testing.T) {
 			}
 			args = append(args, tc.commandPath...)
 
-			f := cmdutil.NewDefaultFactory()
-			root := NewRootCmd(f)
+			f := newTestFactoryWithReg()
+			root := NewRootCmd(f.Factory)
 			helpCommand, _, err := root.Find(tc.commandPath)
 			if err != nil {
 				t.Fatalf("find help command: %v", err)

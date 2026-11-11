@@ -18,10 +18,7 @@ const MaxUint64Decimal = "18446744073709551615"
 //
 // Two spec-declared, opt-in transforms run in order:
 //
-//  1. fieldAliases (x-octo-response-fields) renames/duplicates keys, e.g. the
-//     drive share DTO's bare `id` becomes both `share_id` (for revoke) and
-//     `share_token` (consumed internally by share access/download), so an
-//     Agent never has to guess which meaning a generic `id` carries.
+//  1. fieldAliases (x-octo-response-fields) renames or duplicates keys.
 //  2. losslessFields (x-octo-lossless-id-fields) rewrites uint64 ids from JSON
 //     numbers to decimal strings. The decode uses json.Decoder.UseNumber, so a
 //     value above 2^53 survives the round-trip that a float64 would round.
@@ -151,7 +148,7 @@ func ParseUint64Decimal(flagOrArg, value string) (uint64, *ExitError) {
 	if value == "" {
 		return 0, ErrValidation(
 			fmt.Sprintf("%s must be a decimal uint64 id", flagOrArg),
-			"pass the id exactly as returned by a previous drive command")
+			"pass the id exactly as returned by the API")
 	}
 	for i := 0; i < len(value); i++ {
 		if value[i] < '0' || value[i] > '9' {

@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
-	"github.com/Mininglamp-OSS/octo-cli/skills"
 )
 
 func TestParseSkillDescription(t *testing.T) {
@@ -67,27 +66,6 @@ func hasSkill(entries []skillEntry, name string) bool {
 	return false
 }
 
-// octo-matter sets `disabled: true` in its frontmatter — it must drop out of
-// the listing while staying embedded (so re-enabling is just a flag flip).
-func TestLoadSkillsExcludesDisabled(t *testing.T) {
-	entries, err := loadSkills()
-	if err != nil {
-		t.Fatalf("loadSkills: %v", err)
-	}
-	if hasSkill(entries, "octo-matter") {
-		t.Error("disabled skill `octo-matter` must not be listed")
-	}
-	if hasSkill(entries, "octo-summary") {
-		t.Error("disabled skill `octo-summary` must not be listed (see CHANGELOG withhold note)")
-	}
-	if _, err := skills.FS.ReadFile("octo-matter/SKILL.md"); err != nil {
-		t.Errorf("octo-matter/SKILL.md must stay embedded (only the listing filters it): %v", err)
-	}
-	if _, err := skills.FS.ReadFile("octo-summary/SKILL.md"); err != nil {
-		t.Errorf("octo-summary/SKILL.md must stay embedded (only the listing filters it): %v", err)
-	}
-}
-
 // A config without a token must still let `octo-cli skills` run — the command is
 // offline and on the skipValidation list.
 func TestCmd_SkillsList(t *testing.T) {
@@ -130,67 +108,6 @@ func TestCmd_SkillsShow(t *testing.T) {
 	}
 	if content, _ := data["content"].(string); !strings.Contains(content, "octo-shared") {
 		t.Errorf("content missing skill body: %.80q", content)
-	}
-}
-
-// Agent Mail onboarding starts by asking the runtime to load the official
-// skill directly from the released binary. This command must remain available
-// before Bot or mailbox authorization is configured.
-func TestCmd_SkillsShowOctoMailWithoutAuth(t *testing.T) {
-	f := newTestFactoryWithReg()
-	f.SetConfig(&config.Config{Format: "json"})
-
-	out, _, err := execRoot(t, f, "skills", "octo-mail")
-	if err != nil {
-		t.Fatalf("skills octo-mail: %v", err)
-	}
-	var env map[string]any
-	if jerr := json.Unmarshal([]byte(out), &env); jerr != nil {
-		t.Fatalf("unmarshal: %v\n%s", jerr, out)
-	}
-	data, _ := env["data"].(map[string]any)
-	if data["name"] != "octo-mail" {
-		t.Errorf("name = %v", data["name"])
-	}
-	content, _ := data["content"].(string)
-	for _, want := range []string{
-		"Always inspect the authorization state first",
-		"octo-cli mail auth login",
-		"octo-cli mail auth status",
-		"octo-cli mail me",
-	} {
-		if !strings.Contains(content, want) {
-			t.Errorf("octo-mail content missing %q", want)
-		}
-	}
-}
-
-// A split skill (octo-docs) must reprint its whole set through `skills <name>`:
-// SKILL.md in `content` plus every progressive-disclosure reference under
-// `references`. This guards the bug where only SKILL.md was returned, dropping
-// most of the skill's command docs after the split.
-func TestCmd_SkillsShowIncludesReferences(t *testing.T) {
-	f := newTestFactoryWithReg()
-	f.SetConfig(&config.Config{Format: "json"})
-
-	out, _, err := execRoot(t, f, "skills", "octo-docs")
-	if err != nil {
-		t.Fatalf("skills octo-docs: %v", err)
-	}
-	var env map[string]any
-	if jerr := json.Unmarshal([]byte(out), &env); jerr != nil {
-		t.Fatalf("unmarshal: %v\n%s", jerr, out)
-	}
-	data, _ := env["data"].(map[string]any)
-	refs, ok := data["references"].(map[string]any)
-	if !ok || len(refs) == 0 {
-		t.Fatalf("expected non-empty references for split skill octo-docs, got %v", data["references"])
-	}
-	for _, want := range []string{"sheet.md", "doc.md", "board.md", "common.md"} {
-		body, present := refs[want].(string)
-		if !present || strings.TrimSpace(body) == "" {
-			t.Errorf("reference %q missing or empty in skills octo-docs output", want)
-		}
 	}
 }
 
@@ -239,12 +156,7 @@ func TestCmd_SkillsInstall(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(dir, "octo-shared", "SKILL.md")); statErr != nil {
 		t.Errorf("expected octo-shared/SKILL.md under install dir: %v", statErr)
 	}
-	// A split skill must lay down its reference files too, not just SKILL.md.
-	for _, ref := range []string{"SKILL.md", "sheet.md", "doc.md", "board.md", "common.md"} {
-		if _, statErr := os.Stat(filepath.Join(dir, "octo-docs", ref)); statErr != nil {
-			t.Errorf("expected octo-docs/%s under install dir: %v", ref, statErr)
-		}
-	}
+
 }
 
 func TestCmd_SkillsInstallEmptyDir(t *testing.T) {

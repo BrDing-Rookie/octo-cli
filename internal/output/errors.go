@@ -98,109 +98,40 @@ func ErrNetwork(msg, hint string) *ExitError {
 	return &ExitError{Type: "network", Code: "NETWORK_ERROR", Message: msg, Hint: hint}
 }
 
-// ErrLoopAPIUnsupported reports that the configured Octo server does not
-// expose the Fleet public API required by Loop commands.
-func ErrLoopAPIUnsupported() *ExitError {
-	return &ExitError{
-		Type:    "api_error",
-		Code:    "LOOP_API_UNSUPPORTED",
-		Message: "this Octo server version does not support Loop",
-		Hint:    "upgrade the Octo backend or use an environment where Fleet /fleet/api/v1 is enabled",
-	}
-}
-
-// --- backend error mapping ---
-
-// backendErrorMapping maps backend error codes to CLI taxonomy + hint. See
-// docs/architecture-design.md §4.3.
-//
-// Two code conventions coexist because two backend families do: the matters /
-// dmworkim family emits SCREAMING_SNAKE codes, octo-drive emits lowercase
-// snake_case ones. Both are looked up in this single table, and a code and its
-// cross-family counterpart carry the **same** Type — an agent must be able to
-// branch on the CLI taxonomy and exit code without first working out which
-// backend answered. Only the hint differs, so it can name the domain's own
-// remedy. Codes not present here fall back to status-based inference, unchanged.
+// backendErrorMapping classifies common machine-readable backend errors.
 var backendErrorMapping = map[string]struct {
 	Type string
 	Hint string
 }{
-	"UNAUTHORIZED":                         {"auth_error", "check OCTO_TOKEN / OCTO_BOT_TOKEN; bot may be unpublished"},
-	"AUTH_REQUIRED":                        {"auth_error", "provide a valid Octo or Loop bearer credential"},
-	"AUTH_UNAVAILABLE":                     {"network", "auth service unreachable; retry later"},
-	"VALIDATION_ERROR":                     {"validation", "check params with `octo-cli schema <op>`"},
-	"MATTER_NOT_FOUND":                     {"api_error", "inspect the operation schema with `octo-cli schema matter.get`; matter commands are currently withheld"},
-	"NOT_FOUND":                            {"api_error", "resource not found"},
-	"ASSIGNEE_NOT_FOUND":                   {"api_error", "assignee not in space or invalid UID"},
-	"FORBIDDEN":                            {"permission", "bot lacks permission; check space membership"},
-	"BOT_WORKSPACE_MEMBERSHIP_REQUIRED":    {"permission", "ask a Workspace owner or admin to add this Bot in Workspace Members"},
-	"SPACE_FORBIDDEN":                      {"permission", "bot not a member of this space"},
-	"bot_delete_forbidden":                 {"permission", "bots cannot delete documents, even as owner/admin; do not retry or switch identities/routes; ask a human with document admin permission to delete it in Octo"},
-	"sheet_not_found":                      {"api_error", "run docs sheet list for current worksheet IDs and names; do not fall back to reading every worksheet"},
-	"ambiguous_sheet_name":                 {"validation", "inspect the candidate worksheet IDs and ask the user to disambiguate; retry with --sheet-id"},
-	"invalid_sheet_selector":               {"validation", "use exactly one nonempty --sheet-id or --sheet-name from docs sheet list"},
-	"cleaning_overwrite_required":          {"validation", "inspect the split preview and overwrittenCells; only after approval retry the same version with --preview=false --overwrite"},
-	"cleaning_filtered_sheet":              {"validation", "cleaning refuses active shared filters; copy the data as values to a plain worksheet instead of changing another user's filter"},
-	"cleaning_complex_sheet":               {"validation", "copy the data as values to a plain worksheet without drawings, links, validations or comments before cleaning"},
-	"cleaning_formula_unsupported":         {"validation", "source formulas are not supported; copy the data as values before cleaning"},
-	"cleaning_merged_range":                {"validation", "the output overlaps merged cells; choose an unmerged plain-data range"},
-	"cleaning_delimiter_not_found":         {"validation", "the literal delimiter is absent from stored values; number-format thousands separators are not delimiters"},
-	"cleaning_single_column_required":      {"validation", "split accepts exactly one source column; narrow the input range"},
-	"cleaning_range_out_of_bounds":         {"validation", "read sheetList and choose a source and destination inside the worksheet dimensions"},
-	"cleaning_invalid_delimiter":           {"validation", "use a nonempty literal delimiter of at most 16 characters; CSV quoting is not interpreted"},
-	"sheet_conditional_format_unsupported": {"validation", "structural edits cannot relocate conditional-format rules yet; preserve the rules and use a worksheet without them or wait for supported relocation; never delete rules automatically to bypass this refusal"},
-	"DUPLICATE_ASSIGNEE":                   {"validation", "already assigned; check current assignees"},
-	"DUPLICATE":                            {"validation", "the resource already exists; inspect the current resource before retrying"},
-	"UNSUPPORTED_MEDIA_TYPE":               {"validation", "use the content type declared by `octo-cli schema <op>`"},
-	"CLIENT_VERSION_TOO_OLD":               {"config", "upgrade octo-cli and retry"},
-	"RATE_LIMITED":                         {"rate_limited", "server-side rate limit; retry after cooldown"},
-	"UPSTREAM_UNAVAILABLE":                 {"network", "upstream dependency unavailable; retry later"},
-	"INTERNAL_ERROR":                       {"api_error", "internal server error; retry or report"},
-	"PAYLOAD_TOO_LARGE":                    {"validation", "request body exceeds 1MB limit"},
-	"CONFLICT":                             {"validation", "resource state conflicts; re-read and retry"},
-	"PRECONDITION_FAILED":                  {"validation", "base version stale; re-read to get the current base version, then retry"},
-	"UNPROCESSABLE_ENTITY":                 {"validation", "request understood but semantically invalid; check field shapes"},
-
-	// octo-drive lowercase codes (drive spec §7.2). Each shares its Type with
-	// the uppercase counterpart above: conflict/CONFLICT and
-	// invalid_argument/VALIDATION_ERROR are both validation (exit 2),
-	// not_found/NOT_FOUND both api_error, unauthorized/UNAUTHORIZED both
-	// auth_error (exit 3).
-	"unauthorized":               {"auth_error", "token invalid, revoked, or the user/bot is inactive; re-check the credential"},
-	"auth_unavailable":           {"network", "auth service unreachable; retry later"},
-	"permission_denied":          {"permission", "caller lacks the required drive space role"},
-	"password_required":          {"permission", "pass --password for this share"},
-	"wrong_password":             {"permission", "verify the share password"},
-	"share_expired":              {"permission", "request a new share"},
-	"not_found":                  {"api_error", "verify the id/token and that the space is accessible"},
-	"conflict":                   {"validation", "drive state conflicts; re-read and retry"},
-	"invalid_argument":           {"validation", "inspect the operation schema with `octo-cli schema <op>`"},
-	"file_too_large":             {"validation", "compare max_size_kb with size, then choose a smaller file or a multipart-capable upload path"},
-	"upload_mode_conflict":       {"validation", "the server owns the upload mode; follow the response upload_mode and use the matching single or multipart flow"},
-	"client_capability_required": {"validation", "declare X-Drive-Upload-Capabilities: multipart-v1 for multipart uploads; small single-part uploads remain compatible without it"},
-	"object_size_mismatch":       {"validation", "compare actual_size with declared_size and restart the upload with the complete file"},
-	"upload_session_not_active":  {"validation", "read status: start a new session when aborted or treat confirmed as success; never retry the same upload_id"},
-	"upload_policy_unavailable":  {"api_error", "wait for retry_after_seconds, then retry with bounded backoff"},
-	"too_many_upload_sessions":   {"rate_limited", "finish or abort existing sessions until below limit, then retry"},
-	"too_many_data_validations":  {"validation", "send fewer rules per sheet; each sheet array replaces the whole rule set, so splitting one sheet across retries drops rules"},
-	"too_many_sheet_resources":   {"validation", "send fewer freeze or filter sheet entries per edit; split only those top-level sheet keys across batches"},
-	"internal":                   {"api_error", "internal server error; retry or report"},
+	"UNAUTHORIZED":           {"auth_error", "check the active bearer credential"},
+	"AUTH_REQUIRED":          {"auth_error", "provide a valid bearer credential"},
+	"AUTH_UNAVAILABLE":       {"network", "auth service unreachable; retry later"},
+	"VALIDATION_ERROR":       {"validation", "check params with octo-cli schema"},
+	"NOT_FOUND":              {"api_error", "resource not found"},
+	"FORBIDDEN":              {"permission", "check the active credential's permissions"},
+	"SPACE_FORBIDDEN":        {"permission", "check space membership"},
+	"DUPLICATE":              {"validation", "the resource already exists; inspect it before retrying"},
+	"UNSUPPORTED_MEDIA_TYPE": {"validation", "use the content type declared by the operation"},
+	"CLIENT_VERSION_TOO_OLD": {"config", "upgrade octo-cli and retry"},
+	"RATE_LIMITED":           {"rate_limited", "server-side rate limit; retry after cooldown"},
+	"UPSTREAM_UNAVAILABLE":   {"network", "upstream dependency unavailable; retry later"},
+	"INTERNAL_ERROR":         {"api_error", "internal server error; retry or report"},
+	"PAYLOAD_TOO_LARGE":      {"validation", "request body exceeds the server limit"},
+	"CONFLICT":               {"validation", "resource state conflicts; re-read and retry"},
+	"PRECONDITION_FAILED":    {"validation", "read the current resource version before retrying"},
+	"UNPROCESSABLE_ENTITY":   {"validation", "check the request field values"},
+	"unauthorized":           {"auth_error", "check the active bearer credential"},
+	"auth_unavailable":       {"network", "auth service unreachable; retry later"},
+	"permission_denied":      {"permission", "check the active credential's permissions"},
+	"not_found":              {"api_error", "resource not found"},
+	"conflict":               {"validation", "resource state conflicts; re-read and retry"},
+	"invalid_argument":       {"validation", "check params with octo-cli schema"},
+	"internal":               {"api_error", "internal server error; retry or report"},
 }
 
-// ParseBackendError converts an HTTP response body (and status) to an *ExitError.
-// It tries the matters envelope first, then the octo-drive {error,message}
-// shape, then dmworkim {msg,status}, falling back to a raw dump. The status
-// code is used as a signal when the body is unparseable.
+// ParseBackendError maps the HTTP status and backend error body to an ExitError.
 func ParseBackendError(status int, body []byte) *ExitError {
-	return withStatus(parseBackendError(status, body, false), status)
-}
-
-// ParsePublicAPIError parses a Fleet Public API error envelope. Unlike the
-// legacy parser, unknown machine codes use the HTTP status as their taxonomy
-// fallback. The protocol is selected by the caller; a presentation-only field
-// such as hint must never change an agent's exit code.
-func ParsePublicAPIError(status int, body []byte) *ExitError {
-	return withStatus(parseBackendError(status, body, true), status)
+	return withStatus(parseBackendError(status, body), status)
 }
 
 // withStatus stamps the originating HTTP status so callers can tell a definite
@@ -212,8 +143,8 @@ func withStatus(err *ExitError, status int) *ExitError {
 	return err
 }
 
-func parseBackendError(status int, body []byte, publicAPI bool) *ExitError {
-	// Layer 1: matters envelope {"error":{"code":"...","message":"...","details":{...}}}
+func parseBackendError(status int, body []byte) *ExitError {
+	// Nested error object: {"error":{"code":"...","message":"...","details":{...}}}
 	var mEnv struct {
 		Error struct {
 			Code    string          `json:"code"`
@@ -223,21 +154,10 @@ func parseBackendError(status int, body []byte, publicAPI bool) *ExitError {
 		} `json:"error"`
 	}
 	if len(body) > 0 && json.Unmarshal(body, &mEnv) == nil && mEnv.Error.Code != "" {
-		// Preserve the historical api_error classification for unknown legacy
-		// codes. Public API callers explicitly opt into status-based fallback.
-		fallbackType := "api_error"
-		if publicAPI {
-			fallbackType = typeFromStatus(status)
-		}
-		return newBackendError(mEnv.Error.Code, mEnv.Error.Message, fallbackType, mEnv.Error.Hint, body)
+		return newBackendError(mEnv.Error.Code, mEnv.Error.Message, "api_error", mEnv.Error.Hint, body)
 	}
 
-	// Layer 2: octo-drive envelope {"error":"not_found","message":"..."} — the
-	// code is a bare string rather than a nested object, and the human text is
-	// under "message" (not "msg"). Only snake_case identifiers are treated as
-	// codes; free-text `error` values (octo-drive's space middleware emits
-	// "missing X-Space-Id", "invalid token", …) fall through to the raw
-	// fallback below, exactly as they did before this layer existed.
+	// String code with a separate message: {"error":"not_found","message":"..."}.
 	var dvEnv struct {
 		Error   string `json:"error"`
 		Message string `json:"message"`
@@ -255,7 +175,7 @@ func parseBackendError(status int, body []byte, publicAPI bool) *ExitError {
 		return newBackendError(dvEnv.Error, msg, typeFromStatus(status), hint, body)
 	}
 
-	// Layer 3: dmworkim {"msg":"...","status":400}
+	// Status and message: {"msg":"...","status":400}
 	var dEnv struct {
 		Msg    string `json:"msg"`
 		Status int    `json:"status"`
@@ -340,7 +260,7 @@ func newBackendError(code, message, fallbackType, fallbackHint string, body []by
 }
 
 // looksLikeErrorCode reports whether s is a lowercase snake_case identifier,
-// the shape octo-drive uses for machine-readable codes. Anything else (empty,
+// the shape used for machine-readable codes. Anything else (empty,
 // spaces, mixed case, punctuation) is human prose and must not be promoted to
 // an ExitError.Code.
 func looksLikeErrorCode(s string) bool {

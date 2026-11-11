@@ -6,6 +6,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 	"github.com/Mininglamp-OSS/octo-cli/internal/registry"
+	"github.com/Mininglamp-OSS/octo-cli/internal/testfixture"
 )
 
 // --- reserved flag names ---
@@ -30,7 +31,7 @@ func TestFlags_GlobalFlagNamesAreReserved(t *testing.T) {
 	}
 	// The `-q` shorthand of `--jq` must stay out: pflag keeps shorthands in a
 	// separate namespace, so a spec param named `q` (matter.list,
-	// marketplace plugin.list) does not shadow it and must remain registrable.
+	// a query named q) does not shadow it and must remain registrable.
 	if reservedFlagNames["q"] {
 		t.Error(`"q" must not be reserved: it is --jq's shorthand, and matter.list / plugin.list ` +
 			`declare a query param named q that would lose its flag`)
@@ -41,7 +42,7 @@ func TestFlags_GlobalFlagNamesAreReserved(t *testing.T) {
 
 // TestPathSegments_DotSegmentsRejected covers the gap that let a dot segment
 // reach the URL: url.PathEscape leaves "." and ".." untouched, so
-// `share revoke --share-id ..` produced DELETE /v1/user/drive/shares/.. and any
+// `example key revoke --key-id ..` produced DELETE /v1/keys/.. and any
 // gateway that normalises dot segments would have turned that into a DELETE
 // against the collection.
 func TestPathSegments_DotSegmentsRejected(t *testing.T) {
@@ -49,15 +50,15 @@ func TestPathSegments_DotSegmentsRejected(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"dot-dot via a path flag on a DELETE", []string{"drive", "share", "revoke", "--share-id", ".."}},
-		{"single dot via a path flag on a DELETE", []string{"drive", "share", "revoke", "--share-id", "."}},
-		{"dot-dot as a positional", []string{"drive", "space", "get", ".."}},
-		{"single dot as a positional", []string{"drive", "space", "get", "."}},
+		{"dot-dot via a path flag on a DELETE", []string{"example", "key", "revoke", "--key-id", ".."}},
+		{"single dot via a path flag on a DELETE", []string{"example", "key", "revoke", "--key-id", "."}},
+		{"dot-dot as a positional", []string{"example", "record", "get", ".."}},
+		{"single dot as a positional", []string{"example", "record", "get", "."}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var called bool
-			root, _ := rootWithDriveToken(t, "bf_bot", func(w http.ResponseWriter, r *http.Request) {
+			root, _, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
 				called = true
 			})
 			root.SetArgs(tc.args)
@@ -80,15 +81,15 @@ func TestPathSegments_DotSegmentsRejected(t *testing.T) {
 // entirely "." or ".." may be refused.
 func TestPathSegments_DotsInsideAnIDStillWork(t *testing.T) {
 	var gotPath string
-	root, _ := rootWithDriveToken(t, "bf_bot", func(w http.ResponseWriter, r *http.Request) {
+	root, _, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
 		_, _ = w.Write([]byte(`{"id":"a.b"}`))
 	})
-	root.SetArgs([]string{"drive", "space", "get", "a.b..c"})
+	root.SetArgs([]string{"example", "record", "get", "a.b..c"})
 	if err := root.Execute(); err != nil {
 		t.Fatalf("execute: %v", err)
 	}
-	if want := "/v1/bot/drive/spaces/a.b..c"; gotPath != want {
+	if want := "/v1/records/a.b..c"; gotPath != want {
 		t.Errorf("path: got %q, want %q", gotPath, want)
 	}
 }
@@ -150,7 +151,7 @@ func TestPagination_TransformConflictFailsLoud(t *testing.T) {
 // the runtime guard turns the combination into an error, and this turns it into
 // a build failure at the moment a spec author writes it.
 func TestPagination_NoSpecPairsWithOutputTransforms(t *testing.T) {
-	reg := registry.MustNew()
+	reg := testfixture.Registry()
 	for _, svc := range reg.ListServices() {
 		for _, info := range reg.ListOperations(svc) {
 			d, ok := reg.GetOperation(info.ID)
@@ -174,7 +175,7 @@ func TestPagination_NoSpecPairsWithOutputTransforms(t *testing.T) {
 // spec declares such an enum — this test is the tripwire, and its failure means
 // the asymmetry has to be closed rather than documented.
 func TestEnum_NoHeaderOrPathParamDeclaresEnum(t *testing.T) {
-	reg := registry.MustNew()
+	reg := testfixture.Registry()
 	for _, svc := range reg.ListServices() {
 		for _, info := range reg.ListOperations(svc) {
 			d, ok := reg.GetOperation(info.ID)
@@ -198,64 +199,6 @@ func TestEnum_NoHeaderOrPathParamDeclaresEnum(t *testing.T) {
 
 // --- enum numbers compare by exact wire text ---
 
-// TestEnum_NonIntegralNumbersDoNotSatisfyAnIntegerVocabulary closes a gap in the
-// canonical comparison: it used to fall back to ParseFloat and collapse any value
-// equal to its own truncation to an integer, so `1.0` matched the entry `1`,
-// passed the gate, and was then sent verbatim — the body keeps the caller's
-// original json.Number. A Go int field rejects `1.0` on decode, so the request
-// failed at the backend with exactly the internal-struct-name error the local
-// gate exists to prevent, on a value the gate had just called valid.
-//
-// `1.0` is not exotic: it is what a jq expression or any JSON-producing agent
-// emits for an arithmetic result.
-func TestEnum_NonIntegralNumbersDoNotSatisfyAnIntegerVocabulary(t *testing.T) {
-	cases := []struct {
-		value string
-		// accepted reports whether the value should satisfy the vocabulary.
-		accepted bool
-	}{
-		{"1", true},
-		{"2", true},
-		{"5", true},
-		{"1.0", false},
-		{"1e0", false},
-		{"1E0", false},
-		{"1.00000000000000000001", false},
-		{"9", false}, // control: outside the vocabulary entirely
-	}
-	for _, tc := range cases {
-		t.Run(tc.value, func(t *testing.T) {
-			var called bool
-			root, _ := rootWithDriveToken(t, "bf_bot", func(w http.ResponseWriter, r *http.Request) {
-				called = true
-				_, _ = w.Write([]byte(`{}`))
-			})
-			data := `{"im_group_no":"g","im_channel_type":` + tc.value +
-				`,"im_msg_id":"m","target_space_id":"s"}`
-			root.SetArgs([]string{"drive", "im-transfer", "create", "--data", data})
-			err := root.Execute()
-			if tc.accepted {
-				if err != nil {
-					t.Fatalf("%s is an integer in the vocabulary and must be accepted: %v", tc.value, err)
-				}
-				if !called {
-					t.Error("an accepted value must still reach the backend")
-				}
-				return
-			}
-			if err == nil {
-				t.Fatalf("%s is not an integer on the wire and must be refused", tc.value)
-			}
-			if called {
-				t.Error("a refused value must not reach the backend")
-			}
-			if ee := output.AsExitError(err); ee == nil || ee.Code != "ENUM_NOT_ALLOWED" {
-				t.Errorf("code: got %v, want ENUM_NOT_ALLOWED", err)
-			}
-		})
-	}
-}
-
 // --- empty path values ---
 
 // TestPathSegments_EmptyPathValueRejected asserts an empty path value is refused
@@ -272,15 +215,14 @@ func TestPathSegments_EmptyPathValueRejected(t *testing.T) {
 		name string
 		args []string
 	}{
-		{"empty positional on a DELETE", []string{"drive", "share", "revoke", ""}},
-		{"empty path flag on a DELETE", []string{"drive", "share", "revoke", "--share-id", ""}},
-		{"empty positional on a GET", []string{"drive", "space", "get", ""}},
-		{"empty positional in a two-slot path", []string{"drive", "folder", "list", "s1", ""}},
+		{"empty positional on a DELETE", []string{"example", "key", "revoke", ""}},
+		{"empty path flag on a DELETE", []string{"example", "key", "revoke", "--key-id", ""}},
+		{"empty positional on a GET", []string{"example", "record", "get", ""}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var called bool
-			root, _ := rootWithDriveToken(t, "bf_bot", func(w http.ResponseWriter, r *http.Request) {
+			root, _, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
 				called = true
 			})
 			root.SetArgs(tc.args)
@@ -312,7 +254,7 @@ func TestPathSegments_EmptyPathValueRejected(t *testing.T) {
 // This is the other half: wherever the gate *does* run (query and body), no field the spec
 // marks secret may declare a vocabulary, because the diagnostic would quote it.
 func TestEnum_NoSecretFieldDeclaresAnEnum(t *testing.T) {
-	reg := registry.MustNew()
+	reg := testfixture.Registry()
 	for _, svc := range reg.ListServices() {
 		for _, info := range reg.ListOperations(svc) {
 			d, ok := reg.GetOperation(info.ID)

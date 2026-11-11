@@ -24,13 +24,13 @@ func newSchemaCmd(f *cmdutil.Factory) *cobra.Command {
 		Use:   "schema [--list [domain] | operation-id]",
 		Short: "Inspect operation parameters and response schema from the registry",
 		Long: `Print the request parameters, request body, and response schema for an
-operation (e.g. "octo-cli schema matter.create"), or list available operations
+operation (e.g. "octo-cli schema items.create"), or list available operations
 with --list.
 
 Examples:
   octo-cli schema --list                # all services and operations
-  octo-cli schema --list matter         # only matter operations
-  octo-cli schema matter.create         # full schema for one operation`,
+  octo-cli schema --list items         # only item operations
+  octo-cli schema items.create         # full schema for one operation`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			reg := f.Registry()

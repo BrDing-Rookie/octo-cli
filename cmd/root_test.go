@@ -2,10 +2,7 @@ package cmd
 
 import (
 	"bytes"
-	"io"
-	"net/http"
-	"net/http/httptest"
-	"os"
+
 	"strings"
 	"testing"
 
@@ -25,7 +22,7 @@ import (
 //
 // Regression guard for PR #20 review: the parent-`RunE` change made parents
 // Runnable() and routed them through the auth gate, turning
-// `octo-cli thread bogus` into UNAUTHORIZED instead of "unknown subcommand".
+// `octo-cli example bogus` into UNAUTHORIZED instead of "unknown subcommand".
 func TestNewRootCmd_ParentCommandSkipAuthAndRejectUnknown(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -35,19 +32,19 @@ func TestNewRootCmd_ParentCommandSkipAuthAndRejectUnknown(t *testing.T) {
 		wantErrSubstr string
 	}{
 		{
-			name: "thread no args prints help without a token",
-			args: []string{"thread"},
+			name: "example no args prints help without a token",
+			args: []string{"example"},
 		},
 		{
-			name:          "thread unknown subcommand -> validation, not auth_error",
-			args:          []string{"thread", "bogus"},
+			name:          "example unknown subcommand -> validation, not auth_error",
+			args:          []string{"example", "bogus"},
 			wantErr:       true,
 			wantErrType:   "validation",
 			wantErrSubstr: "unknown subcommand",
 		},
 		{
-			name:          "thread delete (removed) -> validation, not auth_error",
-			args:          []string{"thread", "delete", "g", "s"},
+			name:          "example delete (removed) -> validation, not auth_error",
+			args:          []string{"example", "record", "unknown"},
 			wantErr:       true,
 			wantErrType:   "validation",
 			wantErrSubstr: "unknown subcommand",
@@ -101,8 +98,8 @@ func TestNewRootCmd_LeafStillRequiresAuth(t *testing.T) {
 	f := newTestFactoryWithReg()
 	f.SetConfig(&config.Config{APIBaseURL: "http://localhost", BotToken: ""})
 	root := NewRootCmd(f.Factory)
-	// `octo-cli group list` is a leaf under `group` (which has the annotation).
-	root.SetArgs([]string{"group", "list"})
+	// `octo-cli example record list` is a leaf under `example record` (which has the annotation).
+	root.SetArgs([]string{"example", "record", "list"})
 	var buf bytes.Buffer
 	root.SetOut(&buf)
 	root.SetErr(&buf)
@@ -133,7 +130,7 @@ func TestNewRootCmd_LeafStillRequiresAuth(t *testing.T) {
 //
 // The `-q` shorthand of `--jq` is deliberately absent from the reserved set:
 // pflag keeps shorthands in a separate namespace, so a spec param legitimately
-// named `q` (matter.list, marketplace plugin.list) does not shadow it.
+// named `q` does not shadow it.
 func TestNewRootCmd_ReservedGlobalFlagNamesMatchPersistentFlags(t *testing.T) {
 	f := cmdutil.NewTestFactory()
 	f.SetConfig(&config.Config{Format: "json"})
@@ -177,102 +174,4 @@ func persistentFlagNames(root *cobra.Command) map[string]bool {
 		}
 	}
 	return names
-}
-
-func TestNewRootCmd_ExplicitCredentialMode(t *testing.T) {
-	cases := []struct {
-		name, mode, taskToken, token, botToken, wantToken string
-		args                                              []string
-	}{
-		{"task ignores both native tokens", "task", "opaque-task-credential", "bf_canonical", "bf_alias", "opaque-task-credential", []string{"loop", "task", "list", "--workspace-id", "workspace-test"}},
-		{"task works without other credentials", "task", "opaque-task-credential", "", "", "opaque-task-credential", []string{"loop", "task", "list", "--workspace-id", "workspace-test"}},
-		{"normal Loop keeps native identity", "", "opaque-task-credential", "bf_canonical", "bf_alias", "bf_canonical", []string{"loop", "task", "list", "--workspace-id", "workspace-test"}},
-		{"normal documents ignore task token", "", "opaque-task-credential", "", "bf_alias", "bf_alias", []string{"docs", "list"}},
-		{"normal drive keeps user key", "", "opaque-task-credential", "uk_user", "bf_alias", "uk_user", []string{"drive", "space", "list"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(config.EnvCredentialMode, tc.mode)
-			t.Setenv(config.EnvTaskToken, tc.taskToken)
-			t.Setenv(config.EnvToken, tc.token)
-			t.Setenv(config.EnvBotToken, tc.botToken)
-			t.Setenv(config.EnvSpaceID, "native-space")
-			t.Setenv(config.EnvBotID, "")
-			blockedStore := t.TempDir() + "/not-a-directory"
-			if err := os.WriteFile(blockedStore, []byte("x"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv("OCTO_CONFIG_DIR", blockedStore)
-			calls := 0
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				calls++
-				if got := r.Header.Get("Authorization"); got != "Bearer "+tc.wantToken {
-					t.Errorf("Authorization = %q, want explicit mode's credential", got)
-				}
-				if tc.mode == "task" && r.Header.Get("X-Space-ID") != "" {
-					t.Error("task request leaked native Space context")
-				}
-				if tc.token == "uk_user" && r.URL.Path != "/v1/user/drive/spaces" {
-					t.Errorf("user-key path = %q", r.URL.Path)
-				}
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = io.WriteString(w, `{"data":[]}`)
-			}))
-			defer server.Close()
-			t.Setenv(config.EnvAPIBaseURL, server.URL)
-			f := cmdutil.NewDefaultFactory()
-			f.IOStreams.Out, f.IOStreams.ErrOut = io.Discard, io.Discard
-			root := NewRootCmd(f)
-			root.SetArgs(tc.args)
-			if err := root.Execute(); err != nil {
-				t.Fatalf("Execute: %v", err)
-			}
-			if calls != 1 {
-				t.Fatalf("request count = %d, want 1", calls)
-			}
-		})
-	}
-}
-
-func TestNewRootCmd_TaskModeFailsClosed(t *testing.T) {
-	cases := []struct {
-		name, taskToken, token, botToken, wantError string
-		args                                        []string
-	}{
-		{"generic task alias is ignored", "", "octo_loop_legacy", "bf_native", "OCTO_TASK_TOKEN", []string{"loop", "task", "list", "--workspace-id", "workspace-test"}},
-		{"missing task token fails locally", "", "", "", "OCTO_TASK_TOKEN", []string{"loop", "task", "list", "--workspace-id", "workspace-test"}},
-		{"profiles remain blocked", "task-credential", "", "bf_native", "--profile", []string{"loop", "task", "list", "--workspace-id", "workspace-test", "--profile", "host"}},
-		{"space overrides remain blocked", "task-credential", "", "", "--space", []string{"loop", "task", "list", "--workspace-id", "workspace-test", "--space", "other"}},
-		{"native command cannot switch identity", "task-credential", "bf_native", "", "only allows Loop commands", []string{"docs", "list"}},
-		{"auth remains blocked", "task-credential", "", "bf_native", "only allows Loop commands", []string{"auth", "status"}},
-		{"config remains blocked", "task-credential", "", "bf_native", "only allows Loop commands", []string{"config", "show"}},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(config.EnvCredentialMode, config.CredentialModeTask)
-			t.Setenv(config.EnvTaskToken, tc.taskToken)
-			t.Setenv(config.EnvToken, tc.token)
-			t.Setenv(config.EnvBotToken, tc.botToken)
-			t.Setenv(config.EnvBotID, "")
-			t.Setenv("OCTO_CONFIG_DIR", t.TempDir())
-			t.Setenv(config.EnvAPIBaseURL, "http://127.0.0.1:1")
-			f := cmdutil.NewDefaultFactory()
-			f.IOStreams.Out, f.IOStreams.ErrOut = io.Discard, io.Discard
-			root := NewRootCmd(f)
-			root.SetArgs(tc.args)
-			if err := root.Execute(); err == nil || !strings.Contains(err.Error(), tc.wantError) {
-				t.Fatalf("Execute error = %v, want %q", err, tc.wantError)
-			}
-		})
-	}
-}
-
-func TestNewRootCmd_TaskModeAllowsOfflineDiscovery(t *testing.T) {
-	t.Setenv(config.EnvCredentialMode, config.CredentialModeTask)
-	f := newTestFactoryWithReg()
-	root := NewRootCmd(f.Factory)
-	root.SetArgs([]string{"schema", "task.get"})
-	if err := root.Execute(); err != nil {
-		t.Fatalf("offline schema: %v", err)
-	}
 }

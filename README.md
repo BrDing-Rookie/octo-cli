@@ -4,53 +4,71 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/Mininglamp-OSS/octo-cli.svg)](https://pkg.go.dev/github.com/Mininglamp-OSS/octo-cli)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](./LICENSE)
 
-`octo-cli` is the command-line interface for the **Octo ecosystem** — a thin,
-single-binary REST client designed for **AI Agent Bots** to call via `exec`
-from agent runtimes (OpenClaw, Claude Code, and similar). Every invocation
-emits a structured JSON envelope on stdout; errors go to stderr with a
-deterministic taxonomy. There is no interactive I/O.
+`octo-cli` is an OpenAPI-driven command-line framework for HTTP APIs. It
+builds a single Go binary with an extensible Cobra command tree, credential
+profiles, request previews and structured output for scripts and agents.
 
-## Architecture
+This checkout ships with an empty service registry. The framework commands are
+`api`, `schema`, `auth`, `config`, `skills`, `upgrade`, `version`, `help` and
+`completion`.
 
-octo-cli is **metadata-driven**. The command tree is auto-registered at startup
-from OpenAPI 3.x specs embedded into the binary. Adding or changing an endpoint
-means editing a spec, not the code.
+## Build and try the framework
 
+```sh
+make build
+./bin/octo-cli --help
+./bin/octo-cli schema --list
 ```
-OpenAPI specs  ──►  Registry  ──►  Service Engine  ──►  Factory  ──►  Client  ──►  Output
-(embedded)         (parsed)       (cobra commands)    (DI)          (HTTP)       (envelope)
+
+`schema --list` starts with empty `services` and `operations` arrays. To preview
+a request through the generic HTTP command, use a fixture origin and token:
+
+```sh
+OCTO_API_BASE_URL=https://api.example.invalid OCTO_TOKEN=app_example \
+  ./bin/octo-cli api GET /v1/items --params '{"limit":10}' --dry-run
 ```
 
-Key properties:
+`api <METHOD> <PATH>` accepts JSON query parameters through `--params` and a
+JSON body through `--data`. Use `--data @file.json` or `--data @-` to read a
+body from a file or stdin. Paths are relative to the configured gateway.
 
-- **Thin client.** All business logic lives in backend services (matters,
-  dmworkim). The CLI is transport, validation, and formatting.
-- **Unified gateway routing.** Each operation declares its complete
-  module-qualified path and uses `OCTO_API_BASE_URL`.
-- **Factory DI.** `internal/cmdutil.Factory` is the dependency container.
-  No mutable package-level globals; tests inject stubs through `ConfigFunc`
-  / `CredentialFunc` / `ClientFunc` / `RegistryFunc`.
-- **Agent-first output.** A stable JSON envelope with identity, data,
-  pagination, and rate-limit metadata; a small fixed error taxonomy.
+## Configuration and credentials
 
-## Domains
+Set `OCTO_TOKEN` or use `octo-cli auth login --profile <name>` to store a
+credential read from a hidden prompt, stdin (`--with-token`), or a file
+(`--token-file`). The profile store defaults to `~/.octo-cli` and can be moved
+with `OCTO_CONFIG_DIR`. Tokens are encrypted at rest.
 
-| Domain    | Ops | Purpose                                                        |
-|-----------|-----|----------------------------------------------------------------|
-| `docs`    | 45  | Documents, spreadsheets, whiteboards & PPT — lifecycle, full-text search, body content, worksheet discovery and scoped/paged reads, sheet edits (atomic replace, conditional formats, split/deduplication), board scenes, members, comments, versions, attachments |
-| `html`    | 22  | Interactive HTML documents (octo-doc, **separate backend** from `docs`) — read source with its version, publish immutable versions, drafts, per-doc share codes & per-uid grants, media assets, inline comments, agent element read/replace |
-| `drive`   | 47  | Network drive — spaces & members, folder/file tree, full-text search and creator selection, single-part and resumable-style multipart blob upload, signed download, online-document mounts, share links, invites, IM-attachment transfer. Six hand-written composites bring the command tree to 50 leaves |
-| `matter`  | 14  | Todos/tasks — **temporarily withheld** while the backend API stabilizes |
-| `summary` | 4   | Personal-bot summaries — create owner-only summaries from explicit sources, then discover/read/cite. **Temporarily withheld** while the create backend (Mininglamp-OSS/octo-smart-summary#181) is merged, deployed, and enabled |
-| `group`   | 9   | Groups — list, get, members, metadata; create/update (User Bot)|
-| `thread`  | 8   | Threads — create, list, get, members, join/leave, metadata     |
-| `bot`     | 6   | Bot lifecycle — register, user-info, space-members, heartbeat  |
-| `message` | 10  | Messaging — send, edit, sync, read-receipt; search (search/all/files/media/around/groups, in-channel or cross-channel) |
-| `file`    | 4   | Files — upload, download, credentials, presigned URLs          |
-| `event`   | 2   | Event polling — list, ack                                      |
-| `loop`    | 126 | Fleet control plane — tasks and assignees, Loop projects/resources, Project member rosters, experts, expert teams, workspaces, runtimes, skills, automations, and attachments |
+An explicit `--profile` or `--bot-id` selector takes priority, followed by
+`OCTO_TOKEN`, the compatible `OCTO_BOT_TOKEN`, and an implicitly selected
+profile. Use `OCTO_BOT_ID` or a selector when several profiles are available.
+`auth status` and `config show` report the active source with the token masked.
 
-## Installation
+The gateway origin comes from the selected profile's `api_base_url`, then
+`OCTO_API_BASE_URL`, then the Octo default. To bind a profile to an origin,
+pass `--api-base-url` during login or use `auth update --api-base-url`.
+`--space` or `OCTO_SPACE_ID` supplies an optional space context.
+
+## Add an OpenAPI specification
+
+Place an OpenAPI 3.x JSON file in [internal/registry/specs](internal/registry/specs)
+and rebuild. The filename selects the service name unless the spec declares
+`x-octo-service`. An operation such as `example.item.get` becomes
+`octo-cli example item get`. Path parameters become positional arguments.
+Query and header parameters and simple body properties become flags.
+
+Use `schema --list` and `schema <operation-id>` to inspect the resulting
+registry. See the [architecture guide](docs/architecture-design.md) for the
+request flow and supported metadata. `octo-cli skills octo-shared` prints
+the bundled framework guidance.
+
+Successful commands default to a JSON envelope on stdout. Errors use a
+structured envelope on stderr and a nonzero exit code. `--jq` filters the
+success envelope and `--format` selects `json`, `table`, `csv`, or `ndjson`.
+Use `--dry-run` to preview a request, `--verbose` for diagnostics, and
+`--timeout` or `--no-retry` to control transport.
+
+## Distribution
 
 ### npm, Bun or pnpm
 
@@ -71,12 +89,6 @@ contains the prebuilt binary. Install does not download binaries from GitHub.
 
 ```bash
 go install github.com/Mininglamp-OSS/octo-cli/cmd/octo-cli@latest
-```
-
-### Homebrew (coming soon)
-
-```bash
-brew install Mininglamp-OSS/tap/octo-cli
 ```
 
 ### GitHub Releases
@@ -124,461 +136,18 @@ project's registry settings do not redirect the upgrade.
 Dry run checks local ownership without contacting a registry or installing.
 Upgrade requires no Octo credentials and preserves `--format` / `--jq`.
 Use the original installation method for raw binaries, `go install`, project-local
-or temporary installs. Loop task mode does not allow upgrades. Package-manager
+or temporary installs. Package-manager
 failures stop the command; an installation failure can leave partially changed
 files, so inspect the structured error before retrying.
 
-## Quick Start
-
-```bash
-# Authenticate as a bot (`OCTO_BOT_TOKEN` remains a compatible alias).
-export OCTO_TOKEN="bf_your_user_bot_token"
-# Optional for test or self-hosted deployments; production is the default.
-# export OCTO_API_BASE_URL="https://im-test.deepminer.com.cn"
-
-# NOTE: the `matter` domain is temporarily withheld (backend API stabilizing).
-
-# Messaging
-octo-cli message send --data '{"channel_id":"chat-1","channel_type":1,"payload":{"type":1,"content":"hi"}}'
-octo-cli message edit --data '{"message_id":"m-1","channel_id":"chat-1","channel_type":1,"content_edit":"{\"type\":1,\"content\":\"updated\"}"}'
-
-# Message search (User Bot bf_ or user API key uk_ token; App Bot app_ is rejected locally).
-octo-cli message search --chat-id chat-1 --keyword "quarterly report"   # in-channel
-octo-cli message search --keyword "quarterly report"                    # cross-channel (mixed feed)
-octo-cli message search files --chat-id chat-1 --keyword "*.pdf"        # files in a channel
-octo-cli message search groups --keyword "quarterly report"            # which channels matched (L1)
-octo-cli message search all --keyword "budget" --on-behalf-of u-alice  # OBO: as a real person
-
-# Groups and threads
-octo-cli group list
-octo-cli group members group-abc
-octo-cli thread list group-abc
-octo-cli thread create group-abc --name "design review"
-
-# Files
-octo-cli file upload --file ./report.pdf
-octo-cli file download abc123 --jq '.data.url'
-
-# Drive — the server chooses single-part or multipart upload; the same command
-# handles both. Its single prepare request declares multipart-v1; the server
-# returns `single` below its threshold or a multipart snapshot above it.
-# Multipart progress goes to stderr.
-octo-cli drive upload file ./large.bin --space-id <drive-space-id>
-
-# Agent Mail — policy-aware send; the server may accept it or save a Draft
-# depending on the mailbox's current outbound mode.
-octo-cli mail message send-intent \
-  --to recipient@example.com --subject "Status update" --text "Ready." \
-  --idempotency-key "send-example-001"
-octo-cli mail thread get T123
-octo-cli mail draft list
-# Draft update replaces the entire Draft. Read it first and resend every field
-# that must remain; omitted cc/bcc/text/html/attachments are removed.
-octo-cli mail message read E123
-octo-cli mail draft update E123 --draft-version 1 \
-  --to recipient@example.com --cc teammate@example.com \
-  --bcc archive@example.com --subject "Updated draft" --text "Updated body"
-# Retaining attachments requires a complete attachments array containing the
-# exact base64 content, supplied through --data.
-
-# Send an ordinary human-authored Draft without --draft-version.
-octo-cli mail draft send E120
-# Send an Agent-prepared Draft with its current version.
-octo-cli mail draft send E124 --draft-version 2
-octo-cli mail draft delete E125
-
-# Docs — create/list/search, then read and incrementally edit the live body.
-octo-cli docs create --title "Design notes"
-octo-cli docs list --sort updatedAt:desc
-octo-cli docs search --keyword "quarterly plan" --doc-type doc --page-all
-octo-cli docs get doc-123
-octo-cli docs content get doc-123          # returns the body + base version token
-octo-cli docs import doc-123 --file ./notes.md      # replaces a doc from .md/.markdown/.docx
-octo-cli docs export doc-123 --export-format pdf -o ./notes.pdf
-# PPT: use the dedicated live revision API; preserve all fields when editing.
-octo-cli docs create --docType html_ppt --title "Quarterly Review" --templateId signal --idempotency-key <unique-key>
-# Native gallery: signal, terra, orbital, picnic; requires the matching backend catalogue.
-# The server clones a template; the agent fills it through docs ppt get/edit (see skills/octo-docs/ppt.md).
-octo-cli docs ppt get ppt-7
-octo-cli docs ppt edit ppt-7 --data @edit.json   # {"baseRevision":7,"deck":{...}}
-octo-cli docs ppt get ppt-7                    # read back to verify the change
-octo-cli docs ppt export ppt-7 --file-format html --output slides.html
-# Anchors, comment replies, versions and restore: skills/octo-docs/ppt.md.
-# Boards: portable export and point/element comments.
-octo-cli docs scene export board-7 --image-format excalidraw -o ./board.excalidraw
-octo-cli docs comments add board-7 --body "Review this" --point 120,240
-# For --element-id anchors, dry-run still reads the live board scene to resolve geometry.
-octo-cli docs members set doc-123 --uid u-1 --role writer
-# Member mutations are Space-qualified. Set defaults to the authenticated Bot
-# Space when omitted; removal always requires the exact principal Space.
-octo-cli docs members set doc-123 --uid u-1 --role writer --principal-space-id space-2
-octo-cli docs members remove doc-123 u-1 --principal-space-id space-2
-
-# Fleet/Loop uses the same gateway under /fleet/api/v1.
-# Workspace state and lifecycle discovery.
-octo-cli loop workspace list
-octo-cli loop workspace get <workspace-uuid> --workspace-id <workspace-uuid>
-octo-cli loop task list --workspace-id <workspace-uuid>
-# Multica-style assignment: --to accepts a name with an optional leading @; use --to-id for a complete ID.
-# Automatic name/ID lookup reads at most 10 pages per roster; use explicit typed fields for larger rosters.
-octo-cli loop task assign TASK-42 --workspace-id <workspace-uuid> --to "@Alice"
-octo-cli loop task assign TASK-42 --workspace-id <workspace-uuid> --to-id <member-or-expert-or-team-id> --suppress-run
-octo-cli loop task assign TASK-42 --workspace-id <workspace-uuid> --unassign
-octo-cli loop task create --workspace-id <workspace-uuid> --title "Example" --assignee "Alice"
-octo-cli loop task update TASK-42 --workspace-id <workspace-uuid> --assignee-type expert --assignee-id <expert-uuid>
-octo-cli loop task update TASK-42 --workspace-id <workspace-uuid> \
-  --assignee-type member --assignee-member-id <project-member-id> --suppress-run
-octo-cli loop task list --workspace-id <workspace-uuid> --assignee "Alice"
-# ID filters go directly to Loop, so historical assignees remain searchable.
-octo-cli loop task list --workspace-id <workspace-uuid> --assignee-id <expert-or-team-or-native-member-uuid>
-octo-cli loop task list --workspace-id <workspace-uuid> --assignee-member-id <project-member-id>
-# Project members use Fleet authorization, including its verified Bot-owner fallback.
-octo-cli loop workspace member list <project-uuid>
-# Alternatively select the Project with --workspace-id; results are in .data[].
-octo-cli loop workspace member list --workspace-id <project-uuid> --page 2 --page-size 50
-# Existing flags still work for offsets aligned to the page size.
-octo-cli loop workspace member list --workspace-id <project-uuid> --limit 50 --offset 50
-octo-cli docs comments add doc-123 --data '{"body":"looks good"}'
-
-# HTML documents registered in docs-backend use the same search endpoint.
-# Resolve a hit's HTML document reference with docs get, then continue in the separate html domain.
-octo-cli docs search --keyword "interactive roadmap" --doc-type html --page-all
-octo-cli docs get html-doc-id              # returns octoDocSlug for HTML documents
-octo-cli html get <octoDocSlug>
-
-# Spreadsheets — read the live cells + base version, then batch-edit under If-Match.
-octo-cli docs sheet get sheet-9                      # whole sheet + rules + base version token
-octo-cli docs sheet list sheet-9
-octo-cli docs sheet get sheet-9 --sheet-name "Sales" --limit 500
-octo-cli docs sheet get sheet-9 --sheet-id sales --limit 500
-octo-cli docs sheet get sheet-9 --cursor '<nextCursor>' --limit 500
-octo-cli docs sheet split sheet-9 --base-version '<token>' --data '{"logicalId":"default","delimiter":",","range":{"startRow":0,"endRow":9,"startColumn":0,"endColumn":0}}'
-octo-cli docs sheet deduplicate sheet-9 --base-version '<token>' --header --data '{"logicalId":"default","range":{"startRow":0,"endRow":9,"startColumn":0,"endColumn":3}}'
-octo-cli docs import sheet-9 --file ./report.xlsx    # imports the first visible worksheet
-octo-cli docs export sheet-9 --export-format xlsx -o ./report.xlsx
-octo-cli docs sheet get sheet-9 --limit 500          # page a large sheet; follow --cursor <nextCursor>
-octo-cli docs sheet edit sheet-9 --base-version "<token>" \
-  --data '{"cells":{"default!0:0":{"v":"hi"},"default!1:0":null}}'
-# Structurally add/remove rows or columns and shift affected resources atomically.
-# Coordinates are zero-based. The server refuses formula-bearing workbooks.
-octo-cli docs sheet rows insert sheet-9 --base-version "<token>" \
-  --logical-id default --after-row 9 --count 5
-octo-cli docs sheet rows delete sheet-9 --base-version "<token>" \
-  --logical-id default --start-row 10 --count 5
-octo-cli docs sheet columns insert sheet-9 --base-version "<token>" \
-  --logical-id default --after-column 3 --count 2
-octo-cli docs sheet columns delete sheet-9 --base-version "<token>" \
-  --logical-id default --start-column 4 --count 2
-
-# Create a checkbox in A2 on a sheet that has no other validation rules.
-# dataValidations.default replaces that sheet's complete rule set: otherwise first
-# read sheetDataValidations and include every existing rule you need to keep.
-octo-cli docs sheet edit sheet-9 --base-version "<token>" \
-  --data '{"cells":{"default!1:0":{"v":0}},"dataValidations":{"default":[{"uid":"checkbox-a2","type":"checkbox","formula1":"1","formula2":"0","ranges":[{"startRow":1,"startColumn":0,"endRow":1,"endColumn":0}]}]}}'
-
-# Whiteboards — read the live scene + base version, then upsert/delete elements under If-Match.
-octo-cli docs scene get board-7                       # elements (z-order) + files + base version token
-octo-cli docs scene edit board-7 --base-version "<token>" \
-  --data '{"elements":[{"id":"e1","type":"rectangle","version":4}],"deletedElementIds":["e2"],"files":{}}'
-octo-cli docs import board-7 --file ./board.excalidraw              # merge (default): preserves existing elements
-octo-cli docs import board-7 --file ./board.excalidraw --mode replace # explicit overwrite; backend safety snapshot + concurrency protection
-octo-cli docs export board-7 --export-format png -o ./board.png
-
-# HTML docs (octo-doc) — a SEPARATE backend from `docs`. Publish self-contained
-# interactive HTML as immutable versions, then edit a single stamped artifact.
-# Rollout: the HTML backend will be deployed first. Release this CLI workflow
-# and updated skills only after octo-docs-html#34 is deployed and verified on
-# every HTML-serving instance, after the backend rollout has completed.
-# Canonical create has no doc reference: omit --slug. The CLI generates a key.
-octo-cli html publish --html '<h1>hi</h1>' \
-  --mount-type group --group-no <group_no> --data '{"meta":{"title":"Launch page"}}'
-# Save data.slug from the publish response. For a new document data.slug == data.doc_id, mounted or
-# unmounted. Every later operation uses data.slug. Old documents keep their legacy
-# slug as data.slug; do not infer this from mount_type or doc_id being non-empty.
-# Read the latest HTML and its matching version before editing.
-octo-cli html source <doc-ref>  # data: {slug, version, html}
-# If source returns a route-level 404 but html get can read the same reference, the
-# document exists; check backend deployment/routing and stop the update.
-# Metadata cannot replace source. Do not create a replacement or publish
-# without a version to work around an unavailable source endpoint.
-# Edit data.html; if data.version was 1, publish version 2.
-octo-cli html publish --slug <doc-ref> --version 2 --html "$(cat edited.html)"
-# Omit --idempotency-key on updates. On version_conflict/version_required, the
-# bot rereads, merges and republishes within the same task (up to 3 recovery
-# attempts); never only increase --version and resend stale HTML.
-# Never invent a reference: an unknown legacy slug does not create a canonical
-# document and will not appear in the sidebar file list.
-octo-cli html list
-octo-cli html versions <doc-ref>
-octo-cli html draft create --html '<h1>wip</h1>'
-octo-cli html draft save <doc-ref> --data '{"html":"<h1>wip</h1>"}'   # then: html draft promote <doc-ref>
-octo-cli html share <doc-ref>                                        # mint a reader share code
-octo-cli html grant add <doc-ref> --data '{"uid":"u-1"}'             # per-uid authorization
-octo-cli html element get --slug <doc-ref> --aid <content-hash>      # wire flag remains named slug
-octo-cli html element replace --slug <doc-ref> --aid <content-hash> --new-html '<p>new</p>'
-
-# Discover the API — fully offline, specs are embedded.
-octo-cli schema --list              # all operations across all domains
-octo-cli schema --list message      # operations in one domain
-octo-cli schema message.send        # request/response schema for one op
-# Workspace response, including optional lifecycle fields.
-octo-cli schema workspace.list
-octo-cli config show                # resolved config (token masked)
-octo-cli auth update --api-base-url https://octo.example # persist endpoint for the active profile (wins over OCTO_API_BASE_URL)
-octo-cli auth update --clear-api-base-url                # remove the stored endpoint; env or default applies
-
-# Generic passthrough for ops that aren't auto-registered.
-octo-cli api GET  /v1/messages --params '{"chat_id":"chat-1"}'
-octo-cli api POST /v1/messages --data @body.json
-octo-cli api GET  /fleet/api/v1/custom --workspace-id <workspace-uuid>
-```
-
-The existing `loop workspace list` and `loop workspace get` reads can include
-`status` and `external_version` for Project-backed Workspaces. `status` is
-`active` or `archived`; `external_version` is the highest Project lifecycle
-version applied by Fleet. Both are optional response fields for compatibility,
-so their absence is not a command failure. They expose state only: Fleet/Loop
-does not provide a Project archive/restore command. An archived Project rejects
-workspace writes with `WORKSPACE_ARCHIVED` (403); a lifecycle version that is
-not yet applied returns `PROJECT_WORKSPACE_NOT_READY` (503). The CLI surfaces
-these backend codes in its usual stderr error envelope.
-Archive management remains with the current effective human Project owner
-through the Server interface.
-
-## Authentication
-
-`octo-cli` is bot-only — there is no interactive user login. The token comes
-from `OCTO_TOKEN` (preferred) or `OCTO_BOT_TOKEN`, and carries an **App Bot**
-(`app_*`), a **User Bot** (`bf_*`), a **user API key** (`uk_*`, a real-person
-identity used for message search and drive), or a short-lived **Loop task
-credential** (`octo_loop_*`):
-
-| Prefix  | Type         | DM  | Group read | Group write | Thread | Voice | Search |
-|---------|--------------|-----|------------|-------------|--------|-------|--------|
-| `app_*` | App Bot      | yes | yes        | **no**      | **no** | **no**| **no** |
-| `bf_*`  | User Bot     | yes | yes        | yes         | yes    | yes   | yes    |
-| `uk_*`  | User API key | —   | —          | —           | —      | —     | yes    |
-| `octo_loop_*` | Loop task credential | Fleet policy | Fleet policy | Fleet policy | — | — | — |
-
-(`drive` accepts all three prefixes: `uk_*` acts as the real person, `bf_*` /
-`app_*` as the bot. A bot still has to be added as a member of a shared drive
-space, exactly like a person.)
-
-The CLI does not enforce capability locally; the backend rejects unsupported
-operations with `FORBIDDEN`. Two local exceptions: an `app_*` token running
-`message search`, and a credential whose kind a domain's spec does not allow
-(`TOKEN_KIND_NOT_ALLOWED`) — both are `validation` errors raised before any
-request. `uk_*` tokens are routed to `/v1/user/*`; a `bf_*` token can search as
-a real person with `--on-behalf-of <uid>` (OBO, requires an active grant).
-
-### Token variables
-
-Outside task mode, explicit CLI profile selectors win first. Otherwise,
-environment credentials override implicit stored profiles; the two environment names have identical
-semantics and differ only in priority:
-
-| Priority | Source | Notes |
-|---|---|---|
-| 1 | `--bot-id` / `--profile` | Explicit stored-profile selector; fails closed if it does not match |
-| 2 | `OCTO_TOKEN` | Canonical environment variable; accepts every supported credential kind |
-| 3 | `OCTO_BOT_TOKEN` | Fully compatible legacy alias |
-| 4 | stored profile | Selected by `OCTO_BOT_ID`, or selected implicitly when it is the only profile |
-
-`OCTO_TOKEN` lets you run a single command as a different identity without
-disturbing an existing setup:
-
-```bash
-OCTO_TOKEN="$BOT_TOKEN" octo-cli message sync
-```
-
-The success envelope's `identity.source` names the variable actually used
-(`env:OCTO_TOKEN` or `env:OCTO_BOT_TOKEN`), so a mix-up is visible.
-
-### API Base URL
-
-All backend services are accessed through a single API base URL.
-The value is a gateway origin (`http(s)://host[:port]`) rather than a
-service-specific path; query strings, fragments, credentials, and API paths are
-rejected. Precedence is the active profile's `api_base_url`, then
-`OCTO_API_BASE_URL`, then `https://im.deepminer.com.cn`; `config show` and
-`auth status` report the winning layer as `api_base_url_source`
-(`profile`, `env`, or `default`).
-
-| Var                 | Purpose                                                  |
-|---------------------|----------------------------------------------------------|
-| `OCTO_TOKEN`        | Canonical token variable (`app_*`, `bf_*`, `uk_*`, or `octo_loop_*`); wins over `OCTO_BOT_TOKEN`. |
-| `OCTO_BOT_TOKEN`    | Fully compatible legacy alias; used when `OCTO_TOKEN` is unset. |
-| `OCTO_TASK_TOKEN`   | Dedicated daemon-issued task credential; read only when task mode is explicitly selected. |
-| `OCTO_CREDENTIAL_MODE` | Set to `task` for one task-workflow invocation; unset for ordinary authentication. |
-| `OCTO_API_BASE_URL`  | API base URL for environment credentials or profiles that record none; defaults to `https://im.deepminer.com.cn`. |
-| `OCTO_BOT_ID`       | Select a stored profile by robot id when no environment credential is set. |
-| `OCTO_CONFIG_DIR`   | Override the config/credential directory (default `~/.octo-cli`). |
-| `OCTO_SPACE_ID`     | Space context for platform-scoped bots.                  |
-| `OCTO_FORMAT`       | Default output format (`json` \| `table` \| `csv` \| `ndjson`). |
-
-The daemon provides `OCTO_TASK_TOKEN` to its task process without selecting a
-default credential mode or placing the task credential in `OCTO_TOKEN` /
-`OCTO_BOT_TOKEN`. The agent selects task mode for each task-workflow call:
-
-```bash
-# Task workflow and collaboration use the identity of this execution.
-OCTO_CREDENTIAL_MODE=task "$OCTO_CLI_PATH" loop task get <task-id> --workspace-id <workspace-id>
-
-# Independent business operations keep ordinary authentication.
-"$OCTO_CLI_PATH" docs list
-```
-
-Task mode reads **only `OCTO_TASK_TOKEN`**. A missing or blank task token fails
-without falling back to other environment variables or stored profiles.
-The CLI does not infer the authenticated principal from the token's prefix;
-Fleet verifies the bearer and enforces its bindings and actions. Ordinary mode
-ignores `OCTO_TASK_TOKEN` and preserves the existing credential precedence.
-
-Task mode retains its existing Loop command boundary and offline discovery
-commands. `auth`, `config`, `api`, native services, `--profile`, `--bot-id`,
-`OCTO_BOT_ID`, and `--space` remain unavailable in task mode. It discards native
-`OCTO_SPACE_ID`; workspace-scoped Loop calls use `--workspace-id`.
-
-The daemon's task prompts explain when to use each identity and include
-per-invocation task mode in workflow examples. Do not export mode for an entire
-session or switch identities to retry an authentication failure. Independent
-business calls use their ordinary, separately authorized credentials.
-On Windows, the generated PowerShell task examples restore the previous mode
-in `finally` after the invocation.
-
-Upgrade the CLI and daemon together: older task-token aliases are not accepted
-by the updated task mode. Credential mode is a selection policy, not a
-filesystem sandbox; host-file access remains a separate isolation concern.
-
-## Output
-
-Every successful invocation prints a JSON envelope on stdout:
-
-```json
-{
-  "ok": true,
-  "identity": "bot",
-  "data": { ... },
-  "_pagination": { "has_more": true, "next_cursor": "..." },
-  "_rate_limit": { "remaining": 99, "reset": 1730000000 }
-}
-```
-
-Every failure prints an error envelope on **stderr** and exits non-zero:
-
-```json
-{
-  "ok": false,
-  "error": {
-    "type": "validation",
-    "code": "VALIDATION_ERROR",
-    "message": "title is required",
-    "hint": "check params with `octo-cli schema <op>`",
-    "detail": { ... }
-  }
-}
-```
-
-Exit codes: `3` auth, `2` validation/config, `1` everything else.
-
-Some failures are raised locally, before any request is sent: a missing required
-body field or one violating `minItems` (`VALIDATION_ERROR`), a value outside a
-spec-declared `enum` (`ENUM_NOT_ALLOWED`), and a malformed or out-of-range
-`uint64` id. These checks apply to the whole resolved body — promoted flags and
-`--data` alike — and to query parameters, so a bad value costs no round trip.
-
-### Universal flags
-
-| Flag            | Purpose                                                         |
-|-----------------|-----------------------------------------------------------------|
-| `--format`      | `json` (default) \| `table` \| `csv` \| `ndjson`                |
-| `--jq`, `-q`    | Apply a jq expression to the envelope before formatting         |
-| `--dry-run`     | Print the resolved request instead of sending it                |
-| `--verbose`     | Log request/response trace to stderr                            |
-| `--timeout`     | Per-request deadline, e.g. `30s`, `2m`                          |
-| `--no-retry`    | Disable retry on transient failures                             |
-| `--space`       | Override `OCTO_SPACE_ID` for one call                           |
-| `--page-all`    | Walk pages until `has_more=false`, emit one merged array        |
-| `--page-limit`  | Hard cap on pages fetched with `--page-all` (default 10)        |
-
-### Examples
-
-```bash
-# Dry-run to inspect the resolved request — no side effects.
-octo-cli message send --data '{"channel_id":"chat-1","channel_type":1,"payload":{"type":1,"content":"Hello"}}' --dry-run
-
-# Extract a single field with jq.
-octo-cli group list --jq '.data[0].id'
-
-# Auto-paginate any list operation that reports a cursor.
-octo-cli group list --page-all --page-limit 20
-
-# Tabular output for human eyes.
-octo-cli group list --format table
-```
-
-## Agent Skills
-
-Machine-readable usage docs for AI Agents live under [`skills/`](./skills/):
-
-- [`octo-shared`](./skills/octo-shared/SKILL.md) — fundamentals (auth,
-  output, flags, error taxonomy). Load first.
-- `octo-matter` — matter (todo/task) domain. **Temporarily withheld** while the
-  backend API stabilizes (not listed by `octo-cli skills`).
-- [`octo-messaging`](./skills/octo-messaging/SKILL.md) — messages, groups,
-  threads, event polling.
-- [`octo-files`](./skills/octo-files/SKILL.md) — files and bot housekeeping.
-- [`octo-drive`](./skills/octo-drive/SKILL.md) — network drive: spaces and
-  members, folder/file tree, upload/download, online-document mounts, share
-  links, invites, IM-attachment transfer.
-- [`octo-docs`](./skills/octo-docs/SKILL.md) — documents: lifecycle plus
-  progressive-disclosure references. `SKILL.md` is a slim router; task detail
-  lives in sibling files loaded on demand: `sheet.md` (spreadsheets), `doc.md`
-  (rich-text body), `board.md` (whiteboard), `ppt.md` (slides), and `common.md` (comments,
-  versions, members/sharing, attachments).
-- [`octo-marketplace`](./skills/octo-marketplace/SKILL.md) — search, install,
-  publish, and update Marketplace Skills and MCP server listings, plus Experts
-  (专家) and Squads (专家团).
-- [`octo-html`](./skills/octo-html/SKILL.md) — HTML docs (octo-doc, a
-  **separate backend** from `octo-docs`): publish immutable versions, drafts,
-  share codes & per-uid grants, media assets, inline comments, agent element
-  read/replace.
-- [`octo-mail`](./skills/octo-mail/SKILL.md) — Agent Mail authorization,
-  mailbox access, message handling, drafts, attachments, and delivery status.
-- [`octo-summary`](./skills/octo-summary/SKILL.md) — create owner-only summaries
-  from explicit sources, then discover, read, and cite summaries visible to the
-  personal Agent's human owner. **Temporarily withheld** while the create
-  backend (Mininglamp-OSS/octo-smart-summary#181) is merged, deployed, and enabled
-  (not listed by `octo-cli skills`).
-
-These docs are also **embedded in the binary**, so a released `octo-cli` ships them:
-
-```bash
-octo-cli skills                       # list embedded skills
-octo-cli skills octo-mail             # load the official Agent Mail guide
-octo-cli skills octo-docs             # print one skill (SKILL.md + its references)
-octo-cli skills --install ~/.config/octo/skills   # write every skill (SKILL.md + references) to a dir
-```
-
-## Shell Completion
-
-```bash
-octo-cli completion bash   > /etc/bash_completion.d/octo-cli
-octo-cli completion zsh    > "${fpath[1]}/_octo-cli"
-octo-cli completion fish   > ~/.config/fish/completions/octo-cli.fish
-```
-
 ## Contributing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md). TL;DR: add or change an endpoint
-by editing a spec in `internal/registry/specs/`, not Go code.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development and verification.
 
 ## License
 
-[Apache-2.0](./LICENSE)
+[Apache 2.0](LICENSE).
 
 ## Optional COS distribution
 
-Local release tooling and example-only configuration are documented in
-[Optional COS publishing](docs/cos-publishing.md). COS uploads are opt-in;
-existing release channels remain unchanged.
+See [Optional COS publishing](docs/cos-publishing.md) for local release tools.

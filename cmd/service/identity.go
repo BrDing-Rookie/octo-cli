@@ -6,18 +6,12 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/spf13/cobra"
-
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 	"github.com/Mininglamp-OSS/octo-cli/internal/registry"
 )
 
-// tokenKindNotAllowed is the machine code for "the selected credential is the
-// wrong kind for this operation". It is a validation error (exit 2), matching
-// the existing local gate in internal/client/search_route.go — the caller has
-// to switch credentials, not re-authenticate the one they have.
 const tokenKindNotAllowed = "TOKEN_KIND_NOT_ALLOWED"
 
 // applyIdentityRouting enforces x-octo-allowed-token-kinds and applies
@@ -96,7 +90,7 @@ func tokenKindError(kind string, allowed []string) *output.ExitError {
 // swapMount replaces the mount prefix the spec path is written with by the
 // mount for the active token kind.
 //
-// The spec paths carry a full, real path (e.g. /v1/bot/drive/spaces) rather
+// The spec paths carry a full, real path (e.g. /v1/bot/items) rather
 // than a bare suffix, so `octo-cli schema` stays readable and the default
 // token kind takes a zero-rewrite path. Which leading segment is the mount is
 // therefore derived: exactly one value in the table must prefix the path, and
@@ -144,100 +138,4 @@ func containsString(list []string, want string) bool {
 		}
 	}
 	return false
-}
-
-// MountForOperation resolves the server mount prefix that operationID's spec
-// declares for the active credential's token kind, applying the same
-// allowed-token-kinds gate the generated leaf commands use.
-//
-// Hand-written composite commands (drive upload file / download file / share
-// create|blob-create|access|download) call this so they route and gate through
-// exactly the same metadata as their generated siblings — there is no second
-// copy of the mount table anywhere in the CLI.
-func MountForOperation(f *cmdutil.Factory, operationID string) (string, error) {
-	reg := f.Registry()
-	if reg == nil {
-		return "", output.ErrWithHint("internal", "REGISTRY_UNAVAILABLE",
-			"operation registry is not available", "")
-	}
-	d, ok := reg.GetOperation(operationID)
-	if !ok {
-		return "", output.ErrWithHint("internal", "OPERATION_UNKNOWN",
-			fmt.Sprintf("operation %q is not in the embedded registry", operationID),
-			"CLI build bug: the composite command references a missing spec operation")
-	}
-	kind, err := activeTokenKind(f)
-	if err != nil {
-		return "", err
-	}
-	if len(d.AllowedTokenKinds) > 0 && !containsString(d.AllowedTokenKinds, kind) {
-		return "", tokenKindError(kind, d.AllowedTokenKinds)
-	}
-	mount, ok := d.MountByTokenKind[kind]
-	if !ok {
-		return "", tokenKindError(kind, mountKinds(d.MountByTokenKind))
-	}
-	return mount, nil
-}
-
-// ValidateRequestBody applies operationID's declared pre-send body checks —
-// required fields, minItems, enum vocabularies and uint64 id ranges — to a body
-// a hand-written command assembled itself.
-//
-// A composite that replaces a generated leaf (drive share blob-create) or that
-// posts to the same endpoint under another name (drive share create's blob
-// branch) registers its own flags, so it does not inherit the engine's flag
-// validation. Calling this keeps the spec the single source of the vocabulary
-// either way: an out-of-enum --permission fails with ENUM_NOT_ALLOWED and exit 2
-// before any HTTP, exactly as it does on the generated path, instead of the
-// hand-written command sending it and letting the backend decide.
-//
-// flagFor maps a wire field name to the flag the caller typed, so the error
-// names --permission rather than the JSON key behind it. Fields a composite
-// takes positionally are simply absent from the map and are labelled by path.
-func ValidateRequestBody(f *cmdutil.Factory, operationID string, body map[string]any, flagFor map[string]string) error {
-	reg := f.Registry()
-	if reg == nil {
-		return output.ErrWithHint("internal", "REGISTRY_UNAVAILABLE",
-			"operation registry is not available", "")
-	}
-	d, ok := reg.GetOperation(operationID)
-	if !ok {
-		return output.ErrWithHint("internal", "OPERATION_UNKNOWN",
-			fmt.Sprintf("operation %q is not in the embedded registry", operationID),
-			"CLI build bug: the composite command references a missing spec operation")
-	}
-	if d.RequestBody == nil {
-		return nil
-	}
-	v := bodySchemaValidator{flagFor: flagFor}
-	if exitErr := v.validate(d.RequestBody, body, "", ""); exitErr != nil {
-		return exitErr
-	}
-	return nil
-}
-
-// RemoveLeaf detaches a generated leaf command by name from parent and reports
-// whether it was there. Composite commands that must own a name the spec also
-// exposes as a raw endpoint (drive share access / download / blob-create) call
-// this before registering their own version, so the spec keeps documenting the
-// endpoint for `octo-cli schema` while the command tree stays at one leaf per
-// name.
-func RemoveLeaf(parent *cobra.Command, name string) bool {
-	if parent == nil {
-		return false
-	}
-	for _, c := range parent.Commands() {
-		if c.Name() == name {
-			parent.RemoveCommand(c)
-			return true
-		}
-	}
-	return false
-}
-
-// FindChild returns parent's subcommand with the given name, or nil. Exposed so
-// hand-written commands can attach themselves under a generated subtree.
-func FindChild(parent *cobra.Command, name string) *cobra.Command {
-	return findChild(parent, name)
 }

@@ -100,20 +100,6 @@ func TestAuth_StatusHonorsExplicitSelectors(t *testing.T) {
 	}
 }
 
-func TestAuth_StatusIgnoresTaskTokenInOrdinaryMode(t *testing.T) {
-	t.Setenv(authstore.EnvConfigDir, t.TempDir())
-	t.Setenv(config.EnvToken, "")
-	t.Setenv(config.EnvBotToken, "")
-	t.Setenv(config.EnvTaskToken, "task_credential_not_for_ordinary_commands")
-	out, _, err := execRoot(t, newAuthTestFactory(), "auth", "status")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dataOf(t, out)["active"] != nil || strings.Contains(out, "task_credential") {
-		t.Fatalf("ordinary status must ignore the task credential: %s", out)
-	}
-}
-
 func TestAuth_StatusEnvironmentBypassesUnreadableStore(t *testing.T) {
 	// An ordinary request using an environment token never opens the store.
 	invalidDir := filepath.Join(t.TempDir(), "not-a-directory")
@@ -133,20 +119,15 @@ func TestAuth_StatusEnvironmentBypassesUnreadableStore(t *testing.T) {
 }
 
 func TestAuth_StatusDoesNotHideResolutionErrors(t *testing.T) {
-	for _, mode := range []string{"", "invalid"} {
-		t.Run("mode="+mode, func(t *testing.T) {
-			invalidDir := filepath.Join(t.TempDir(), "not-a-directory")
-			if err := os.WriteFile(invalidDir, []byte("not a store"), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			t.Setenv(authstore.EnvConfigDir, invalidDir)
-			t.Setenv(config.EnvToken, "")
-			t.Setenv(config.EnvBotToken, "")
-			t.Setenv(config.EnvCredentialMode, mode)
-			out, _, err := execRoot(t, newAuthTestFactory(), "auth", "status")
-			if err == nil {
-				t.Fatalf("resolution error must not become an informational success: %s", out)
-			}
-		})
+	invalidDir := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(invalidDir, []byte("not a store"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(authstore.EnvConfigDir, invalidDir)
+	t.Setenv(config.EnvToken, "")
+	t.Setenv(config.EnvBotToken, "")
+	out, _, err := execRoot(t, newAuthTestFactory(), "auth", "status")
+	if err == nil {
+		t.Fatalf("resolution error must not become an informational success: %s", out)
 	}
 }

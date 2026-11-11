@@ -26,17 +26,17 @@ func TestData_NonObjectShapesAreAllRejected(t *testing.T) {
 	}{
 		// null with a promoted flag is the panic. Without one it silently behaved
 		// like an absent body, which is the same root cause with a quieter symptom.
-		{"null with a promoted body flag", []string{"docs", "create", "--data", "null", "--title", "t"}},
-		{"null alone", []string{"docs", "create", "--data", "null"}},
-		{"true", []string{"docs", "create", "--data", "true", "--title", "t"}},
-		{"number", []string{"docs", "create", "--data", "123", "--title", "t"}},
-		{"string", []string{"docs", "create", "--data", `"str"`, "--title", "t"}},
-		{"array", []string{"docs", "create", "--data", "[]", "--title", "t"}},
-		{"array of objects", []string{"docs", "create", "--data", `[{"title":"t"}]`, "--title", "t"}},
+		{"null with a promoted body flag", []string{"example", "record", "create", "--data", "null", "--title", "t"}},
+		{"null alone", []string{"example", "record", "create", "--data", "null"}},
+		{"true", []string{"example", "record", "create", "--data", "true", "--title", "t"}},
+		{"number", []string{"example", "record", "create", "--data", "123", "--title", "t"}},
+		{"string", []string{"example", "record", "create", "--data", `"str"`, "--title", "t"}},
+		{"array", []string{"example", "record", "create", "--data", "[]", "--title", "t"}},
+		{"array of objects", []string{"example", "record", "create", "--data", `[{"title":"t"}]`, "--title", "t"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var called bool
-			root, _ := rootWithDriveToken(t, "bf_bot", func(w http.ResponseWriter, r *http.Request) {
+			root, _, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
 				called = true
 			})
 			root.SetArgs(tc.args)
@@ -70,8 +70,8 @@ func TestData_NonObjectShapesAreAllRejected(t *testing.T) {
 // TestData_AnObjectIsStillAccepted is the allow direction: the fix must reject
 // non-objects without rejecting the shape --data exists for.
 func TestData_AnObjectIsStillAccepted(t *testing.T) {
-	root, _ := rootWithDriveToken(t, "bf_bot", func(w http.ResponseWriter, r *http.Request) {})
-	root.SetArgs([]string{"docs", "create", "--data", `{"title":"from data"}`})
+	root, _, _ := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {})
+	root.SetArgs([]string{"example", "record", "create", "--data", `{"title":"from data"}`})
 	if err := root.Execute(); err != nil {
 		t.Errorf("a JSON object is the supported shape and must be accepted: %v", err)
 	}

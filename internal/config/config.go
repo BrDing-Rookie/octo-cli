@@ -17,18 +17,10 @@ const (
 	// credential kind and takes precedence over the compatible EnvBotToken alias.
 	EnvToken    = "OCTO_TOKEN"
 	EnvBotToken = "OCTO_BOT_TOKEN"
-	// EnvTaskToken carries the daemon-issued Loop task credential separately
-	// from native Octo credentials. It is consumed only by task-mode Loop commands.
-	EnvTaskToken = "OCTO_TASK_TOKEN"
-	// EnvCredentialMode selects the credential resolution policy. The empty
-	// value keeps the normal profile/bot flow; "task" is a fail-closed mode
-	// selected explicitly for an individual task-workflow CLI invocation.
-	EnvCredentialMode  = "OCTO_CREDENTIAL_MODE"
-	CredentialModeTask = "task"
-	EnvSpaceID         = "OCTO_SPACE_ID"
-	EnvFormat          = "OCTO_FORMAT"
+	EnvSpaceID  = "OCTO_SPACE_ID"
+	EnvFormat   = "OCTO_FORMAT"
 	// DefaultAPIBaseURL is the production Octo gateway. Service operations
-	// append their registered paths (for example, /v1/bot/groups).
+	// append their registered paths.
 	DefaultAPIBaseURL = "https://im.deepminer.com.cn"
 	// EnvBotID is the env form of --bot-id: a robot id that selects a stored
 	// credential profile. It is a selector, not a secret (cf. EnvBotToken).
@@ -46,12 +38,8 @@ type Config struct {
 	// APIBaseURLSource reports where APIBaseURL came from: "profile", "env",
 	// or "default". It makes the precedence rule observable in diagnostics.
 	APIBaseURLSource string
-	// BotToken is the active Octo or Loop bearer credential.
+	// BotToken is the active bearer credential.
 	BotToken string
-	// CredentialMode controls credential selection, not server authorization.
-	// Fleet remains authoritative for the bearer credential's principal kind,
-	// bindings, and actions.
-	CredentialMode string
 	// SpaceID is the platform-bot space context (OCTO_SPACE_ID). Optional for space-scoped bots.
 	SpaceID string
 	// Format is the default output format.
@@ -70,11 +58,6 @@ type ResolvedEnvToken struct {
 // by ResolveEnvToken so the auth gate and credential provider cannot drift.
 func Load() *Config {
 	token := ResolveEnvToken()
-	mode := strings.ToLower(strings.TrimSpace(os.Getenv(EnvCredentialMode)))
-	spaceID := os.Getenv(EnvSpaceID)
-	if mode == CredentialModeTask {
-		spaceID = ""
-	}
 	apiBaseURL := os.Getenv(EnvAPIBaseURL)
 	apiBaseURLSource := "env"
 	if apiBaseURL == "" {
@@ -85,21 +68,13 @@ func Load() *Config {
 		APIBaseURL:       apiBaseURL,
 		APIBaseURLSource: apiBaseURLSource,
 		BotToken:         token.Token,
-		CredentialMode:   mode,
-		SpaceID:          spaceID,
+		SpaceID:          os.Getenv(EnvSpaceID),
 		Format:           envOrDefault(EnvFormat, "json"),
 	}
 }
 
-// ResolveEnvToken selects the explicit credential mode at the environment
-// boundary. Task mode never reads or falls back to ordinary token aliases.
+// ResolveEnvToken selects the first nonempty token from the environment.
 func ResolveEnvToken() ResolvedEnvToken {
-	if strings.EqualFold(strings.TrimSpace(os.Getenv(EnvCredentialMode)), CredentialModeTask) {
-		if v := strings.TrimSpace(os.Getenv(EnvTaskToken)); v != "" {
-			return ResolvedEnvToken{Token: v, Source: "env:" + EnvTaskToken}
-		}
-		return ResolvedEnvToken{}
-	}
 	if v := strings.TrimSpace(os.Getenv(EnvToken)); v != "" {
 		return ResolvedEnvToken{Token: v, Source: "env:" + EnvToken}
 	}
@@ -109,18 +84,10 @@ func ResolveEnvToken() ResolvedEnvToken {
 	return ResolvedEnvToken{}
 }
 
-// Validate checks required fields. Only the token is required at load time;
-// space-id validation is deferred to the client (which knows whether the bot
-// is space- or platform-scoped from the spec).
+// Validate checks the bearer credential and normalizes the configured origin.
 func (c *Config) Validate() error {
-	if c.CredentialMode != "" && c.CredentialMode != CredentialModeTask {
-		return fmt.Errorf("unsupported %s %q", EnvCredentialMode, c.CredentialMode)
-	}
 	if c.BotToken == "" {
-		if c.CredentialMode == CredentialModeTask {
-			return fmt.Errorf("%s is required in task mode", EnvTaskToken)
-		}
-		return fmt.Errorf("%s or %s is required (Octo or Loop bearer credential)", EnvToken, EnvBotToken)
+		return fmt.Errorf("%s or %s is required", EnvToken, EnvBotToken)
 	}
 	if c.APIBaseURL != "" {
 		baseURL, err := NormalizeAPIBaseURL(c.APIBaseURL)
@@ -151,14 +118,6 @@ func NormalizeAPIBaseURL(raw string) (string, error) {
 	u.Path = ""
 	u.RawPath = ""
 	return strings.TrimRight(u.String(), "/"), nil
-}
-
-// ServiceURL returns the base URL for the named service. With the unified
-// API base URL model all services share the same URL — this method exists
-// for interface compatibility so the client and service engine don't need
-// to change their routing logic.
-func (c *Config) ServiceURL(_ string) string {
-	return c.APIBaseURL
 }
 
 func envOrDefault(key, fallback string) string {

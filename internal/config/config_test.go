@@ -1,7 +1,6 @@
 package config
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -24,8 +23,8 @@ func TestValidate_OK(t *testing.T) {
 
 func TestValidate_RejectsServicePathAsBaseURL(t *testing.T) {
 	for _, raw := range []string{
-		"https://im-test.deepminer.com.cn/fleet",
-		"https://im-test.deepminer.com.cn/fleet/api/v1",
+		"https://api.example.invalid/service",
+		"https://api.example.invalid/v1/records",
 		"https://im-test.deepminer.com.cn?",
 		"ws://im-test.deepminer.com.cn",
 	} {
@@ -36,22 +35,12 @@ func TestValidate_RejectsServicePathAsBaseURL(t *testing.T) {
 	}
 }
 
-func TestValidate_CredentialMode(t *testing.T) {
-	if err := (&Config{BotToken: "octo_loop_task", CredentialMode: CredentialModeTask}).Validate(); err != nil {
-		t.Fatalf("task mode should validate: %v", err)
-	}
-	if err := (&Config{BotToken: "token", CredentialMode: "unknown"}).Validate(); err == nil {
-		t.Fatal("unknown credential mode should fail validation")
-	}
-}
-
 func TestLoad_Defaults(t *testing.T) {
 	t.Setenv(EnvToken, "")
 	t.Setenv(EnvBotToken, "")
 	t.Setenv(EnvAPIBaseURL, "")
 	t.Setenv(EnvFormat, "")
 	t.Setenv(EnvSpaceID, "")
-	t.Setenv(EnvCredentialMode, "")
 
 	cfg := Load()
 	if cfg.APIBaseURL != DefaultAPIBaseURL {
@@ -70,7 +59,6 @@ func TestLoad_ReadsAllEnvVars(t *testing.T) {
 	t.Setenv(EnvBotToken, "app_xxx")
 	t.Setenv(EnvSpaceID, "space-1")
 	t.Setenv(EnvFormat, "table")
-	t.Setenv(EnvCredentialMode, "")
 
 	cfg := Load()
 	if cfg.APIBaseURL != "http://api.example" {
@@ -79,24 +67,11 @@ func TestLoad_ReadsAllEnvVars(t *testing.T) {
 	if cfg.BotToken != "app_xxx" {
 		t.Errorf("BotToken = %q", cfg.BotToken)
 	}
-	if cfg.CredentialMode != "" {
-		t.Errorf("CredentialMode = %q", cfg.CredentialMode)
-	}
 	if cfg.SpaceID != "space-1" {
 		t.Errorf("SpaceID = %q", cfg.SpaceID)
 	}
 	if cfg.Format != "table" {
 		t.Errorf("Format = %q", cfg.Format)
-	}
-}
-
-func TestServiceURL_Unified(t *testing.T) {
-	cfg := &Config{APIBaseURL: "http://api.example"}
-	// All services should return the same API base URL.
-	for _, svc := range []string{"matters", "dmworkim", "unknown", ""} {
-		if got := cfg.ServiceURL(svc); got != "http://api.example" {
-			t.Errorf("ServiceURL(%q) = %q, want API base URL", svc, got)
-		}
 	}
 }
 
@@ -181,45 +156,5 @@ func TestLoad_TokenPrecedence(t *testing.T) {
 				t.Errorf("BotToken = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestLoad_TaskCredentialIsolation(t *testing.T) {
-	for _, taskToken := range []string{" opaque-task-credential ", "", "   "} {
-		t.Run(taskToken, func(t *testing.T) {
-			t.Setenv(EnvCredentialMode, " TASK ")
-			t.Setenv(EnvTaskToken, taskToken)
-			t.Setenv(EnvToken, "bf_canonical")
-			t.Setenv(EnvBotToken, "bf_alias")
-			t.Setenv(EnvSpaceID, "native-space")
-			cfg := Load()
-			want := strings.TrimSpace(taskToken)
-			if cfg.BotToken != want || cfg.SpaceID != "" {
-				t.Fatalf("task config mixed native credentials: token=%q space=%q", cfg.BotToken, cfg.SpaceID)
-			}
-			resolved := ResolveEnvToken()
-			if resolved.Token != want {
-				t.Fatalf("resolved token = %q, want dedicated task token", resolved.Token)
-			}
-			if want == "" {
-				if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), EnvTaskToken) {
-					t.Fatalf("Validate = %v, want missing task-token guidance", err)
-				}
-			}
-		})
-	}
-}
-
-func TestResolveEnvToken_NormalModeIgnoresTaskToken(t *testing.T) {
-	t.Setenv(EnvCredentialMode, "")
-	t.Setenv(EnvTaskToken, "task-credential")
-	t.Setenv(EnvToken, "")
-	t.Setenv(EnvBotToken, "bf_native")
-	if got := ResolveEnvToken(); got.Token != "bf_native" || got.Source != "env:"+EnvBotToken {
-		t.Fatalf("normal credential = %+v", got)
-	}
-	t.Setenv(EnvBotToken, "")
-	if got := ResolveEnvToken(); got.Token != "" {
-		t.Fatalf("normal mode consumed task credential: %+v", got)
 	}
 }

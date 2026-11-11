@@ -43,61 +43,16 @@ the hooks and CI install via `make tools` (`golangci-lint`, `gci`).
 > `git push --no-verify`) **in genuine emergencies only** — CI runs the same
 > checks, so a bypass just defers the failure.
 
-## Architecture Overview
+## Architecture and service specifications
 
-octo-cli is metadata-driven. The command tree is built at startup from
-OpenAPI 3.x specs embedded via `//go:embed`:
+The [architecture guide](docs/architecture-design.md) describes the framework
+and metadata extensions. The built-in service registry starts empty.
 
-```
-internal/registry/specs/*.json      OpenAPI 3.x specs, embedded into the binary
-    │
-    ▼
-internal/registry (Registry)        Parses specs, exposes operations by id
-    │
-    ▼
-cmd/service (Service Engine)        Auto-registers one cobra command per operation
-    │
-    ▼
-internal/cmdutil (Factory, DI)      Wires config + credential + client per command
-    │
-    ▼
-internal/client (HTTP client)       Multi-service routing, retry, dry-run
-    │
-    ▼
-internal/output (envelope)          Stable JSON envelope; error taxonomy
-```
-
-Design constraints:
-
-- **`internal/output` is a leaf package** — it must not import any other
-  `internal/*` package.
-- **No mutable package-level globals.** Allowed `var` declarations:
-  (a) ldflags-injected build metadata (`cmd/build.go`), (b) `//go:embed`
-  file systems (`internal/registry`), and (c) immutable lookup tables
-  (e.g. `backendErrorMapping`). Everything else flows through the Factory.
-- **All text in English.**
-
-## Add a New API Domain
-
-Because the command tree is metadata-driven, adding a new domain is almost
-entirely a spec change:
-
-1. **Write an OpenAPI 3.x spec** at
-   `internal/registry/specs/<domain>.json`. Use the existing specs as a
-   template — note the `x-octo-*` extensions for base URL, pagination,
-   risk, multipart, and binary responses.
-2. **Embed it.** The file is picked up automatically by
-   `//go:embed specs/*.json` in `internal/registry/loader.go`. No code
-   change needed.
-3. **Rebuild.** `make build`. Every operation is auto-registered with the
-   right flags, required args, pagination, and risk gating.
-
-Tests:
-
-- Add table-driven tests for any non-trivial spec quirks.
-- If an endpoint needs special handling (multipart, binary response),
-  prefer extending the registry/service engine over a domain-specific
-  code path.
+1. Write an OpenAPI 3.x JSON specification in `internal/registry/specs`.
+2. Rebuild with `make build`. Check the generated commands with `--help` and
+   `schema --list`.
+3. Use synthetic specs and local HTTP servers for framework regression tests.
+   Verify a service's API contract separately.
 
 ## Code Style
 
@@ -124,7 +79,7 @@ Tests:
 2. Keep the change focused; split unrelated work into separate PRs.
 3. Fill in the PR template. Link the issue.
 4. Use **Conventional Commits** for commit messages and PR titles:
-   - `feat: add matter.archive endpoint`
+   - `feat: add cursor validation`
    - `fix: preserve ExitCode through retry exhaustion`
    - `docs: rewrite README`
    - `refactor: split service.go into four files`

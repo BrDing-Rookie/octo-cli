@@ -10,7 +10,6 @@ import (
 	"io"
 	"math/big"
 	"net/url"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,10 +35,9 @@ func runOperation(cobraCmd *cobra.Command, f *cmdutil.Factory, rt *operationRunt
 	positionalQueryValues := args[positionalQueryStart:]
 
 	// Path substitution. Cobra's Args function already checked the argument count.
-	urlPath := MarketplacePath(d.Service, d.Path)
 	// Identity routing: reject an incompatible credential kind and pick the
 	// server mount for the one in use, before any path parameter is filled in.
-	urlPath, err := applyIdentityRouting(f, d, urlPath)
+	urlPath, err := applyIdentityRouting(f, d, d.Path)
 	if err != nil {
 		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 		return err
@@ -71,22 +69,9 @@ func runOperation(cobraCmd *cobra.Command, f *cmdutil.Factory, rt *operationRunt
 	if verr != nil {
 		return emitAndReturn(f, verr)
 	}
-	// A Workspace path flag and its binding header share one selector. Resolve
-	// both from the same value so Fleet can authorize before route dispatch.
-	headers = bindWorkspacePathHeader(rt, pathValues, headers)
-	if err := applyLoopProjectQuery(cobraCmd, rt, q); err != nil {
-		return emitAndReturn(f, err)
-	}
-	if err := applyTaskAssigneeQuery(cobraCmd, f, rt, q, headers); err != nil {
-		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
-		return err
-	}
-
 	// Body: start from --data (if any), then merge explicit flags on top.
 	// Multipart ops take a separate path — they build a form body, not JSON.
 	req := client.Request{
-		Service:        d.Service,
-		Credential:     d.Credential,
 		Method:         d.Method,
 		Path:           urlPath,
 		Query:          q,
@@ -100,8 +85,6 @@ func runOperation(cobraCmd *cobra.Command, f *cmdutil.Factory, rt *operationRunt
 		UnknownOutcomeOnNetworkFailure: d.RetryMode == "never",
 		ResponseSecretFields:           d.ResponseSecretFields,
 		SensitiveJSONFields:            writeOnlyBodyFields(d.RequestBody),
-		ResponseUnwrap:                 d.ResponseUnwrap,
-		UnwrapRequiredFields:           d.UnwrapRequiredFields,
 	}
 	// Path, query, and header secrets do not depend on the merged body.
 	req.SecretValues = collectParameterSecrets(cobraCmd, rt, pathValues, positionalQueryValues)
@@ -138,69 +121,11 @@ func buildQueryAndHeaders(cobraCmd *cobra.Command, rt *operationRuntime, positio
 	if err := addPositionalQueryValues(q, rt, positionalQueryValues); err != nil {
 		return nil, nil, err
 	}
-	if err := normalizeWorkspaceMemberPagination(rt, q); err != nil {
-		return nil, nil, err
-	}
 	headers, err := buildHeaders(cobraCmd, rt)
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := validateSheetReadSelection(rt, q); err != nil {
-		return nil, nil, err
-	}
 	return q, headers, nil
-}
-
-// Fleet's Project member route accepts page/page_size. Keep the older CLI
-// limit/offset flags only when their offset names an exact page boundary.
-func normalizeWorkspaceMemberPagination(rt *operationRuntime, q url.Values) *output.ExitError {
-	if rt.detail.ID != "workspace.member.list" {
-		return nil
-	}
-	pageSize, err := workspaceMemberPageSize(q)
-	if err != nil {
-		return err
-	}
-	if !q.Has("offset") {
-		return nil
-	}
-	if q.Has("page") {
-		return output.ErrValidation("--offset and --page cannot be combined", "use one page selector")
-	}
-	offset, parseErr := strconv.Atoi(q.Get("offset"))
-	if parseErr != nil || offset < 0 || offset%pageSize != 0 {
-		return output.ErrValidation("--offset must be a nonnegative multiple of the page size", "use --page for arbitrary Project pages")
-	}
-	// Pin the page size used for the offset calculation on the wire too.
-	if !q.Has("page_size") {
-		q.Set("page_size", strconv.Itoa(pageSize))
-	}
-	q.Set("page", strconv.Itoa(offset/pageSize+1))
-	q.Del("offset")
-	return nil
-}
-
-func workspaceMemberPageSize(q url.Values) (int, *output.ExitError) {
-	if q.Has("limit") && q.Has("page_size") {
-		return 0, output.ErrValidation("--limit and --page-size cannot be combined", "use one page-size selector")
-	}
-	pageSize := 50
-	if raw := q.Get("limit"); raw != "" {
-		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 || value > 200 {
-			return 0, output.ErrValidation("--limit must be between 1 and 200", "choose a valid Project member page size")
-		}
-		pageSize = value
-		q.Set("page_size", raw)
-		q.Del("limit")
-	} else if raw := q.Get("page_size"); raw != "" {
-		value, err := strconv.Atoi(raw)
-		if err != nil || value < 1 || value > 200 {
-			return 0, output.ErrValidation("--page-size must be between 1 and 200", "choose a valid Project member page size")
-		}
-		pageSize = value
-	}
-	return pageSize, nil
 }
 
 // emitAndReturn emits a validation failure and returns it, which is the shape every
@@ -230,18 +155,6 @@ func attachJSONBody(f *cmdutil.Factory, cobraCmd *cobra.Command, rt *operationRu
 	if err != nil {
 		return err
 	}
-	// Reject index-less / malformed-index whiteboard elements locally, before
-	// sending, for operations that declare it in the spec (docs.scene.edit).
-	if rt.detail.ValidateElementsIndex {
-		if verr := validateElementsIndex(body); verr != nil {
-			return verr
-		}
-	}
-	if rt.detail.ValidateMarketplaceRelations {
-		if verr := validateMarketplaceRelations(body, rt.detail.ID == "plugin.review_request.create"); verr != nil {
-			return verr
-		}
-	}
 	req.Body = body
 	if body == nil || rt.detail.RequestBody == nil {
 		return nil
@@ -252,7 +165,7 @@ func attachJSONBody(f *cmdutil.Factory, cobraCmd *cobra.Command, rt *operationRu
 			"quote the value — a declared secret is masked by string rules, and an unquoted one would print in full")
 	}
 	req.SecretValues = append(req.SecretValues, bodySecrets...)
-	return validateMarketplaceReleaseVersion(cobraCmd.Context(), f, rt, req)
+	return nil
 }
 
 // resolvePathValues fills one value per path parameter, in path order. A slot
@@ -342,12 +255,7 @@ func validatePathArgs(rt *operationRuntime, values []string) *output.ExitError {
 	return nil
 }
 
-// rejectEmptyPathValue refuses an empty path value, which would address the
-// collection URL instead of a resource: `drive share revoke "$SHARE_ID"` with an
-// unset variable would send DELETE to {mount}/shares/ rather than fail, and the
-// same holds for the --share-id spelling. cobra used to catch the positional case
-// as a missing argument; MaximumNArgs no longer does, and no domain has ever had
-// an id that is the empty string.
+// rejectEmptyPathValue prevents an empty resource id from targeting the collection.
 func rejectEmptyPathValue(label, value string) *output.ExitError {
 	if value != "" {
 		return nil
@@ -468,25 +376,6 @@ func findParam(d *registry.OperationDetail, name, in string) *registry.ParamInfo
 	return nil
 }
 
-// MarketplacePath lets local development bypass the production /market
-// gateway mount. When OCTO_MARKETPLACE_API_PREFIX is present, its value
-// replaces the leading /market segment; setting it to an empty string maps
-// /market/api/v1/... to the standalone service's /api/v1/... routes.
-func MarketplacePath(service, path string) string {
-	if service != "marketplace" || !strings.HasPrefix(path, "/market/") {
-		return path
-	}
-	prefix, ok := os.LookupEnv("OCTO_MARKETPLACE_API_PREFIX")
-	if !ok {
-		return path
-	}
-	prefix = strings.TrimSpace(prefix)
-	if prefix != "" && !strings.HasPrefix(prefix, "/") {
-		prefix = "/" + prefix
-	}
-	return strings.TrimSuffix(prefix, "/") + strings.TrimPrefix(path, "/market")
-}
-
 // buildQuery assembles the URL query from flags the user explicitly set, so
 // a default never overrides a backend default. Conditional query requirements,
 // enum checks, and wire formatting are applied before the request leaves.
@@ -496,7 +385,7 @@ func buildQuery(cobraCmd *cobra.Command, rt *operationRuntime) (url.Values, *out
 	}
 	q := url.Values{}
 	for flagName, qf := range rt.queryFlags {
-		if !loopFlagChanged(cobraCmd, flagName) {
+		if !cobraCmd.Flags().Changed(flagName) {
 			continue
 		}
 		if err := addQueryFlagValue(q, rt, flagName, qf); err != nil {
@@ -644,31 +533,6 @@ func queryItemEnum(d *registry.OperationDetail, apiName string) []any {
 	return nil
 }
 
-func bindWorkspacePathHeader(rt *operationRuntime, pathValues []string, headers map[string]string) map[string]string {
-	if !rt.pathFlagNames["workspace-id"] || findParam(rt.detail, "X-Workspace-ID", "header") == nil {
-		return headers
-	}
-	for i, name := range rt.pathParams {
-		if name == "workspace_id" {
-			if headers == nil {
-				headers = map[string]string{}
-			}
-			headers["X-Workspace-ID"] = pathValues[i]
-		}
-	}
-	return headers
-}
-
-// buildHeaders assembles the per-request headers from spec-declared header
-// flags the user explicitly set. Returns nil when none were set, so an omitted
-// optional header stays absent from the wire.
-//
-// Enum vocabularies are deliberately NOT enforced here, and neither are they in
-// validatePathArgs: the local enum gate covers query and body parameters only.
-// No embedded spec declares an enum on a header or path parameter today, so a
-// check here would be unreachable code; TestEnum_NoHeaderOrPathParamDeclaresEnum
-// fails the build the day one does, which is the point at which the asymmetry
-// stops being deliberate and has to be closed.
 func buildHeaders(cobraCmd *cobra.Command, rt *operationRuntime) (map[string]string, *output.ExitError) {
 	var headers map[string]string
 	for flagName, hf := range rt.headerFlags {
@@ -681,10 +545,9 @@ func buildHeaders(cobraCmd *cobra.Command, rt *operationRuntime) (map[string]str
 		}
 		// An explicitly blank replay key cannot identify an uncertain write.
 		// Omitted optional headers remain absent for legacy shared operations.
-		if strings.EqualFold(hf.apiName, "Idempotency-Key") {
-			if err := ValidateIdempotencyKey("--"+flagName, *hf.strVal); err != nil {
-				return nil, err
-			}
+		if strings.EqualFold(hf.apiName, "Idempotency-Key") && strings.TrimSpace(*hf.strVal) == "" {
+			return nil, output.ErrValidation("--"+flagName+" must not be blank",
+				"supply a stable key and preserve it with the same body on retry")
 		}
 		if headers == nil {
 			headers = map[string]string{}
@@ -715,12 +578,6 @@ func resolveBody(f *cmdutil.Factory, cobraCmd *cobra.Command, rt *operationRunti
 	}
 
 	if err := applyBodyFlags(cobraCmd, rt, base); err != nil {
-		return nil, err
-	}
-	if err := applyLoopProjectBody(cobraCmd, rt, base); err != nil {
-		return nil, err
-	}
-	if err := applyTaskAssigneeBody(cobraCmd, f, rt, base); err != nil {
 		return nil, err
 	}
 	if err := applyGeneratedIdempotencyKey(rt, base); err != nil {
@@ -867,9 +724,7 @@ func validateBodyVariants(rt *operationRuntime, body map[string]any) error {
 	return output.ErrValidation("request body does not match an allowed operation mode", hint)
 }
 
-// missingVariantRequiredValue treats a whitespace-only string as absent, the
-// same definition emptyAutoIdempotencyValue uses. Diverging here classified
-// slug:"   " as a republish and sent whitespace as a document reference.
+// missingVariantRequiredValue treats null and blank strings as absent.
 func missingVariantRequiredValue(value any) bool {
 	if value == nil {
 		return true
@@ -885,7 +740,7 @@ func missingVariantRequiredValue(value any) bool {
 // bare JSON integer — the wire contract stays integer while the flag is text.
 func applyBodyFlags(cobraCmd *cobra.Command, rt *operationRuntime, base map[string]any) *output.ExitError {
 	for flagName, bf := range rt.bodyFlags {
-		if !loopFlagChanged(cobraCmd, flagName) {
+		if !cobraCmd.Flags().Changed(flagName) {
 			if _, supplied := base[bf.apiName]; !supplied && bf.boolDefault != nil {
 				base[bf.apiName] = *bf.boolDefault
 			}
@@ -927,13 +782,12 @@ func validateRequiredBodyFields(rt *operationRuntime, base map[string]any) error
 	if rt.detail.Multipart {
 		return nil
 	}
-	enforcePublicAPIConstraints := rt.detail.Service == "loop" || rt.detail.StrictRequestSchema
 	if len(base) == 0 && !rt.detail.RequestBodyRequired {
 		return nil
 	}
 	v := bodySchemaValidator{
 		flagFor:                     topLevelBodyFlagNames(rt),
-		enforcePublicAPIConstraints: enforcePublicAPIConstraints,
+		enforcePublicAPIConstraints: rt.detail.StrictRequestSchema,
 	}
 	if exitErr := v.validate(rt.detail.RequestBody, base, "", ""); exitErr != nil {
 		return exitErr
@@ -957,12 +811,10 @@ func topLevelBodyFlagNames(rt *operationRuntime) map[string]string {
 
 // bodySchemaValidator walks a resolved request body against the operation's
 // request schema, enforcing required fields, minItems and enum vocabularies
-// before anything is sent. Loop additionally enforces the extended constraints
-// retained from its Public API schema. It covers the merged body — promoted
-// flags AND --data — because --data is not a raw passthrough on this path.
+// before sending the merged body. Strict mode also checks extended constraints.
 type bodySchemaValidator struct {
 	flagFor                     map[string]string // wire field name → promoted flag name (top level only)
-	enforcePublicAPIConstraints bool              // extended JSON Schema constraints (Loop or explicit service opt-in)
+	enforcePublicAPIConstraints bool              // extended JSON Schema constraints when enabled by the spec
 }
 
 // validate reports the first violation found, or nil. Enum violations carry
@@ -1316,23 +1168,18 @@ func bodyPath(path string) string {
 // emitOnce runs one request and emits the envelope. Returns the same error
 // value so cobra sets a non-zero exit code.
 func emitOnce(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime, req *client.Request) error {
-	cli, err := f.ClientForCredential(ctx, req.Credential)
+	cli, err := f.Client()
 	if err != nil {
 		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 		return err
 	}
 	body, err := cli.Do(ctx, req)
 	if err != nil {
-		err = annotateMarketplaceVersionError(req.Service, err)
-		err = annotateSheetCleaningError(rt, req, err)
 		err = annotateIdempotencyKey(rt, req, err)
 		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 		return err
 	}
 	if f.Globals == nil || !f.Globals.DryRun {
-		if contractErr := validateSheetReadScope(body, rt, req); contractErr != nil {
-			return emitAndReturn(f, contractErr)
-		}
 		if contractErr := validateReadResponse(body, rt); contractErr != nil {
 			return emitAndReturn(f, contractErr)
 		}
@@ -1342,8 +1189,8 @@ func emitOnce(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime, req
 		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 		return err
 	}
-	if req.ResponseUnwrap != "" && (f.Globals == nil || !f.Globals.DryRun) {
-		body, err = unwrapResponse(body, req.ResponseUnwrap, req.UnwrapRequiredFields, rt.detail.ResponseSchema)
+	if rt.detail.ResponseUnwrap != "" && (f.Globals == nil || !f.Globals.DryRun) {
+		body, err = unwrapResponse(body, rt.detail.ResponseUnwrap, rt.detail.UnwrapRequiredFields, rt.detail.ResponseSchema)
 		if err != nil {
 			// A malformed 2xx means the request reached the server carrying the
 			// key, so the create may be committed — the same ambiguity a 5xx
@@ -1360,9 +1207,6 @@ func emitOnce(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime, req
 			return unwrapErr
 		}
 	}
-	if req.Service == "loop" {
-		return f.EmitSuccessWithMeta(body, output.EnvelopeMeta{UnwrapResource: true})
-	}
 	return f.EmitSuccess(body)
 }
 
@@ -1377,8 +1221,7 @@ func emitOnce(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime, req
 // and it costs nothing on a definite refusal. The hint is only rewritten when
 // the outcome is genuinely ambiguous (transport failure, timeout, 5xx) AND no
 // hint was set: a 4xx created nothing, so claiming "outcome unknown" there
-// would be false, and clobbering a curated hint like "ask a Workspace owner to
-// add this Bot" replaces actionable guidance with a misleading retry.
+// would be false, and clobbering a curated hint on a definite refusal replaces actionable guidance with a misleading retry.
 func annotateIdempotencyKey(rt *operationRuntime, req *client.Request, err error) error {
 	field, key := requestIdempotencyKey(rt, req)
 	if key == "" {
@@ -1583,7 +1426,7 @@ func runPaginated(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime,
 		return err
 	}
 
-	cli, err := f.ClientForCredential(ctx, firstReq.Credential)
+	cli, err := f.Client()
 	if err != nil {
 		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 		return err
@@ -1735,7 +1578,7 @@ func requestWithCursor(req *client.Request, rt *operationRuntime, cursorParam, c
 }
 
 // cursorIsQueryParam reports whether this operation declares its pagination
-// cursor as a URL query parameter (GET endpoints, e.g. matter.list) rather than
+// cursor as a URL query parameter rather than
 // a JSON body field (POST endpoints, e.g. the message.search family). The spec
 // binds a query-declared cursor to a queryFlag whose apiName is the cursor
 // param; a body-declared cursor has no such binding.

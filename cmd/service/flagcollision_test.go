@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/registry"
+	"github.com/Mininglamp-OSS/octo-cli/internal/testfixture"
 )
 
 // Flag names are derived from spec metadata, so a spec edit — the documented way
@@ -19,7 +20,7 @@ import (
 // parameter or promoted body field whose flag name is one the engine reserves
 // for itself (--data, --file, the pagination flags, --output/-o).
 func TestFlags_NoSpecCollidesWithEngineFlags(t *testing.T) {
-	reg := registry.MustNew()
+	reg := testfixture.Registry()
 	for _, svc := range reg.ListServices() {
 		for _, info := range reg.ListOperations(svc) {
 			d, ok := reg.GetOperation(info.ID)
@@ -71,7 +72,7 @@ func TestFlags_NoSpecCollidesWithEngineFlags(t *testing.T) {
 // which is exactly the escape hatch a base64url id needs, while the first
 // advertises a flag the caller did not mean.
 func TestFlags_NoDuplicatePathFlagNames(t *testing.T) {
-	reg := registry.MustNew()
+	reg := testfixture.Registry()
 	for _, svc := range reg.ListServices() {
 		for _, info := range reg.ListOperations(svc) {
 			d, ok := reg.GetOperation(info.ID)

@@ -1,11 +1,11 @@
 // Package service provides the metadata-driven command auto-registration
 // engine. For every operation in the embedded OpenAPI registry the engine
-// generates a cobra command whose flags, body shape, risk gate, and
+// generates a cobra command whose flags, body shape, and
 // pagination behaviour are derived entirely from the spec — so adding a new
 // backend endpoint is "update the spec", nothing more.
 //
 // operationId "domain.verb" or "domain.resource.verb" maps to
-// "octo-cli <domain> [<resource>] <verb>" (architecture §5.2). Path parameters
+// "octo-cli <domain> [<resource>] <verb>". Path parameters
 // become positional args; query parameters become typed flags unless a required
 // string query parameter opts into positional input; simple top-level body fields
 // are auto-promoted to flags (Rule 5a), with a --data escape hatch for complex
@@ -31,7 +31,7 @@ func RegisterServiceCommands(parent *cobra.Command, f *cmdutil.Factory) {
 	if reg == nil {
 		return
 	}
-	for _, svc := range reg.ListServices() {
+	for _, svc := range reg.EnabledServices() {
 		svcCmd := ensureServiceCmd(parent, svc)
 		for _, info := range reg.ListOperations(svc) {
 			detail, ok := reg.GetOperation(info.ID)
@@ -39,14 +39,6 @@ func RegisterServiceCommands(parent *cobra.Command, f *cmdutil.Factory) {
 				continue
 			}
 			attachOperation(svcCmd, f, detail)
-		}
-		// Register matter-specific status aliases.
-		if svc == "matter" {
-			attachMatterStatusAliases(svcCmd, f)
-		}
-		if svc == "loop" {
-			attachTaskAssignAlias(svcCmd, f)
-			attachLoopProjectAliases(svcCmd)
 		}
 	}
 }
@@ -68,7 +60,7 @@ func ensureServiceCmd(parent *cobra.Command, svc string) *cobra.Command {
 }
 
 // attachOperation inserts one operation as a leaf command, creating
-// intermediate "resource" commands (matter assignee, marketplace skill, …)
+// intermediate resource commands
 // on the way down. When operationId starts with the registry service name that
 // segment is omitted; otherwise it is preserved as a domain below the service.
 func attachOperation(svcCmd *cobra.Command, f *cmdutil.Factory, d *registry.OperationDetail) {
@@ -76,12 +68,6 @@ func attachOperation(svcCmd *cobra.Command, f *cmdutil.Factory, d *registry.Oper
 	if len(segs) < 2 {
 		return
 	}
-	// Most specs use an operationId whose first segment matches the registry
-	// service (docs.create under service docs). A multi-domain backend may expose
-	// several resource families from one service, for example plugin.list and
-	// mcp.probe under service marketplace. Preserve that first segment as a
-	// resource group when it differs from the service name so both operations
-	// become addressable instead of colliding as marketplace list.
 	start := 1
 	if segs[0] != d.Service {
 		start = 0
@@ -120,12 +106,7 @@ func findChild(parent *cobra.Command, name string) *cobra.Command {
 // help, and exits 0 — which can let automation treat a removed
 // command as a success.
 //
-// The token is never echoed. Landing here means either a mistyped verb or an
-// omitted one — `drive share <token>` instead of `drive share revoke <token>` —
-// and the second spelling puts a share token in an error the caller did not opt
-// into. A previous attempt echoed the token only when it "looked like a command
-// word", which still echoed an all-lower-case id; listing the real subcommands is
-// both safe and more useful for a typo than quoting the wrong word back.
+// Arguments are omitted from the diagnostic because a value may be sensitive.
 func rejectUnknownSubcommand(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		if names := childCommandNames(cmd); len(names) > 0 {
@@ -168,9 +149,6 @@ func buildOperationCmd(f *cmdutil.Factory, d *registry.OperationDetail, verb str
 	usage := verb
 	for _, p := range rt.pathParams {
 		label := strings.ReplaceAll(p, "_", "-")
-		if d.Service == "html" && p == "doc_id" {
-			label = "doc-ref"
-		}
 		usage += " <" + label + ">"
 	}
 
@@ -207,9 +185,6 @@ func buildOperationCmd(f *cmdutil.Factory, d *registry.OperationDetail, verb str
 	registerHeaderFlags(cmd, rt, d)
 
 	registerBodyFlags(cmd, rt, d)
-	registerLoopProjectFlags(cmd, d)
-	registerTaskAssigneeFlags(cmd, d)
-	registerLoopMemberIDLegacyFlags(cmd, d)
 
 	if d.Pagination != nil {
 		var pageAll bool
@@ -220,13 +195,7 @@ func buildOperationCmd(f *cmdutil.Factory, d *registry.OperationDetail, verb str
 		rt.pageLimit = &pageLimit
 	}
 
-	// Operations that return a binary body inline on a 2xx success accept
-	// --output/-o to WRITE those bytes to disk (e.g. docs.scene.export
-	// --image-format png -o board.png). Without it the command only describes
-	// the body (status/content_type/size). Redirect-style binary ops such as
-	// file.download (302-only, no consumable body) are deliberately excluded:
-	// registering -o there accepts the flag but never writes a file, a silent
-	// footgun. See registry.OperationDetail.BinaryBody.
+	// Inline binary responses can be saved directly to a file.
 	if d.BinaryBody {
 		var outputPath string
 		cmd.Flags().StringVarP(&outputPath, "output", "o", "", "write the binary response body to this file path")
@@ -274,7 +243,7 @@ func buildLongDesc(d *registry.OperationDetail, rt *operationRuntime) string {
 }
 
 // commandPathFor renders the user-facing command words for an operation id,
-// for use in help examples ("drive share revoke").
+// for use in help examples.
 func commandPathFor(d *registry.OperationDetail) string {
 	segs := strings.Split(d.ID, ".")
 	if d.Service != "" && segs[0] != d.Service {
@@ -291,8 +260,7 @@ func commandPathFor(d *registry.OperationDetail) string {
 // cause is a base64url id starting with "-" being read as a flag.
 //
 // cobra's own text quotes the offending token ("unknown shorthand flag: 'A' in
-// -Ab3…"), and for these operations that token is the id — a share token or an
-// invite token. This runs before collectSecrets, so there is nothing to mask
+// -Ab3…"), and for these operations that value may be sensitive. This runs before collectSecrets, so there is nothing to mask
 // with: the value is dropped rather than redacted. The diagnostic loses nothing
 // that matters, because the actionable part is which flag to use, and the hint
 // already says it. The sibling guards rejectEmptyPathValue / rejectDotSegment

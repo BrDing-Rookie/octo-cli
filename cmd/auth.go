@@ -135,7 +135,7 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Store a credential (read from a hidden prompt or stdin, never argv)",
-		Long: "Store an Octo or Loop bearer credential under a profile. Identify a bot with --bot-id " +
+		Long: "Store a bearer credential under a profile. Identify a bot with --bot-id " +
 			"(its robot id, recommended) and/or --profile (a friendly name). The " +
 			"token is read from a hidden prompt on a terminal, or from stdin with " +
 			"--with-token, or from --token-file — never from the command line. " +
@@ -168,7 +168,7 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 			}
 			if token == "" {
 				return failErr(f, output.ErrValidation(
-					"empty token", "provide a non-empty Octo or Loop bearer credential"))
+					"empty token", "provide a non-empty bearer credential"))
 			}
 
 			store, err := f.AuthStore()
