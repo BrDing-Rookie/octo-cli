@@ -35,41 +35,43 @@ type authTokenSelf struct {
 }
 
 type authTokenMetadata struct {
-	ID         string                          `json:"token_id"`
-	OwnerID    string                          `json:"owner_id"`
-	SpaceID    string                          `json:"space_id"`
-	Name       *string                         `json:"name"`
-	Remark     authRequiredNullable[string]    `json:"remark"`
-	Status     string                          `json:"status"`
-	ExpiresAt  authRequiredNullable[time.Time] `json:"expires_at"`
-	IsExpired  *bool                           `json:"is_expired"`
-	Version    *uint64                         `json:"version"`
-	CreatedAt  *time.Time                      `json:"created_at"`
-	UpdatedAt  *time.Time                      `json:"updated_at"`
-	LastUsedAt authRequiredNullable[time.Time] `json:"last_used_at"`
+	ID         string                              `json:"token_id"`
+	OwnerID    string                              `json:"owner_id"`
+	SpaceID    string                              `json:"space_id"`
+	Name       *string                             `json:"name"`
+	Remark     authRequiredNullable[string]        `json:"remark"`
+	Status     string                              `json:"status"`
+	ExpiresAt  authRequiredNullable[authTimestamp] `json:"expires_at"`
+	IsExpired  *bool                               `json:"is_expired"`
+	Version    *uint64                             `json:"version"`
+	CreatedAt  *authTimestamp                      `json:"created_at"`
+	UpdatedAt  *authTimestamp                      `json:"updated_at"`
+	LastUsedAt authRequiredNullable[authTimestamp] `json:"last_used_at"`
 }
 
-// UnmarshalJSON rejects duplicate metadata keys and timestamps that cannot
-// be serialized back to JSON.
+// UnmarshalJSON checks metadata keys before the typed decode can overwrite them.
 func (meta *authTokenMetadata) UnmarshalJSON(data []byte) error {
 	if !uniqueTokenSelfObjectKeys(data, true) {
 		return errors.New("invalid or ambiguous TokenSelf metadata")
 	}
 	type wireMetadata authTokenMetadata
-	if err := json.Unmarshal(data, (*wireMetadata)(meta)); err != nil {
+	return json.Unmarshal(data, (*wireMetadata)(meta))
+}
+
+type authTimestamp struct{ time.Time }
+
+// UnmarshalJSON decodes JSON escapes before parsing the timestamp.
+func (timestamp *authTimestamp) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
 		return err
 	}
-	// Go can decode timestamps that its JSON encoder rejects. Check the
-	// output representation before either command accepts the metadata.
-	for _, timestamp := range []*time.Time{meta.CreatedAt, meta.UpdatedAt, meta.ExpiresAt.value, meta.LastUsedAt.value} {
-		if timestamp == nil {
-			continue
-		}
-		if _, err := timestamp.MarshalJSON(); err != nil {
-			return err
-		}
+	if err := timestamp.UnmarshalText([]byte(value)); err != nil {
+		return err
 	}
-	return nil
+	// Go can parse timestamps that its JSON encoder rejects.
+	_, err := timestamp.MarshalJSON()
+	return err
 }
 
 // authRequiredNullable distinguishes an omitted field from an explicit null
@@ -167,7 +169,7 @@ func runAuthGet(ctx context.Context, f *cmdutil.Factory) error {
 }
 
 func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL, ownerID string) error {
-	if err := validateUnifiedAuthLogin(cmd, f, withToken, apiBaseURL, ownerID); err != nil {
+	if err := validateUnifiedAuthLogin(cmd, f, withToken, apiBaseURL); err != nil {
 		return err
 	}
 	name, _ := config.ProfileSelector(f.Globals.Profile, f.Globals.ProfileSet)
@@ -206,7 +208,7 @@ func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool,
 	return importVerifiedToken(ctx, f, store, baseline, target, token)
 }
 
-func validateUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL, ownerID string) error {
+func validateUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL string) error {
 	switch {
 	case !withToken:
 		return output.ErrValidation("unified auth login requires --with-token", "pipe the candidate CLI Token through stdin")
@@ -214,8 +216,6 @@ func validateUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken 
 		return output.ErrValidation("unified auth login does not accept --credential-file or --bot-id", "select a Profile and pipe the candidate CLI Token through stdin")
 	case cmd.Flags().Changed("api-base-url") && apiBaseURL == "":
 		return output.ErrValidation("--api-base-url is empty", "pass the target API origin")
-	case cmd.Flags().Changed("owner-id") && strings.TrimSpace(ownerID) == "":
-		return output.ErrValidation("--owner-id is empty", "pass the expected owner ID")
 	case cmd.Flags().Changed("space") && strings.TrimSpace(f.Globals.Space) == "":
 		return output.ErrValidation("--space is empty", "pass the target Space ID")
 	}

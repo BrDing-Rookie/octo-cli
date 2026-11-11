@@ -435,6 +435,136 @@ func TestUnifiedAuthCurrentRejectsUnserializableTimestamp(t *testing.T) {
 	}
 }
 
+func TestUnifiedAuthCurrentAcceptsEscapedTimestamps(t *testing.T) {
+	dir := phaseOneEnv(t)
+	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+	store := authstore.NewManagedStore(dir, nil)
+	candidate := authCurrentFixtureCandidateToken
+	const escaped = `"2026-11-04T06:00:00\u002b08:00"`
+	const timestamp = `"2026-11-04T06:00:00+08:00"`
+	reply := authCurrentFixtureSuccess("candidate-id", "owner", "space")
+	reply.body = strings.NewReplacer(
+		`"2026-11-04T06:00:00Z"`, escaped,
+		`"expires_at":null`, `"expires_at":`+escaped,
+		`"last_used_at":null`, `"last_used_at":`+escaped,
+	).Replace(reply.body)
+	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{candidate: reply})
+	stdout, stderr, err := runUnifiedAuthCurrent(store, strings.NewReader(candidate),
+		"--profile", "target", "--space", "space", "auth", "login", "--api-base-url", server.URL, "--with-token")
+	if err != nil || !strings.Contains(stdout, "managed_store") {
+		t.Errorf("login rejected escaped timestamps: %v (%s %s)", err, stdout, stderr)
+	}
+
+	// Exercise get independently of whether login accepted the fixture.
+	t.Setenv(config.EnvToken, candidate)
+	t.Setenv(config.EnvAPIBaseURL, server.URL)
+	stdout, stderr, err = runUnifiedAuthCurrent(store, strings.NewReader(""), "auth", "get")
+	if err != nil {
+		t.Fatalf("get rejected escaped timestamps: %v (%s %s)", err, stdout, stderr)
+	}
+	var result struct {
+		Data struct {
+			Token map[string]json.RawMessage
+		}
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"created_at", "updated_at", "expires_at", "last_used_at"} {
+		if got := string(result.Data.Token[field]); got != timestamp {
+			t.Errorf("%s = %s, want %s", field, got, timestamp)
+		}
+	}
+	if got := len(requests()); got != 2 {
+		t.Errorf("got %d _current calls, want 2", got)
+	}
+}
+
+func TestUnifiedAuthCurrentExpectedOwnerFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		flags     []string
+		message   string
+		wantCalls int
+	}{
+		{"expected owner", []string{"--expected-owner-id", "owner"}, "", 1},
+		{"legacy alias", []string{"--owner-id", "owner"}, "", 1},
+		{"matching flags", []string{"--owner-id", "owner", "--expected-owner-id", "owner"}, "", 1},
+		{"conflicting flags", []string{"--expected-owner-id", "owner", "--owner-id", "different"}, "must match", 0},
+		{"empty expected owner", []string{"--expected-owner-id=", "--owner-id", "owner"}, "--expected-owner-id is empty", 0},
+		{"empty alias", []string{"--owner-id=", "--expected-owner-id", "owner"}, "--owner-id is empty", 0},
+		{"owner mismatch", []string{"--expected-owner-id", "different"}, "belongs to a different owner", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+			store := authstore.NewManagedStore(dir, nil)
+			candidate, old := authCurrentFixtureCandidateToken, authCurrentFixtureStoredToken
+			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
+				candidate: authCurrentFixtureSuccess("candidate-id", "owner", "space"),
+			})
+			seedAuthCurrentProfile(t, store, "target", server.URL, "space", old)
+			configPath := filepath.Join(dir, "config.json")
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			stdin := strings.NewReader(candidate)
+			args := append([]string{"--profile", "target", "auth", "login", "--with-token"}, tc.flags...)
+			stdout, stderr, err := runUnifiedAuthCurrent(store, stdin, args...)
+			wantToken := candidate
+			if tc.message == "" {
+				if err != nil || !strings.Contains(stdout, "managed_store") {
+					t.Errorf("expected successful import: %v (%s %s)", err, stdout, stderr)
+				}
+			} else {
+				wantToken = old
+				exit := output.AsExitError(err)
+				if exit == nil || exit.Code != "VALIDATION_ERROR" || !strings.Contains(exit.Message, tc.message) || stdout != "" {
+					t.Errorf("expected validation error %q: %v (%s %s)", tc.message, err, stdout, stderr)
+				}
+				after, err := os.ReadFile(configPath)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Errorf("failed import changed config.json: %v", err)
+				}
+			}
+			if got := len(requests()); got != tc.wantCalls {
+				t.Errorf("got %d _current calls, want %d", got, tc.wantCalls)
+			}
+			if tc.wantCalls == 0 && stdin.Len() != len(candidate) {
+				t.Error("invalid flags consumed stdin")
+			}
+			cfg, err := config.LoadProfileConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, profile, err := cfg.SelectProfile("target", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			token, err := authstore.ReadManagedToken(cfg, profile.TokenSource)
+			if err != nil || token != wantToken {
+				t.Errorf("Profile does not resolve the expected Token: %v", err)
+			}
+		})
+	}
+}
+
+func TestAuthLoginOwnerFlagsRequireUnifiedMode(t *testing.T) {
+	for _, flag := range []string{"--expected-owner-id", "--owner-id"} {
+		t.Run(flag, func(t *testing.T) {
+			phaseOneEnv(t)
+			stdin := strings.NewReader(authCurrentFixtureCandidateToken)
+			stdout, stderr, err := runUnifiedAuthCurrent(nil, stdin, "--profile", "target", "auth", "login", "--with-token", flag, "owner")
+			exit := output.AsExitError(err)
+			if exit == nil || exit.Code != "VALIDATION_ERROR" || exit.Message != flag+" requires unified credentials" || stdout != "" || stdin.Len() != len(authCurrentFixtureCandidateToken) {
+				t.Fatalf("expected legacy-mode validation before reading stdin: %v (%s %s)", err, stdout, stderr)
+			}
+		})
+	}
+}
+
 func TestUnifiedAuthCurrentJQFailurePreservesProfile(t *testing.T) {
 	for _, tc := range []struct {
 		name, query, typ, code string
