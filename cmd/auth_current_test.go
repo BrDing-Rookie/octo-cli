@@ -415,6 +415,95 @@ func TestUnifiedAuthCurrentRejectsUnexpectedSuccessStatus(t *testing.T) {
 	}
 }
 
+func TestUnifiedAuthCurrentRejectsInvalidUTF8Response(t *testing.T) {
+	reply := authCurrentFixtureSuccess("fixture-id", "owner", "space")
+	reply.body = strings.Replace(reply.body, `"name":"fixture"`, "\"name\":\"fixture\xff\"", 1)
+	assertAuthCurrentReplyRejected(t, reply, "INVALID_TOKEN_SELF")
+}
+
+func TestUnifiedAuthCurrentImportTokenFile(t *testing.T) {
+	for _, tc := range []struct {
+		name, code string
+		wantCalls  int
+	}{
+		{"valid", "", 1},
+		{"wrong owner", "VALIDATION_ERROR", 1},
+		{"empty path", "VALIDATION_ERROR", 0},
+		{"missing file", "VALIDATION_ERROR", 0},
+		{"directory", "VALIDATION_ERROR", 0},
+		{"oversized file", "VALIDATION_ERROR", 0},
+		{"legacy token", "UNAUTHORIZED", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+			store := authstore.NewManagedStore(dir, nil)
+			candidate, old := authCurrentFixtureCandidateToken, authCurrentFixtureStoredToken
+			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{
+				candidate: authCurrentFixtureSuccess("candidate-id", "owner", "space"),
+			})
+			seedAuthCurrentProfile(t, store, "target", server.URL, "space", old)
+			configPath := filepath.Join(dir, "config.json")
+			before, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			path := filepath.Join(t.TempDir(), "candidate.token")
+			content, owner := "\t"+candidate+"\r\n", "owner"
+			switch tc.name {
+			case "wrong owner":
+				owner = "other-owner"
+			case "empty path":
+				path = ""
+			case "directory":
+				path = t.TempDir()
+			case "oversized file":
+				content = strings.Repeat("x", 64*1024+1)
+			case "legacy token":
+				content = "bf_fixture-old-token"
+			}
+			if path != "" && tc.name != "missing file" && tc.name != "directory" {
+				phaseOneWrite(t, path, content)
+			}
+			stdin := strings.NewReader("unused stdin")
+			stdout, stderr, err := runUnifiedAuthCurrent(store, stdin, "--profile", "target",
+				"auth", "login", "--token-file", path, "--expected-owner-id", owner)
+			wantToken := candidate
+			if tc.code == "" {
+				var result struct{ Identity struct{ Source string } }
+				if decodeErr := json.Unmarshal([]byte(stdout), &result); err != nil || decodeErr != nil || result.Identity.Source != "flag:--token-file" {
+					t.Errorf("expected file import success and file identity: %v (%s %s)", err, stdout, stderr)
+				}
+			} else {
+				wantToken = old
+				if exit := output.AsExitError(err); exit == nil || exit.Code != tc.code || stdout != "" {
+					t.Errorf("expected %s without stdout: %v (%s %s)", tc.code, err, stdout, stderr)
+				}
+				after, err := os.ReadFile(configPath)
+				if err != nil || !bytes.Equal(before, after) {
+					t.Errorf("failed file import changed config.json: %v", err)
+				}
+			}
+			if got := len(requests()); got != tc.wantCalls || stdin.Len() != len("unused stdin") {
+				t.Errorf("unexpected file import input: HTTP calls = %d, unread stdin bytes = %d", got, stdin.Len())
+			}
+			assertAuthCurrentRedaction(t, candidate, stdout, stderr)
+			cfg, err := config.LoadProfileConfig()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, profile, err := cfg.SelectProfile("target", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if token, err := authstore.ReadManagedToken(cfg, profile.TokenSource); err != nil || token != wantToken {
+				t.Errorf("Profile does not resolve the expected Token: %v", err)
+			}
+		})
+	}
+}
+
 func assertAuthCurrentReplyRejected(t *testing.T, reply authCurrentFixtureReply, code string) {
 	t.Helper()
 	dir := phaseOneEnv(t)
@@ -817,6 +906,7 @@ func TestUnifiedAuthCurrentPreflight(t *testing.T) {
 		{[]string{"--dry-run"}, "new"},
 		{[]string{"--format", "invalid-format"}, "new"},
 		{[]string{"--jq", "("}, "new"},
+		{[]string{"--token-file", "candidate.token"}, "new"},
 		{nil, " padded "},
 	} {
 		stdin := strings.NewReader(candidate)

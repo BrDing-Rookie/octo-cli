@@ -67,6 +67,18 @@ func writeStream(ctx context.Context, out io.Writer, data []byte, grace time.Dur
 	if err := writeCtx.Err(); err != nil {
 		return 0, err
 	}
+	if grace == 0 && ctx.Done() != nil {
+		// A pipe write must finish or stop before we report cancellation.
+		dst := out
+		if protected, ok := dst.(standardPipeWriter); ok {
+			dst = protected.out
+		}
+		if file, ok := dst.(*os.File); ok {
+			if n, err, handled := writeCancelablePipe(ctx, file, data); handled {
+				return n, err
+			}
+		}
+	}
 	write := func(data []byte) (int, error) {
 		if err := writeCtx.Err(); err != nil {
 			return 0, err
@@ -80,6 +92,10 @@ func writeStream(ctx context.Context, out io.Writer, data []byte, grace time.Dur
 	if ctx.Done() == nil {
 		return write(data)
 	}
+	return writeStreamAsync(ctx, write, data, grace)
+}
+
+func writeStreamAsync(ctx context.Context, write func([]byte) (int, error), data []byte, grace time.Duration) (int, error) {
 	// The underlying writer can still be blocked when this method returns.
 	// Give the write its own copy so the caller may release or reuse its buffer.
 	data = bytes.Clone(data)

@@ -151,8 +151,8 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Store a credential (read from a hidden prompt or stdin, never argv)",
-		Long: "In unified mode, verify and import a CLI Token from stdin using --with-token. " +
+		Short: "Store a credential read from stdin, a file, or a hidden prompt",
+		Long: "In unified mode, verify and import a CLI Token using --with-token for stdin or --token-file for a file. " +
 			"Select the target with --profile and optionally verify its owner with --expected-owner-id. " +
 			"In legacy mode, identify a bot with --bot-id " +
 			"(its robot id, recommended) and/or --profile (a friendly name). The " +
@@ -179,7 +179,7 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 				return failErrContext(cmd.Context(), f, err)
 			}
 			if unified {
-				if err := runUnifiedAuthLogin(cmd, f, withToken, apiBaseURL, ownerID); err != nil {
+				if err := runUnifiedAuthLogin(cmd, f, withToken, tokenFile, apiBaseURL, ownerID); err != nil {
 					return failErrContext(cmd.Context(), f, err)
 				}
 				return nil

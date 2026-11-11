@@ -378,7 +378,7 @@ gateway must support `GET /v1/auth/tokens/_current`.
 
 | Command | Behavior |
 |---|---|
-| `auth login --with-token` | Reads the candidate Token from stdin, verifies its status and target Space online, and saves it to the selected Profile. Add `--expected-owner-id` to verify the expected account. `--owner-id` is an alias. |
+| `auth login` | Reads the candidate Token from stdin with `--with-token` or from a regular file with `--token-file <path>`. It verifies the Token's status and target Space online and saves it to the selected Profile. Add `--expected-owner-id` to verify the expected account. `--owner-id` is an alias. |
 | `auth get` | Checks the selected Token online and returns its metadata, permissions, and Bot bindings in the JSON `data` object. |
 
 Login evaluates `--jq` before saving the Token. With `--jq`, credential cleanup

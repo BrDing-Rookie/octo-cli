@@ -173,8 +173,8 @@ func runAuthGet(ctx context.Context, f *cmdutil.Factory) error {
 	return err
 }
 
-func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL, ownerID string) error {
-	if err := validateUnifiedAuthLogin(cmd, f, withToken, apiBaseURL); err != nil {
+func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, tokenFile, apiBaseURL, ownerID string) error {
+	if err := validateUnifiedAuthLogin(cmd, f, withToken, tokenFile, apiBaseURL); err != nil {
 		return err
 	}
 	name, _ := config.ProfileSelector(f.Globals.Profile, f.Globals.ProfileSet)
@@ -194,7 +194,7 @@ func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool,
 		return err
 	}
 	ctx := cmd.Context()
-	token, err := readUnifiedLoginToken(ctx, f.IOStreams.In)
+	token, source, err := readUnifiedLoginToken(ctx, f.IOStreams.In, tokenFile)
 	if err != nil {
 		return err
 	}
@@ -210,15 +210,17 @@ func runUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool,
 	if err := self.Token.verifyImport(target.SpaceID, ownerID); err != nil {
 		return err
 	}
-	return importVerifiedToken(ctx, f, store, baseline, target, token)
+	return importVerifiedToken(ctx, f, store, baseline, target, token, source)
 }
 
-func validateUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, apiBaseURL string) error {
+func validateUnifiedAuthLogin(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, tokenFile, apiBaseURL string) error {
 	switch {
-	case !withToken:
-		return output.ErrValidation("unified auth login requires --with-token", "pipe the candidate CLI Token through stdin")
+	case cmd.Flags().Changed("token-file") && tokenFile == "":
+		return output.ErrValidation("--token-file is empty", "pass the candidate CLI Token file path")
+	case !withToken && tokenFile == "":
+		return output.ErrValidation("unified auth login requires --with-token or --token-file", "provide the candidate CLI Token through stdin or a file")
 	case f.Globals.CredentialFileSet, f.Globals.BotIDSet:
-		return output.ErrValidation("unified auth login does not accept --credential-file or --bot-id", "select a Profile and pipe the candidate CLI Token through stdin")
+		return output.ErrValidation("unified auth login does not accept --credential-file or --bot-id", "select a Profile and use --with-token or --token-file")
 	case cmd.Flags().Changed("api-base-url") && apiBaseURL == "":
 		return output.ErrValidation("--api-base-url is empty", "pass the target API origin")
 	case cmd.Flags().Changed("space") && strings.TrimSpace(f.Globals.Space) == "":
@@ -246,21 +248,30 @@ func authLoginTarget(f *cmdutil.Factory, previous config.Profile, apiBaseURL str
 	return config.Profile{APIBaseURL: runtime.APIBaseURL, SpaceID: runtime.SpaceID}, nil
 }
 
-func readUnifiedLoginToken(ctx context.Context, stdin io.Reader) (string, error) {
+func readUnifiedLoginToken(ctx context.Context, stdin io.Reader, tokenFile string) (token, source string, err error) {
 	if ctx.Err() != nil {
-		return "", authImportCanceled()
+		return "", "", authImportCanceled()
+	}
+	source, location, hint := "stdin", "stdin", "pipe a single CLI Token"
+	if tokenFile != "" {
+		source, location, hint = "flag:--token-file", "--token-file", "check that the file is regular, readable, and at most 64 KiB"
 	}
 	const limit = 64 * 1024
 	type readResult struct {
-		raw []byte
+		raw string
 		err error
 	}
 	// Stdin may be an inherited blocking pipe. Let the command exit on
 	// cancellation even if the pipe owner leaves it open.
 	done := make(chan readResult, 1)
 	go func() {
+		if tokenFile != "" {
+			raw, err := credential.ReadBusinessTokenFile(tokenFile)
+			done <- readResult{raw: raw, err: err}
+			return
+		}
 		raw, err := io.ReadAll(io.LimitReader(stdin, limit+1))
-		done <- readResult{raw: raw, err: err}
+		done <- readResult{raw: string(raw), err: err}
 	}()
 	var read readResult
 	select {
@@ -268,16 +279,16 @@ func readUnifiedLoginToken(ctx context.Context, stdin io.Reader) (string, error)
 	case read = <-done:
 	}
 	if ctx.Err() != nil {
-		return "", authImportCanceled()
+		return "", "", authImportCanceled()
 	}
 	if read.err != nil || len(read.raw) > limit {
-		return "", output.ErrValidation("cannot read candidate CLI Token from stdin", "pipe a single CLI Token")
+		return "", "", output.ErrValidation("cannot read candidate CLI Token from "+location, hint)
 	}
-	token := strings.TrimSpace(string(read.raw))
-	if err := credential.ValidateBusinessToken(token, "stdin"); err != nil {
-		return "", err
+	token = strings.TrimSpace(read.raw)
+	if err := credential.ValidateBusinessToken(token, source); err != nil {
+		return "", "", err
 	}
-	return token, nil
+	return token, source, nil
 }
 
 func requestAuthCurrent(ctx context.Context, f *cmdutil.Factory, cred *credential.BusinessContext) ([]byte, error) {
@@ -295,7 +306,7 @@ func decodeAuthTokenSelf(raw []byte) (authTokenSelf, error) {
 	}
 	var self authTokenSelf
 	invalid := output.ErrAPI("INVALID_TOKEN_SELF", "invalid TokenSelf response from octo-auth", "check the octo-auth gateway and response contract")
-	if !uniqueTokenSelfObjectKeys(raw, true) || json.Unmarshal(raw, &envelope) != nil ||
+	if !utf8.Valid(raw) || !uniqueTokenSelfObjectKeys(raw, true) || json.Unmarshal(raw, &envelope) != nil ||
 		envelope.Error != nil || !uniqueTokenSelfObjectKeys(envelope.Data, true) {
 		return self, invalid
 	}
@@ -408,7 +419,7 @@ func (m *authTokenMetadata) verifyImport(spaceID, ownerID string) error {
 	return nil
 }
 
-func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authstore.ManagedStore, baseline authstore.ProfileSnapshot, target config.Profile, token string) error {
+func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authstore.ManagedStore, baseline authstore.ProfileSnapshot, target config.Profile, token, source string) error {
 	payload := map[string]string{
 		"profile":      client.RedactBearer(baseline.Name, token),
 		"api_base_url": client.RedactBearer(target.APIBaseURL, token),
@@ -416,7 +427,7 @@ func importVerifiedToken(ctx context.Context, f *cmdutil.Factory, store *authsto
 		"token_source": "managed_store",
 	}
 	meta := output.EnvelopeMeta{Identity: map[string]string{
-		"type": "token", "source": "stdin", "profile": payload["profile"],
+		"type": "token", "source": source, "profile": payload["profile"],
 	}}
 	var rendered bytes.Buffer
 	render := func() error {

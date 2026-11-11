@@ -159,7 +159,7 @@ func ReadProfileToken(profiles *config.ProfileConfig, ref *config.TokenSource) (
 }
 
 func fileToken(source, path string) (selectedSource, token string, err error) {
-	token, err = readBusinessTokenFile(path)
+	token, err = ReadBusinessTokenFile(path)
 	if err != nil {
 		return "", "", output.ErrAuth("cannot read credential from "+source, "check that the selected credential file exists, is a regular file, and is readable")
 	}
@@ -170,7 +170,8 @@ func validBusinessToken(token string) bool {
 	return token != "" && !strings.ContainsFunc(token, func(r rune) bool { return r < '!' || r > '~' })
 }
 
-func readBusinessTokenFile(path string) (string, error) {
+// ReadBusinessTokenFile reads a bounded regular file without echoing its contents.
+func ReadBusinessTokenFile(path string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err
