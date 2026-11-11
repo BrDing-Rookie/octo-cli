@@ -12,6 +12,7 @@ import (
 )
 
 func main() {
+	cmdutil.RunOutputWriterIfRequested()
 	os.Exit(run())
 }
 

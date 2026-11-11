@@ -14,7 +14,10 @@ func (w standardPipeWriter) Write(data []byte) (int, error) {
 	return w.out.Write(data)
 }
 
-func writeCancelablePipe(ctx context.Context, file *os.File, data []byte) (int, error, bool) {
+// RunOutputWriterIfRequested is only needed by the Unix writer.
+func RunOutputWriterIfRequested() {}
+
+func writeCancelableFile(ctx context.Context, file *os.File, data []byte) (int, error, bool) {
 	conn, err := file.SyscallConn()
 	if err != nil {
 		return 0, err, true

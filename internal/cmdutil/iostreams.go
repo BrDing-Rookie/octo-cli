@@ -68,13 +68,13 @@ func writeStream(ctx context.Context, out io.Writer, data []byte, grace time.Dur
 		return 0, err
 	}
 	if grace == 0 && ctx.Done() != nil {
-		// A pipe write must finish or stop before we report cancellation.
+		// Writes to pipes and terminals must finish or stop before we report cancellation.
 		dst := out
 		if protected, ok := dst.(standardPipeWriter); ok {
 			dst = protected.out
 		}
 		if file, ok := dst.(*os.File); ok {
-			if n, err, handled := writeCancelablePipe(ctx, file, data); handled {
+			if n, err, handled := writeCancelableFile(ctx, file, data); handled {
 				return n, err
 			}
 		}
