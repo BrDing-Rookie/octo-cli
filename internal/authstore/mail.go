@@ -102,6 +102,34 @@ func matchingMailBindings(keys []string, robotID, spaceID, botToken, apiOrigin s
 func (s *Store) mailCredPath() string    { return filepath.Join(s.dir, mailCredFile) }
 func (s *Store) mailPendingPath() string { return filepath.Join(s.dir, mailPendingFile) }
 
+// CheckMailAuthorizationStorage checks the local destinations before a server
+// creates or consumes a device code. Mutations recheck ownership under the lock.
+func (s *Store) CheckMailAuthorizationStorage() error {
+	lock, err := s.lockProfiles(mailPendingFile, mailCredFile, saltFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+	if _, err := s.loadPendingMailAuthorizations(); err != nil {
+		return err
+	}
+	if _, err := s.loadMailTokens(); err != nil {
+		return err
+	}
+	for _, target := range []string{s.mailCredPath(), s.mailPendingPath()} {
+		if err := checkAtomicReplaceTarget(target); err != nil {
+			return fmt.Errorf("check Mail authorization storage can replace %s: %w", filepath.Base(target), err)
+		}
+	}
+	// The advisory lock and existing ciphertext can remain accessible when
+	// the directory ACL disallows creating the temp file used by atomicWrite.
+	probe, err := os.CreateTemp(s.dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("check Mail authorization storage is writable: %w", err)
+	}
+	return errors.Join(probe.Close(), os.Remove(probe.Name()))
+}
+
 // PendingMailAuthorization is the local proof material for an in-progress
 // device flow. DeviceCode and CodeVerifier are secrets and are only persisted
 // in the encrypted credential directory.
@@ -121,7 +149,7 @@ func (s *Store) loadMailTokens() (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", mailCredFile, err)
 	}
-	key, err := s.deriveKey()
+	key, err := s.deriveKey(false)
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +181,7 @@ func (s *Store) saveMailTokens(tokens map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", mailCredFile, err)
 	}
-	key, err := s.deriveKey()
+	key, err := s.deriveKey(true)
 	if err != nil {
 		return err
 	}
@@ -171,6 +199,12 @@ func (s *Store) SaveMailCredential(botKey, token string) error {
 	if botKey == "" || token == "" {
 		return errors.New("bot key and mail token are required")
 	}
+	lock, err := s.lockProfiles(mailCredFile, saltFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	tokens, err := s.loadMailTokens()
 	if err != nil {
 		return err
@@ -222,6 +256,12 @@ func (s *Store) FindMailCredential(robotID, spaceID, botToken, apiOrigin string)
 // RemoveMailCredential revokes the local credential reference for a Bot
 // key. Server-side revocation remains the authorization service's job.
 func (s *Store) RemoveMailCredential(botKey string) error {
+	lock, err := s.lockProfiles(mailCredFile, saltFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	tokens, err := s.loadMailTokens()
 	if err != nil {
 		return err
@@ -238,7 +278,7 @@ func (s *Store) loadPendingMailAuthorizations() (map[string]PendingMailAuthoriza
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", mailPendingFile, err)
 	}
-	key, err := s.deriveKey()
+	key, err := s.deriveKey(false)
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +310,7 @@ func (s *Store) savePendingMailAuthorizations(pending map[string]PendingMailAuth
 	if err != nil {
 		return fmt.Errorf("marshal %s: %w", mailPendingFile, err)
 	}
-	key, err := s.deriveKey()
+	key, err := s.deriveKey(true)
 	if err != nil {
 		return err
 	}
@@ -287,6 +327,12 @@ func (s *Store) SavePendingMailAuthorization(botKey string, pending *PendingMail
 	if botKey == "" || pending == nil || pending.DeviceCode == "" || pending.CodeVerifier == "" {
 		return errors.New("bot key, device code, and code verifier are required")
 	}
+	lock, err := s.lockProfiles(mailPendingFile, saltFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	items, err := s.loadPendingMailAuthorizations()
 	if err != nil {
 		return err
@@ -336,6 +382,12 @@ func (s *Store) FindPendingMailAuthorization(robotID, spaceID, botToken, apiOrig
 // RemovePendingMailAuthorization deletes the in-progress authorization for a
 // Bot key after it is completed or can no longer be used.
 func (s *Store) RemovePendingMailAuthorization(botKey string) error {
+	lock, err := s.lockProfiles(mailPendingFile, saltFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	items, err := s.loadPendingMailAuthorizations()
 	if err != nil {
 		return err

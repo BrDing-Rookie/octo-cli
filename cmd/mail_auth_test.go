@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,6 +28,118 @@ func mailBindingKey(t *testing.T, robotID, spaceID, botToken, apiOrigin string) 
 		t.Fatalf("MailBindingKey: %v", err)
 	}
 	return key
+}
+
+func TestMailAuthorizationChecksStorageBeforeRequest(t *testing.T) {
+	for _, tc := range []struct {
+		command, target string
+	}{
+		{"login", "mail-authorization.enc"}, {"login", "cred.salt"},
+		{"login", "mail-credentials.enc"}, {"status", "mail-credentials.enc"},
+	} {
+		t.Run(tc.command+"/"+tc.target, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			var requested atomic.Bool
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/v1/bot/register":
+					writeTestJSON(w, http.StatusOK, map[string]any{"robot_id": "fixture-bot"})
+				case mailDevicePath, mailTokenPath:
+					requested.Store(true)
+					writeTestJSON(w, http.StatusOK, map[string]any{
+						"accessToken": "omb_fixture", "botId": "fixture-bot", "mailboxAddress": "fixture@example.test",
+						"deviceCode": "omd_fixture", "userCode": "ABCD-EFGH",
+						"verificationUriComplete": "https://octo.example/mail/authorize?code=ABCD-EFGH",
+						"expiresIn":               600,
+					})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer srv.Close()
+			t.Setenv(config.EnvAPIBaseURL, srv.URL)
+			t.Setenv(config.EnvBotToken, "app_fixture")
+			t.Setenv(config.EnvBotID, "fixture-bot")
+			t.Setenv(config.EnvSpaceID, "fixture-space")
+			if tc.command == "status" {
+				store, err := authstore.New()
+				if err != nil {
+					t.Fatal(err)
+				}
+				key := mailBindingKey(t, "fixture-bot", "fixture-space", "app_fixture", srv.URL)
+				if err := store.SavePendingMailAuthorization(key, &authstore.PendingMailAuthorization{
+					DeviceCode: "omd_fixture", CodeVerifier: "verifier",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			phaseOneWrite(t, filepath.Join(dir, "config.json"),
+				`{"version":1,"profiles":{"work":{"token_source":{"type":"token_file","path":"`+tc.target+`"}}}}`)
+			out, err := phaseOneRun("mail", "auth", tc.command)
+			if requested.Load() {
+				t.Fatalf("contacted the device authorization endpoint despite a storage conflict: %v", err)
+			}
+			if _, err := os.Lstat(filepath.Join(dir, tc.target)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("Mail auth created protected local storage %s: %v", tc.target, err)
+			}
+			if err == nil || !strings.Contains(err.Error(), "reserved by a Token file") {
+				t.Fatalf("expected a local storage conflict: %v (%s)", err, out)
+			}
+		})
+	}
+}
+
+func TestMailAuthStatusPreservesCodeWhenDirectoryIsReadOnly(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires POSIX directory permissions for an unprivileged user")
+	}
+	dir := phaseOneEnv(t)
+	var exchanges atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != mailTokenPath {
+			http.NotFound(w, r)
+			return
+		}
+		exchanges.Add(1)
+		writeTestJSON(w, http.StatusOK, map[string]any{
+			"accessToken": "omb_fixture", "botId": "fixture-bot", "mailboxAddress": "fixture@example.test",
+		})
+	}))
+	defer srv.Close()
+	t.Setenv(config.EnvAPIBaseURL, srv.URL)
+	t.Setenv(config.EnvBotToken, "app_fixture")
+	t.Setenv(config.EnvBotID, "fixture-bot")
+	t.Setenv(config.EnvSpaceID, "fixture-space")
+	store, err := authstore.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := mailBindingKey(t, "fixture-bot", "fixture-space", "app_fixture", srv.URL)
+	if err := store.SavePendingMailAuthorization(key, &authstore.PendingMailAuthorization{
+		DeviceCode: "omd_fixture", CodeVerifier: "verifier",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	if out, err := phaseOneRun("mail", "auth", "status"); err == nil || !strings.Contains(err.Error(), "storage is writable") {
+		t.Fatalf("expected the preflight to reject an unwritable directory: %v (%s)", err, out)
+	}
+	if exchanges.Load() != 0 {
+		t.Fatal("the code was exchanged despite an unwritable directory")
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := phaseOneRun("mail", "auth", "status"); err != nil || !strings.Contains(out, "connected") || exchanges.Load() != 1 {
+		t.Fatalf("retry with the original pending code: %v (%s)", err, out)
+	}
 }
 
 func TestMailAuthLoginStatusAndCredentialStorage(t *testing.T) {

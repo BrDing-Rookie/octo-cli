@@ -347,8 +347,8 @@ through the Server interface.
 
 ## Authentication
 
-`octo-cli` is bot-only — there is no interactive user login. The token comes
-from `OCTO_TOKEN` (preferred) or `OCTO_BOT_TOKEN`, and carries an **App Bot**
+In legacy mode, `octo-cli` reads its credential from `OCTO_TOKEN` (preferred)
+or `OCTO_BOT_TOKEN`. These credentials include an **App Bot**
 (`app_*`), a **User Bot** (`bf_*`), a **user API key** (`uk_*`, a real-person
 identity used for message search and drive), or a short-lived **Loop task
 credential** (`octo_loop_*`):
@@ -370,6 +370,33 @@ operations with `FORBIDDEN`. Two local exceptions: an `app_*` token running
 (`TOKEN_KIND_NOT_ALLOWED`) — both are `validation` errors raised before any
 request. `uk_*` tokens are routed to `/v1/user/*`; a `bf_*` token can search as
 a real person with `--on-behalf-of <uid>` (OBO, requires an active grant).
+
+### Unified CLI Token import and self-check
+
+Set `OCTO_CREDENTIAL_MODE=unified` to use a unified CLI Token. The target
+gateway must support `GET /v1/auth/tokens/_current`.
+
+| Command | Behavior |
+|---|---|
+| `auth login` | Reads the candidate Token from stdin with `--with-token` or from a regular file with `--token-file <path>`. It verifies the Token's status and target Space online and saves it to the selected Profile. |
+| `auth get` | Checks the selected Token online and returns its metadata, including the server-provided `owner_id`, permissions, and Bot bindings in the JSON `data` object. OctoBuddy can use this metadata; the CLI does not make ownership decisions. |
+
+Login evaluates `--jq` before saving the Token. With `--jq`, credential cleanup
+warnings go to stderr. If login returns `TOKEN_IMPORT_OUTPUT_FAILED`, the Profile
+already contains the new Token. Use `auth get` to verify it before retrying.
+
+Use the same Profile and configuration directory for import and self-check.
+Clear the environment Token overrides to check the stored credential.
+
+```sh
+(
+  unset OCTO_TOKEN OCTO_TOKEN_FILE
+  export OCTO_CREDENTIAL_MODE=unified OCTO_CONFIG_DIR="$profile_dir"
+  octo-cli --format json --profile "$profile" --space "$space_id" \
+    auth login --api-base-url "$api_origin" --with-token < "$candidate_token_file" &&
+  octo-cli --format json --profile "$profile" auth get
+)
+```
 
 ### Token variables
 
@@ -394,6 +421,29 @@ OCTO_TOKEN="$BOT_TOKEN" octo-cli message sync
 The success envelope's `identity.source` names the variable actually used
 (`env:OCTO_TOKEN` or `env:OCTO_BOT_TOKEN`), so a mix-up is visible.
 
+### Unified Profile status
+
+Run the local Profile check before starting a managed CLI session.
+
+```sh
+OCTO_CONFIG_DIR="$profile_dir" OCTO_CREDENTIAL_MODE=unified \
+  octo-cli --format json --profile "$profile" auth status
+```
+
+- Exit 0 with `data.status: "readable"` means the selected Profile's
+  credential is locally readable and passes the unified Token format check.
+- Exit 0 with `data.status: "missing"` means the named unified Profile
+  is absent. A directory with only legacy Bot profiles also reports missing.
+- A nonzero exit with the JSON error envelope on stderr indicates an invalid
+  selector or configuration, a broken credential reference, a read error,
+  or a target conflict. Automatic provisioning requires the missing result.
+
+The command works offline. The success data includes the Profile name, API
+origin, and effective `space_id` when set. A stored Profile Space supplies
+`space_id` when present. Otherwise, `--space` or `OCTO_SPACE_ID` supplies the
+request target only. Before reuse, compare the stored API origin and the
+previously verified account and Space binding with the intended session.
+
 ### API Base URL
 
 All backend services are accessed through a single API base URL.
@@ -409,10 +459,10 @@ rejected. Precedence is the active profile's `api_base_url`, then
 | `OCTO_TOKEN`        | Canonical token variable (`app_*`, `bf_*`, `uk_*`, or `octo_loop_*`); wins over `OCTO_BOT_TOKEN`. |
 | `OCTO_BOT_TOKEN`    | Fully compatible legacy alias; used when `OCTO_TOKEN` is unset. |
 | `OCTO_TASK_TOKEN`   | Dedicated daemon-issued task credential; read only when task mode is explicitly selected. |
-| `OCTO_CREDENTIAL_MODE` | Set to `task` for one task-workflow invocation; unset for ordinary authentication. |
+| `OCTO_CREDENTIAL_MODE` | Set to `task` for a task-workflow invocation or `unified` for unified CLI Tokens. |
 | `OCTO_API_BASE_URL`  | API base URL for environment credentials or profiles that record none; defaults to `https://im.deepminer.com.cn`. |
 | `OCTO_BOT_ID`       | Select a stored profile by robot id when no environment credential is set. |
-| `OCTO_CONFIG_DIR`   | Override the config/credential directory (default `~/.octo-cli`). |
+| `OCTO_CONFIG_DIR`   | Override the config and credential directory. Defaults are `~/.octo-cli` for legacy mode and `~/.octo/cli` for unified mode. |
 | `OCTO_SPACE_ID`     | Space context for platform-scoped bots.                  |
 | `OCTO_FORMAT`       | Default output format (`json` \| `table` \| `csv` \| `ndjson`). |
 

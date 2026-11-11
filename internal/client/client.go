@@ -8,14 +8,17 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -55,7 +58,7 @@ type Options struct {
 type Request struct {
 	Service string
 	// Credential selects the authorization boundary used by the command layer.
-	// Empty means the active Bot credential; "mail" means the Agent Mail token
+	// Empty means the active business credential; "mail" means the Agent Mail token
 	// bound to that same Bot identity. The transport itself never resolves
 	// secrets.
 	Credential  string
@@ -66,6 +69,9 @@ type Request struct {
 	Headers     map[string]string
 	RawBody     []byte
 	ContentType string
+	// ExpectedSuccessStatus restricts successful responses to a specific 2xx
+	// status. Zero accepts any 2xx status.
+	ExpectedSuccessStatus int
 	// BinaryResponse asks the client to treat 3xx/non-JSON responses as
 	// structured metadata envelopes rather than parsing JSON. See file.download.
 	BinaryResponse bool
@@ -98,6 +104,8 @@ type Request struct {
 	// traces and --dry-run output, whether it appears in the URL path or the
 	// request body. The values still go on the wire unchanged.
 	SecretValues []string
+	// diagnosticBearerForms is populated on Do's request copy, once per call.
+	diagnosticBearerForms []string
 	// ResponseSecretFields lists response-schema paths marked x-octo-secret.
 	// On a non-2xx response, the client extracts the actual values at these
 	// paths (at any envelope depth) and treats them as secrets for error
@@ -339,7 +347,7 @@ func jsonStringBody(v string) string {
 // than on whatever escaped form it took in the output. A RawBody (multipart) has
 // no structure to walk, so it falls back to text substitution over the encoded
 // forms. Either way the bytes on the wire are untouched — only the log copy is.
-func redactBodyForLog(req *Request, marshalled []byte) string {
+func redactBodyForLog(req *Request, marshalled []byte, bearer string) string {
 	if len(req.SecretValues) == 0 {
 		return string(marshalled)
 	}
@@ -348,7 +356,8 @@ func redactBodyForLog(req *Request, marshalled []byte) string {
 		// request body's keys are caller-controlled — --data merges arbitrary JSON,
 		// so a secret can land in a key — while a response body's keys are the
 		// backend's contract and masking them is what broke error parsing.
-		if buf, err := json.Marshal(redactBodyKeysAndValues(req.Body, req.SecretValues)); err == nil {
+		mask := diagnosticValueMask(req.SecretValues, bearer)
+		if buf, err := json.Marshal(redactBodyKeysAndValues(req.Body, req.SecretValues, mask)); err == nil {
 			return string(buf)
 		}
 	}
@@ -411,27 +420,25 @@ func redactBodyForLog(req *Request, marshalled []byte) string {
 // being destroyed on purpose, and the walk iterates in sorted order so the same input
 // always collapses the same way.
 func redactResponseBody(b []byte, secrets []string) []byte {
+	return redactErrorBody(b, secrets, "")
+}
+
+func redactErrorBody(b []byte, secrets []string, bearer string) []byte {
 	if len(b) == 0 || len(secrets) == 0 {
 		return b
 	}
+	mask := diagnosticValueMask(secrets, bearer)
 	if json.Valid(b) {
 		var parsed any
 		dec := json.NewDecoder(bytes.NewReader(b))
 		dec.UseNumber()
 		if err := dec.Decode(&parsed); err == nil {
-			if buf, merr := json.Marshal(redactErrorEnvelope(parsed, secrets)); merr == nil {
+			if buf, merr := json.Marshal(redactErrorEnvelope(parsed, secrets, mask)); merr == nil {
 				return buf
 			}
 		}
 	}
-	out := redactSecrets(string(b), secrets)
-	if containsAnySecret(out, secrets) {
-		// The whole body, not the occurrence: an opaque body has no structure to bound the
-		// suppression to, and suppressing a diagnostic costs a line of text while
-		// publishing it costs the user their password.
-		return []byte(secretMask)
-	}
-	return []byte(out)
+	return []byte(mask(string(b)))
 }
 
 // redactErrorEnvelope masks a decoded error body, leaving the machine-readable
@@ -485,14 +492,14 @@ func redactResponseBody(b []byte, secrets []string) []byte {
 // anywhere else in the redaction path. That bound is a property of the masker, not of
 // this rule, which is the point of delegating rather than re-deciding.
 //
-// Why a real token never reaches clause 1 or 3 by accident: Octo share and invite
-// tokens are base64url, so they carry upper-case characters or "-", and
-// IsErrorCodeShaped admits only lower-case alphanumerics and underscores. A token
-// therefore fails the shape gate before the vocabulary question is asked.
-func redactErrorEnvelope(v any, secrets []string) any {
+// The known vocabulary includes uppercase and lowercase codes. Check it before
+// the lowercase shape gate so a short bearer overlapping UNAUTHORIZED cannot
+// change an authentication failure's classification. Unknown values still need
+// to pass both the shape gate and the secret checks to be exempt.
+func redactErrorEnvelope(v any, secrets []string, mask func(string) string) any {
 	obj, ok := v.(map[string]any)
 	if !ok {
-		return redactBodyValue(v, secrets)
+		return redactBodyValueWithMask(v, secrets, mask)
 	}
 	out := make(map[string]any, len(obj))
 	// Sorted, not map order: two keys that both carry secrets mask to the same string
@@ -511,7 +518,7 @@ func redactErrorEnvelope(v any, secrets []string) any {
 		// The semantic decisions below are made on the key as the backend wrote it —
 		// whether it is the code-bearing field, whether it is the nested envelope —
 		// while what gets written is the masked spelling.
-		outKey := maskKey(key, secrets)
+		outKey := maskKey(key, mask)
 		if _, taken := out[outKey]; taken {
 			continue // an earlier key already masked to this name
 		}
@@ -521,9 +528,9 @@ func redactErrorEnvelope(v any, secrets []string) any {
 		case key == "error":
 			// The matters envelope nests {"code":…,"message":…} under "error";
 			// recurse so its code is exempt too while its message is masked.
-			out[outKey] = redactErrorEnvelope(val, secrets)
+			out[outKey] = redactErrorEnvelope(val, secrets, mask)
 		default:
-			out[outKey] = redactBodyValue(val, secrets)
+			out[outKey] = redactBodyValueWithMask(val, secrets, mask)
 		}
 	}
 	return out
@@ -548,11 +555,11 @@ func redactErrorEnvelope(v any, secrets []string) any {
 // leave the key position with the same short-secret hole the string leaves had: the boundary
 // rule declines a secret under shortSecretRunes unless it is delimited, so a backend keying
 // a map by "<password>x" would have published it.
-func maskKey(key string, secrets []string) string {
+func maskKey(key string, mask func(string) string) string {
 	if isEnvelopeContractKey(key) {
 		return key
 	}
-	return maskOrSuppressValue(key, secrets)
+	return mask(key)
 }
 
 // isEnvelopeContractKey names the keys this CLI itself reads out of a backend body.
@@ -571,15 +578,17 @@ func isCodeBearingKey(key string) bool {
 	return key == "code" || key == "error"
 }
 
-// isExemptCode applies the shape gate and three-clause rule documented on
-// redactErrorEnvelope.
+// isExemptCode applies the three-clause rule documented on redactErrorEnvelope.
 func isExemptCode(val any, secrets []string) bool {
 	s, ok := val.(string)
-	if !ok || !output.IsErrorCodeShaped(s) {
+	if !ok {
 		return false
 	}
 	if output.IsKnownErrorCode(s) {
 		return true // clause 1
+	}
+	if !output.IsErrorCodeShaped(s) {
+		return false
 	}
 	// Clause 2: not exempt if the value carries a declared secret at all. Two tests,
 	// because they catch different things: containsAnySecret is a raw substring check,
@@ -609,32 +618,34 @@ func isExemptCode(val any, secrets []string) bool {
 // map is randomised, so with two keys that mask to the same string the surviving value was
 // whichever one the runtime visited last — a dry-run description that differed between
 // identical invocations.
-func redactBodyKeysAndValues(v any, secrets []string) any {
+func redactBodyKeysAndValues(v any, secrets []string, mask func(string) string) any {
 	switch t := v.(type) {
+	case string:
+		return mask(t)
 	case map[string]any:
 		out := make(map[string]any, len(t))
 		for _, key := range sortedKeys(t) {
-			outKey := maskOrSuppressValue(key, secrets)
+			outKey := mask(key)
 			if _, taken := out[outKey]; taken {
 				continue
 			}
-			out[outKey] = redactBodyKeysAndValues(t[key], secrets)
+			out[outKey] = redactBodyKeysAndValues(t[key], secrets, mask)
 		}
 		return out
 	case map[string]string:
 		out := make(map[string]string, len(t))
 		for _, key := range sortedStringKeys(t) {
-			outKey := maskOrSuppressValue(key, secrets)
+			outKey := mask(key)
 			if _, taken := out[outKey]; taken {
 				continue
 			}
-			out[outKey] = maskOrSuppressValue(t[key], secrets)
+			out[outKey] = mask(t[key])
 		}
 		return out
 	case []any:
 		out := make([]any, len(t))
 		for i, val := range t {
-			out[i] = redactBodyKeysAndValues(val, secrets)
+			out[i] = redactBodyKeysAndValues(val, secrets, mask)
 		}
 		return out
 	}
@@ -678,9 +689,15 @@ func sortedStringKeys(m map[string]string) []string {
 // safe by construction is worth the marshal on a path that only runs for
 // secret-bearing requests.
 func redactBodyValue(v any, secrets []string) any {
+	return redactBodyValueWithMask(v, secrets, func(s string) string {
+		return maskOrSuppressValue(s, secrets)
+	})
+}
+
+func redactBodyValueWithMask(v any, secrets []string, mask func(string) string) any {
 	switch t := v.(type) {
 	case string:
-		return maskOrSuppressValue(t, secrets)
+		return mask(t)
 	case nil:
 		// JSON null is the one scalar whose spelling is fixed by the grammar rather than
 		// derived from a value, so there is nothing here to disclose.
@@ -697,17 +714,17 @@ func redactBodyValue(v any, secrets []string) any {
 			// spec-derived key cannot contain a declared secret; on a response body it
 			// is what stops a backend that keys a map by a caller-supplied id from
 			// printing it.
-			outKey := maskKey(key, secrets)
+			outKey := maskKey(key, mask)
 			if _, taken := out[outKey]; taken {
 				continue
 			}
-			out[outKey] = redactBodyValue(t[key], secrets)
+			out[outKey] = redactBodyValueWithMask(t[key], secrets, mask)
 		}
 		return out
 	case []any:
 		out := make([]any, len(t))
 		for i, val := range t {
-			out[i] = redactBodyValue(val, secrets)
+			out[i] = redactBodyValueWithMask(val, secrets, mask)
 		}
 		return out
 	case []string:
@@ -735,6 +752,7 @@ func redactBodyValue(v any, secrets []string) any {
 type Client struct {
 	cfg        *config.Config
 	cred       *credential.BotCredential
+	business   *credential.BusinessContext
 	httpClient *http.Client
 	options    Options
 }
@@ -743,27 +761,120 @@ type Client struct {
 // the default and emit a verbose warning (not a hard error — a bad flag value
 // shouldn't fail commands that wouldn't otherwise need HTTP).
 func New(cfg *config.Config, cred *credential.BotCredential, opts Options) *Client {
+	return newClient(cfg, cred, nil, opts)
+}
+
+func newClient(cfg *config.Config, cred *credential.BotCredential, business *credential.BusinessContext, opts Options) *Client {
+	c := &Client{cfg: cfg, cred: cred, business: business, options: opts}
 	timeout := defaultTimeout
 	if opts.Timeout != "" {
 		if d, err := time.ParseDuration(opts.Timeout); err == nil {
 			timeout = d
 		} else if opts.ErrOut != nil {
-			fmt.Fprintf(opts.ErrOut, "warning: invalid --timeout %q; using %s\n", opts.Timeout, defaultTimeout) //nolint:errcheck // stderr warning
+			fmt.Fprintf(opts.ErrOut, "warning: invalid --timeout %q; using %s\n", c.redactBearer(opts.Timeout), defaultTimeout) //nolint:errcheck // stderr warning
 		}
 	}
-	return &Client{
-		cfg:  cfg,
-		cred: cred,
-		httpClient: &http.Client{
-			Timeout: timeout,
-			// Don't auto-follow — file.download returns 302 to a presigned URL
-			// and we want to surface that URL in the envelope, not fetch it.
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
+	c.httpClient = &http.Client{
+		Timeout: timeout,
+		// Don't auto-follow — file.download returns 302 to a presigned URL
+		// and we want to surface that URL in the envelope, not fetch it.
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
 		},
-		options: opts,
 	}
+	return c
+}
+
+// NewBusiness takes the request origin and bearer from the same resolution.
+func NewBusiness(cred *credential.BusinessContext, opts Options) *Client {
+	return newClient(&config.Config{APIBaseURL: cred.APIBaseURL}, nil, cred, opts)
+}
+
+func (c *Client) redactBearer(s string) string {
+	if c.business == nil {
+		return s
+	}
+	return RedactBearer(s, c.business.Token)
+}
+
+// RedactBearer masks the unified bearer in diagnostics, including within words.
+func RedactBearer(s, token string) string {
+	if token == "" {
+		return s
+	}
+	s = redactEscapedBearer(s, token)
+	for _, form := range secretForms(token) {
+		s = strings.ReplaceAll(s, form, secretMask)
+	}
+	return s
+}
+
+func redactEscapedBearer(s, token string) string {
+	var masked strings.Builder
+	written := 0
+	forEachEscapedBearer(s, token, func(start, end int) {
+		masked.WriteString(s[written:start])
+		masked.WriteString(secretMask)
+		written = end
+	})
+	if written == 0 {
+		return s
+	}
+	masked.WriteString(s[written:])
+	return masked.String()
+}
+
+func forEachEscapedBearer(s, token string, matchSpan func(start, end int)) {
+	if token == "" || !strings.Contains(s, "%") {
+		return
+	}
+	// Match against one decoded layer and use the original byte offsets to
+	// preserve the spelling of everything outside the match.
+	decoded := make([]byte, 0, len(s))
+	offsets := make([]int, 0, len(s)+1)
+	for i := 0; i < len(s); {
+		offsets = append(offsets, i)
+		if s[i] == '%' && i+2 < len(s) {
+			var b [1]byte
+			if _, err := hex.Decode(b[:], []byte(s[i+1:i+3])); err == nil {
+				decoded = append(decoded, b[0])
+				i += 3
+				continue
+			}
+		}
+		decoded = append(decoded, s[i])
+		i++
+	}
+	offsets = append(offsets, len(s))
+
+	end := 0
+	for {
+		match := bytes.Index(decoded[end:], []byte(token))
+		if match < 0 {
+			break
+		}
+		start := end + match
+		end = start + len(token)
+		if offsets[end]-offsets[start] > len(token) {
+			matchSpan(offsets[start], offsets[end])
+		}
+	}
+}
+
+func diagnosticValueMask(secrets []string, bearer string) func(string) string {
+	return func(s string) string {
+		return redactEscapedBearer(maskOrSuppressValue(s, secrets), bearer)
+	}
+}
+
+func (c *Client) bearer() (token, space string) {
+	if c.business != nil {
+		return c.business.Token, c.business.SpaceID
+	}
+	if c.cred != nil {
+		return c.cred.Token, c.cred.SpaceID
+	}
+	return "", ""
 }
 
 // NewMail constructs a client using an account-scoped Agent Mail credential.
@@ -778,8 +889,8 @@ func NewMail(cfg *config.Config, cred *credential.MailCredential, opts Options) 
 }
 
 // Do performs req against the service URL, applying auth, retry, and dry-run.
-// Returns the raw response body on 2xx; an *output.ExitError on non-2xx or
-// transport failure.
+// Returns the response body on an accepted 2xx, or an *output.ExitError on
+// an unexpected status or transport failure.
 //
 // Every error leaving this method is redacted against req.SecretValues. That is
 // deliberately a boundary rather than a set of per-site calls: three rounds of
@@ -789,9 +900,17 @@ func NewMail(cfg *config.Config, cred *credential.MailCredential, opts Options) 
 // response read — echoed freely. Redacting on the way out makes the property hold
 // for sites that do not exist yet.
 func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
+	if c.business != nil {
+		// Keep the selected bearer out of diagnostics even when a backend
+		// echoes it or the caller also placed it in a request field.
+		copyReq := *req
+		copyReq.diagnosticBearerForms = c.queryBearerForms(req.Query)
+		copyReq.SecretValues = append([]string{c.business.Token}, req.SecretValues...)
+		req = &copyReq
+	}
 	body, err := c.do(ctx, req)
 	if err != nil {
-		return nil, redactError(err, req.SecretValues)
+		return nil, c.redactError(err, req)
 	}
 	return body, nil
 }
@@ -800,50 +919,47 @@ func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 // fields. The concrete type is preserved where it carries meaning: a
 // *retryableErr is rebuilt as one so a caller inspecting retryability still sees
 // it, and a plain error with nothing to redact is returned untouched.
-func redactError(err error, secrets []string) error {
+func (c *Client) redactError(err error, req *Request) error {
+	secrets := req.SecretValues
 	if err == nil || len(secrets) == 0 {
 		return err
 	}
 	var re *retryableErr
 	if errors.As(err, &re) && re.ExitError != nil {
 		return &retryableErr{
-			ExitError:  redactExitError(re.ExitError, secrets),
+			ExitError:  c.redactExitError(re.ExitError, req),
 			retryAfter: re.retryAfter,
 			status:     re.status,
 		}
 	}
 	var ee *output.ExitError
 	if errors.As(err, &ee) {
-		return redactExitError(ee, secrets)
+		return c.redactExitError(ee, req)
 	}
 	// Not one of ours: wrap so the text is still masked rather than passed
 	// through, since the caller renders whatever it receives.
-	return output.ErrNetwork(redactSecrets(err.Error(), secrets), "")
+	return output.ErrNetwork(c.redactDiagnosticText(req, err.Error()), "")
 }
 
 // redactExitError copies e with its message, hint and detail masked. A copy
 // rather than a mutation: the value may be shared (a package-level sentinel, or
 // an error already handed to another caller).
-func redactExitError(e *output.ExitError, secrets []string) *output.ExitError {
+func (c *Client) redactExitError(e *output.ExitError, req *Request) *output.ExitError {
+	secrets := req.SecretValues
 	if e == nil {
 		return nil
 	}
 	out := *e
-	out.Message = redactSecrets(e.Message, secrets)
-	out.Hint = redactSecrets(e.Hint, secrets)
+	out.Message = c.redactDiagnosticText(req, e.Message)
+	out.Hint = c.redactDiagnosticText(req, e.Hint)
 	if len(e.Detail) > 0 {
-		out.Detail = redactSecretBytes(e.Detail, secrets)
+		var bearer string
+		if c.business != nil {
+			bearer = c.business.Token
+		}
+		out.Detail = redactErrorBody(e.Detail, secrets, bearer)
 	}
 	return &out
-}
-
-// redactSecretBytes masks secrets in a JSON fragment, preserving its structure
-// where it parses so a detail payload stays readable.
-func redactSecretBytes(b []byte, secrets []string) []byte {
-	if len(b) == 0 || len(secrets) == 0 {
-		return b
-	}
-	return redactResponseBody(b, secrets)
 }
 
 // do is Do's body. It returns errors unredacted; Do is the single place that
@@ -855,12 +971,14 @@ func (c *Client) do(ctx context.Context, req *Request) ([]byte, error) {
 
 	// Route the message-search family by chat-id scope and token kind
 	// (no channel_id → cross-session global; uk_ → /v1/user; app_ → error).
-	// Non-search paths pass through unchanged.
-	routedPath, err := routeSearchPath(c.cred, req.Path, req.Body)
-	if err != nil {
-		return nil, err
+	// Unified API passthrough uses the caller's path verbatim.
+	if c.business == nil {
+		routedPath, err := routeSearchPath(c.cred, req.Path, req.Body)
+		if err != nil {
+			return nil, err
+		}
+		req.Path = routedPath
 	}
-	req.Path = routedPath
 
 	base := c.cfg.ServiceURL(req.Service)
 	if base == "" {
@@ -929,7 +1047,7 @@ func (c *Client) doWithRetry(ctx context.Context, req *Request, urlStr string, b
 			// URL, so on a share or invite path that is the token — printed once per
 			// retry.
 			c.verbosef("retry #%d after %s (last error: %v)", attempt, delay,
-				redactError(lastErr, req.SecretValues))
+				c.redactError(lastErr, req))
 			select {
 			case <-ctx.Done():
 				return nil, output.ErrNetwork(ctx.Err().Error(), "request cancelled")
@@ -962,11 +1080,12 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		return nil, output.ErrNetwork(redactSecrets(err.Error(), req.SecretValues), "invalid request")
 	}
 
-	if c.cred != nil && c.cred.Token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.cred.Token)
+	token, spaceID := c.bearer()
+	if token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
-	if c.cred != nil && c.cred.SpaceID != "" && !req.SuppressSpaceHeader {
-		httpReq.Header.Set("X-Space-Id", c.cred.SpaceID)
+	if spaceID != "" && !req.SuppressSpaceHeader {
+		httpReq.Header.Set("X-Space-Id", spaceID)
 	}
 	if body != nil && contentType != "" {
 		httpReq.Header.Set("Content-Type", contentType)
@@ -975,9 +1094,11 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		httpReq.Header.Set(k, v)
 	}
 
-	c.verbosef("%s %s", req.Method, redactSecrets(urlStr, req.SecretValues))
-	if c.options.Verbose && len(body) > 0 {
-		c.verbosef("request body: %s", truncate(redactDiagnosticBody(req, body), 1024))
+	if c.options.Verbose {
+		c.verbosef("%s %s", req.Method, c.redactDiagnosticText(req, urlStr))
+		if len(body) > 0 {
+			c.verbosef("request body: %s", truncate(c.redactDiagnosticBody(req, body), 1024))
+		}
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
@@ -985,7 +1106,7 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		// *url.Error.Error() embeds the whole request URL, so an x-octo-secret
 		// path parameter (invite / share token) would otherwise reach the default
 		// stderr error envelope — no --verbose needed to leak it.
-		msg := redactSecrets(err.Error(), req.SecretValues)
+		msg := c.redactDiagnosticText(req, err.Error())
 		if len(req.ResponseSecretFields) > 0 {
 			// Go parses Location before CheckRedirect runs. A malformed redirect
 			// therefore surfaces here as a *url.Error containing the raw signed
@@ -998,9 +1119,15 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return nil, output.ErrNetwork(msg, "request timed out or was cancelled")
 		}
-		return nil, &retryableErr{
-			ExitError: output.ErrNetwork(msg, "transport error"),
+		exit := output.ErrNetwork(msg, "transport error")
+		// net/http parses Location before CheckRedirect and reports a malformed
+		// header as text inside *url.Error. The server already received this
+		// request; replaying it cannot repair the redirect and may repeat a write.
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && strings.HasPrefix(urlErr.Err.Error(), "failed to parse Location header ") {
+			return nil, exit
 		}
+		return nil, &retryableErr{ExitError: exit}
 	}
 	defer resp.Body.Close() //nolint:errcheck // best-effort close on HTTP response body
 
@@ -1021,8 +1148,9 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	// handling (file.download). Any other endpoint returning 3xx is treated
 	// as an unexpected error.
 	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		loc := redactRedirectLocation(resp.Header.Get("Location"), req.SecretValues, req.ResponseSecretFields)
+		loc = c.redactDiagnosticText(req, loc)
 		if req.BinaryResponse {
-			loc := redactRedirectLocation(resp.Header.Get("Location"), req.SecretValues, req.ResponseSecretFields)
 			env := map[string]any{
 				"url":    loc,
 				"status": resp.StatusCode,
@@ -1034,12 +1162,19 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		}
 		return nil, output.ErrAPI(
 			fmt.Sprintf("HTTP_%d", resp.StatusCode),
-			fmt.Sprintf("unexpected redirect to %q", redactRedirectLocation(resp.Header.Get("Location"), req.SecretValues, req.ResponseSecretFields)),
+			fmt.Sprintf("unexpected redirect to %q", loc),
 			"",
 		)
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if req.ExpectedSuccessStatus != 0 && resp.StatusCode != req.ExpectedSuccessStatus {
+			return nil, output.ErrAPI(
+				fmt.Sprintf("HTTP_%d", resp.StatusCode),
+				fmt.Sprintf("expected HTTP %d, received HTTP %d", req.ExpectedSuccessStatus, resp.StatusCode),
+				"",
+			)
+		}
 		// Binary/redirect opt-in: don't try to parse as JSON, just describe.
 		if req.BinaryResponse {
 			env := map[string]any{
@@ -1084,7 +1219,15 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		return nil, output.ErrLoopAPIUnsupported()
 	}
 
-	redactedBody := redactBackendErrorBody(respBody, req.SecretValues, req.ResponseSecretFields)
+	requestSecrets := req.SecretValues
+	if len(req.diagnosticBearerForms) > 0 {
+		requestSecrets = append(slices.Clone(requestSecrets), req.diagnosticBearerForms...)
+	}
+	var bearer string
+	if c.business != nil {
+		bearer = c.business.Token
+	}
+	redactedBody := redactBackendErrorBody(respBody, requestSecrets, req.ResponseSecretFields, bearer)
 	parseError := output.ParseBackendError
 	if req.Service == "loop" {
 		parseError = output.ParsePublicAPIError
@@ -1106,10 +1249,11 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 // wrapped by a backend error envelope (for example under "details"), so exact
 // path values are collected at any depth. URL-shaped strings are also treated
 // as secret for these operations: a proxy may move the URL from its declared
-// field into a free-form message. Non-JSON bodies fail closed.
-func redactBackendErrorBody(body []byte, requestSecrets, responseSecretFields []string) []byte {
+// field into a free-form message. Non-JSON bodies fail closed. Unified bearer
+// encodings are masked before the parser extracts the backend error code.
+func redactBackendErrorBody(body []byte, requestSecrets, responseSecretFields []string, bearer string) []byte {
 	if len(body) == 0 || len(responseSecretFields) == 0 {
-		return redactResponseBody(body, requestSecrets)
+		return redactErrorBody(body, requestSecrets, bearer)
 	}
 	if !json.Valid(body) {
 		return []byte(secretMask)
@@ -1127,7 +1271,7 @@ func redactBackendErrorBody(body []byte, requestSecrets, responseSecretFields []
 		secrets = append(secrets, responseSecretValues(parsed, field)...)
 	}
 	collectURLValues(parsed, &secrets)
-	return redactResponseBody(body, secrets)
+	return redactErrorBody(body, secrets, bearer)
 }
 
 // responseSecretValues finds a schema path starting at every object/array node,
@@ -1257,31 +1401,37 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte, error) {
 	var bodyField any
 	if len(body) > 0 {
-		redacted := redactDiagnosticBody(req, body)
+		redacted := c.redactDiagnosticBody(req, body)
 		// UseNumber so a uint64 id in the echoed body is shown at full precision;
 		// a plain unmarshal would round it and make --dry-run misreport what the
 		// request actually carries.
 		dec := json.NewDecoder(strings.NewReader(redacted))
 		dec.UseNumber()
 		if err := dec.Decode(&bodyField); err != nil {
-			bodyField = redacted
+			bodyField = c.redactBearer(redacted)
 		}
 	}
 	hdr := map[string]string{}
 	for k, v := range req.Headers {
-		hdr[k] = redactSecrets(v, req.SecretValues)
+		if !strings.EqualFold(k, "Authorization") {
+			hdr[c.redactBearer(k)] = c.redactBearer(redactSecrets(v, req.SecretValues))
+		}
 	}
-	removeHeader(hdr, "Authorization")
-	if c.cred != nil && c.cred.Token != "" {
-		hdr["Authorization"] = "Bearer " + credential.MaskToken(c.cred.Token)
+	token, spaceID := c.bearer()
+	if token != "" {
+		masked := "***"
+		if c.business == nil {
+			masked = credential.MaskToken(token)
+		}
+		hdr["Authorization"] = "Bearer " + masked
 	}
-	if c.cred != nil && c.cred.SpaceID != "" && !req.SuppressSpaceHeader {
-		hdr["X-Space-Id"] = c.cred.SpaceID
+	if spaceID != "" && !req.SuppressSpaceHeader {
+		hdr["X-Space-Id"] = c.redactBearer(spaceID)
 	}
 	out := map[string]any{
 		"dry_run": true,
-		"method":  req.Method,
-		"url":     redactSecrets(urlStr, req.SecretValues),
+		"method":  c.redactBearer(req.Method),
+		"url":     c.redactDiagnosticText(req, urlStr),
 		"headers": hdr,
 	}
 	if bodyField != nil {
@@ -1292,14 +1442,6 @@ func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte,
 		return nil, output.ErrWithHint("internal", "MARSHAL_FAILED", err.Error(), "")
 	}
 	return buf, nil
-}
-
-func removeHeader(headers map[string]string, name string) {
-	for key := range headers {
-		if strings.EqualFold(key, name) {
-			delete(headers, key)
-		}
-	}
 }
 
 func redactJSONBody(body []byte, sensitiveFields []string) []byte {
@@ -1324,9 +1466,49 @@ func redactJSONBody(body []byte, sensitiveFields []string) []byte {
 	return redacted
 }
 
-func redactDiagnosticBody(req *Request, body []byte) string {
-	redacted := []byte(redactBodyForLog(req, body))
+func (c *Client) redactDiagnosticBody(req *Request, body []byte) string {
+	var bearer string
+	if c.business != nil {
+		bearer = c.business.Token
+	}
+	redacted := []byte(redactBodyForLog(req, body, bearer))
 	return string(redactJSONBody(redacted, req.SensitiveJSONFields))
+}
+
+func (c *Client) redactDiagnosticText(req *Request, text string) string {
+	text = c.redactBearer(redactSecrets(text, req.SecretValues))
+	// Query encoding can conceal a short bearer inside a longer word. Apply
+	// the same strict matching to its collected forms, without changing the
+	// historical boundary rules for other declared secrets.
+	for _, form := range req.diagnosticBearerForms {
+		text = RedactBearer(text, form)
+	}
+	return text
+}
+
+// queryBearerForms finds encoded bearer fragments in the structured query.
+// Declaring those forms as secrets lets the error masker also cover their
+// QueryEscape spelling, as it appeared on the wire.
+func (c *Client) queryBearerForms(query url.Values) []string {
+	if c.business == nil {
+		return nil
+	}
+	forms := make(map[string]struct{})
+	collect := func(s string) {
+		forEachEscapedBearer(s, c.business.Token, func(start, end int) {
+			forms[s[start:end]] = struct{}{}
+		})
+	}
+	for key, values := range query {
+		if len(values) == 0 {
+			continue
+		}
+		collect(key)
+		for _, value := range values {
+			collect(value)
+		}
+	}
+	return slices.Sorted(maps.Keys(forms))
 }
 
 // --- helpers ---
@@ -1335,7 +1517,7 @@ func (c *Client) verbosef(format string, args ...any) {
 	if !c.options.Verbose || c.options.ErrOut == nil {
 		return
 	}
-	fmt.Fprintf(c.options.ErrOut, "[octo] "+format+"\n", args...) //nolint:errcheck // stderr verbose log
+	fmt.Fprintln(c.options.ErrOut, "[octo] "+c.redactBearer(fmt.Sprintf(format, args...))) //nolint:errcheck // stderr verbose log
 }
 
 func buildURL(base, path string, query url.Values) (string, error) {

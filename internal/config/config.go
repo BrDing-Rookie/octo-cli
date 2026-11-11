@@ -20,13 +20,13 @@ const (
 	// EnvTaskToken carries the daemon-issued Loop task credential separately
 	// from native Octo credentials. It is consumed only by task-mode Loop commands.
 	EnvTaskToken = "OCTO_TASK_TOKEN"
-	// EnvCredentialMode selects the credential resolution policy. The empty
-	// value keeps the normal profile/bot flow; "task" is a fail-closed mode
-	// selected explicitly for an individual task-workflow CLI invocation.
-	EnvCredentialMode  = "OCTO_CREDENTIAL_MODE"
-	CredentialModeTask = "task"
-	EnvSpaceID         = "OCTO_SPACE_ID"
-	EnvFormat          = "OCTO_FORMAT"
+	// EnvCredentialMode selects the credential resolution policy. "task"
+	// isolates a Loop task invocation, and "unified" selects versioned profiles.
+	EnvCredentialMode     = "OCTO_CREDENTIAL_MODE"
+	CredentialModeTask    = "task"
+	CredentialModeUnified = "unified"
+	EnvSpaceID            = "OCTO_SPACE_ID"
+	EnvFormat             = "OCTO_FORMAT"
 	// DefaultAPIBaseURL is the production Octo gateway. Service operations
 	// append their registered paths (for example, /v1/bot/groups).
 	DefaultAPIBaseURL = "https://im.deepminer.com.cn"
@@ -69,7 +69,13 @@ type ResolvedEnvToken struct {
 // Load reads configuration from the environment. Token aliases are normalized
 // by ResolveEnvToken so the auth gate and credential provider cannot drift.
 func Load() *Config {
-	token := ResolveEnvToken()
+	cfg := LoadRuntime()
+	cfg.BotToken = ResolveEnvToken().Token
+	return cfg
+}
+
+// LoadRuntime reads the non-secret process settings.
+func LoadRuntime() *Config {
 	mode := strings.ToLower(strings.TrimSpace(os.Getenv(EnvCredentialMode)))
 	spaceID := os.Getenv(EnvSpaceID)
 	if mode == CredentialModeTask {
@@ -84,7 +90,6 @@ func Load() *Config {
 	return &Config{
 		APIBaseURL:       apiBaseURL,
 		APIBaseURLSource: apiBaseURLSource,
-		BotToken:         token.Token,
 		CredentialMode:   mode,
 		SpaceID:          spaceID,
 		Format:           envOrDefault(EnvFormat, "json"),
@@ -142,7 +147,7 @@ func NormalizeAPIBaseURL(raw string) (string, error) {
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("%s must use http or https", EnvAPIBaseURL)
 	}
-	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+	if u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
 		return "", fmt.Errorf("%s must be an absolute base URL without credentials, query parameters, or fragments", EnvAPIBaseURL)
 	}
 	if strings.TrimRight(u.Path, "/") != "" {

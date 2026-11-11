@@ -37,6 +37,7 @@ import (
 // profiles, so resolution falls through to the env chain as these tests expect.
 // Individual tests may still override any of this with t.Setenv.
 func TestMain(m *testing.M) {
+	RunOutputWriterIfRequested()
 	dir, err := os.MkdirTemp("", "octo-cmdutil-test")
 	if err != nil {
 		panic(err)

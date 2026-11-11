@@ -92,10 +92,18 @@ test("ordinary root flag values named upgrade retain platform dependency diagnos
 
 test("a top-level upgrade after root flag values reports a missing platform dependency", async (t) => {
   const fixture = createLauncherFixture(t);
-  const result = await runLauncher(fixture, ["--profile", "agent", "upgrade"]);
-  const error = structuredError(result, "UPGRADE_PLATFORM_DEPENDENCY_MISSING");
-  assert.match(error.hint, /reinstall|optional dependenc/i);
-  assert.doesNotMatch(result.stderr, /NATIVE_RESOLUTION_PRIVATE_DETAIL/);
+  for (const args of [
+    ["--profile", "agent", "upgrade"],
+    ["--credential-file", "fixture", "upgrade", "--dry-run"],
+    ["upgrade", "--credential-file", "fixture", "--dry-run"],
+  ]) {
+    await t.test(args.join(" "), async () => {
+      const result = await runLauncher(fixture, args);
+      const error = structuredError(result, "UPGRADE_PLATFORM_DEPENDENCY_MISSING");
+      assert.match(error.hint, /reinstall|optional dependenc/i);
+      assert.doesNotMatch(result.stderr, /NATIVE_RESOLUTION_PRIVATE_DETAIL/);
+    });
+  }
 });
 
 

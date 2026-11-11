@@ -12,6 +12,7 @@ import (
 )
 
 func main() {
+	cmdutil.RunOutputWriterIfRequested()
 	os.Exit(run())
 }
 
@@ -22,12 +23,10 @@ func run() int {
 	f := cmdutil.NewDefaultFactory()
 	root := cmd.NewRootCmd(f)
 	if err := root.ExecuteContext(ctx); err != nil {
-		// RunE paths emit an envelope via Factory.EmitError and set
-		// f.ErrorEmitted. Only emit here for errors that bypassed the
-		// Factory (cobra-framework errors, PersistentPreRunE failures).
+		// RunE paths mark their attempt even when stderr is blocked.
+		// Only emit here for errors that bypassed the Factory.
 		if !f.ErrorEmitted {
-			wrapped := cmdutil.WrapCLIError(err)
-			_ = output.WriteError(os.Stderr, wrapped) //nolint:errcheck // best-effort write before exit
+			_ = f.EmitErrorContext(ctx, err) //nolint:errcheck // best-effort write before exit
 		}
 
 		// Determine exit code from the structured error.

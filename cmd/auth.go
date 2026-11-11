@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
+	"github.com/Mininglamp-OSS/octo-cli/internal/client"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
@@ -30,6 +32,7 @@ func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
 	}
 	cmd.AddCommand(
 		newAuthLoginCmd(f),
+		newAuthGetCmd(f),
 		newAuthStatusCmd(f),
 		newAuthUpdateCmd(f),
 		newAuthLogoutCmd(f),
@@ -38,16 +41,18 @@ func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
 	return cmd
 }
 
-func authMutationPreRun(f *cmdutil.Factory, hint string) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, _ []string) error {
-		if !f.Globals.DryRun {
-			return nil
-		}
+func rejectUnifiedCredentialCommand(f *cmdutil.Factory, name string) error {
+	unified, err := f.UsesUnifiedCredentials()
+	if err != nil {
+		return failErr(f, err)
+	}
+	if unified {
 		return failErr(f, output.ErrValidation(
-			"--dry-run is not supported for auth "+cmd.Name(),
-			hint,
+			name+" is unavailable for unified credentials",
+			"use auth list to inspect versioned profiles",
 		))
 	}
+	return nil
 }
 
 func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
@@ -57,12 +62,15 @@ func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
 	)
 
 	cmd := &cobra.Command{
-		Use:     "update",
-		Short:   "Update non-secret settings for a stored bot profile",
-		Long:    "Updates the selected profile's API base URL, or clears it with --clear-api-base-url. This local mutation rejects --dry-run.",
-		Args:    cobra.NoArgs,
-		PreRunE: authMutationPreRun(f, "omit --dry-run to update the stored profile"),
+		Use:   "update",
+		Short: "Update non-secret settings for a stored profile",
+		Long:  "Updates the selected legacy profile's API base URL, or clears it with --clear-api-base-url. Re-import a verified Token to change a unified profile's API base URL. This local mutation rejects --dry-run.",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unified, err := authProfileMutationMode(f, cmd.Name())
+			if err != nil {
+				return failErr(f, err)
+			}
 			if clearAPIBaseURL && cmd.Flags().Changed("api-base-url") {
 				return failErr(f, output.ErrValidation(
 					"--api-base-url and --clear-api-base-url are mutually exclusive",
@@ -80,6 +88,12 @@ func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
 				}
 				normalized, err := config.NormalizeAPIBaseURL(apiBaseURL)
 				if err != nil {
+					if unified {
+						return failErr(f, output.ErrValidation(
+							"invalid API base URL; expected an HTTP(S) origin",
+							"pass only the Octo gateway base URL, without a service path",
+						))
+					}
 					return failErr(f, output.ErrValidation(
 						err.Error(),
 						"pass only the Octo gateway base URL, without a service path",
@@ -88,6 +102,9 @@ func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
 				apiBaseURL = normalized
 			}
 
+			if unified {
+				return confirmUnifiedProfileTarget(f, apiBaseURL)
+			}
 			store, err := f.AuthStore()
 			if err != nil {
 				return failErr(f, err)
@@ -131,86 +148,40 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	var withToken bool
 	var tokenFile string
 	var apiBaseURL string
+	var unified bool
 
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Store a credential (read from a hidden prompt or stdin, never argv)",
-		Long: "Store an Octo or Loop bearer credential under a profile. Identify a bot with --bot-id " +
+		Short: "Store a credential read from stdin, a file, or a hidden prompt",
+		Long: "In unified mode, verify and import a CLI Token using --with-token for stdin or --token-file for a file. " +
+			"Select the target with --profile. " +
+			"In legacy mode, identify a bot with --bot-id " +
 			"(its robot id, recommended) and/or --profile (a friendly name). The " +
 			"token is read from a hidden prompt on a terminal, or from stdin with " +
 			"--with-token, or from --token-file — never from the command line. " +
 			"This local credential write rejects --dry-run.",
-		Args:    cobra.NoArgs,
-		PreRunE: authMutationPreRun(f, "omit --dry-run to store the credential locally"),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			botID := f.Globals.BotID
-			name := f.Globals.Profile
-
-			if botID == "" && name == "" {
-				id, perr := promptBotID(f)
-				if perr != nil {
-					return failErr(f, output.ErrValidation(fmt.Sprintf("read bot id: %v", perr), ""))
+		Args: cobra.NoArgs,
+		PreRunE: func(cmd *cobra.Command, _ []string) error {
+			ctx := cmd.Context()
+			var err error
+			unified, err = f.UsesUnifiedCredentials()
+			if err != nil {
+				return failErrContext(ctx, f, err)
+			}
+			if f.Globals.DryRun {
+				return failErrContext(ctx, f, output.ErrValidation(
+					"--dry-run is not supported for auth login", "omit --dry-run to store the credential locally"))
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if unified {
+				if err := runUnifiedAuthLogin(cmd, f, withToken, tokenFile, apiBaseURL); err != nil {
+					return failErrContext(cmd.Context(), f, err)
 				}
-				botID = id
+				return nil
 			}
-			if name == "" {
-				name = botID // profile name defaults to the robot id
-			}
-			if name == "" {
-				return failErr(f, output.ErrValidation(
-					"no profile identifier given",
-					"pass --bot-id <robot_id> (recommended) and/or --profile <name>"))
-			}
-
-			token, err := readToken(f, withToken, tokenFile)
-			if err != nil {
-				return failErr(f, err)
-			}
-			if token == "" {
-				return failErr(f, output.ErrValidation(
-					"empty token", "provide a non-empty Octo or Loop bearer credential"))
-			}
-
-			store, err := f.AuthStore()
-			if err != nil {
-				return failErr(f, err)
-			}
-			if err := assertBotIDFree(store, botID, name); err != nil {
-				return failErr(f, err)
-			}
-			if apiBaseURL != "" {
-				apiBaseURL, err = config.NormalizeAPIBaseURL(apiBaseURL)
-				if err != nil {
-					return failErr(f, output.ErrValidation(err.Error(), "pass only the Octo gateway base URL, without a service path"))
-				}
-			}
-			meta := authstore.ProfileMeta{
-				APIBaseURL: apiBaseURL,
-				SpaceID:    f.Globals.Space,
-				BotKind:    credential.TokenKind(token),
-				RobotID:    botID,
-				CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-			}
-			if err := store.SaveProfile(name, &meta, token); err != nil {
-				return failErr(f, err)
-			}
-
-			count, _ := store.Count() //nolint:errcheck // advisory count for the hint only
-			payload := map[string]any{
-				"profile":       name,
-				"bot_kind":      credential.TokenKind(token),
-				"bot_token":     credential.MaskToken(token),
-				"profile_count": count,
-			}
-			putIfSet(payload, "robot_id", botID)
-			if count >= 2 {
-				payload["hint"] = "multiple profiles stored; pass --bot-id or --profile on subsequent commands"
-			}
-			raw, err := json.Marshal(payload)
-			if err != nil {
-				return failErr(f, err)
-			}
-			return f.EmitSuccess(raw)
+			return runLegacyAuthLogin(f, withToken, tokenFile, apiBaseURL)
 		},
 	}
 	cmd.Flags().BoolVar(&withToken, "with-token", false, "read the token from stdin instead of a prompt")
@@ -220,12 +191,86 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	return cmd
 }
 
+func runLegacyAuthLogin(f *cmdutil.Factory, withToken bool, tokenFile, apiBaseURL string) error {
+	botID := f.Globals.BotID
+	name := f.Globals.Profile
+
+	if botID == "" && name == "" {
+		id, perr := promptBotID(f)
+		if perr != nil {
+			return failErr(f, output.ErrValidation(fmt.Sprintf("read bot id: %v", perr), ""))
+		}
+		botID = id
+	}
+	if name == "" {
+		name = botID // profile name defaults to the robot id
+	}
+	if name == "" {
+		return failErr(f, output.ErrValidation(
+			"no profile identifier given",
+			"pass --bot-id <robot_id> (recommended) and/or --profile <name>"))
+	}
+
+	token, err := readToken(f, withToken, tokenFile)
+	if err != nil {
+		return failErr(f, err)
+	}
+	if token == "" {
+		return failErr(f, output.ErrValidation(
+			"empty token", "provide a non-empty Octo or Loop bearer credential"))
+	}
+
+	store, err := f.AuthStore()
+	if err != nil {
+		return failErr(f, err)
+	}
+	if err := assertBotIDFree(store, botID, name); err != nil {
+		return failErr(f, err)
+	}
+	if apiBaseURL != "" {
+		apiBaseURL, err = config.NormalizeAPIBaseURL(apiBaseURL)
+		if err != nil {
+			return failErr(f, output.ErrValidation(err.Error(), "pass only the Octo gateway base URL, without a service path"))
+		}
+	}
+	meta := authstore.ProfileMeta{
+		APIBaseURL: apiBaseURL,
+		SpaceID:    f.Globals.Space,
+		BotKind:    credential.TokenKind(token),
+		RobotID:    botID,
+		CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := store.SaveProfile(name, &meta, token); err != nil {
+		return failErr(f, err)
+	}
+
+	count, _ := store.Count() //nolint:errcheck // advisory count for the hint only
+	payload := map[string]any{
+		"profile":       name,
+		"bot_kind":      credential.TokenKind(token),
+		"bot_token":     credential.MaskToken(token),
+		"profile_count": count,
+	}
+	putIfSet(payload, "robot_id", botID)
+	if count >= 2 {
+		payload["hint"] = "multiple profiles stored; pass --bot-id or --profile on subsequent commands"
+	}
+	return emitJSON(f, payload)
+}
+
 func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Show the single active bot identity (whoami); use `auth list` to enumerate",
+		Short: "Check a unified Profile or show the active legacy bot identity",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unified, err := f.UsesUnifiedCredentials()
+			if err != nil {
+				return failErr(f, err)
+			}
+			if unified {
+				return runUnifiedAuthStatus(f, credential.ReadProfileToken)
+			}
 			// Report the same credential an ordinary request would use. In
 			// particular, environment credentials must bypass the local store.
 			cred, resolveErr := f.Credential()
@@ -291,12 +336,18 @@ func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 
 func newAuthLogoutCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
-		Use:     "logout",
-		Short:   "Remove a stored bot credential",
-		Long:    "Removes the selected local profile. This local mutation rejects --dry-run.",
-		Args:    cobra.NoArgs,
-		PreRunE: authMutationPreRun(f, "omit --dry-run to remove the stored profile"),
+		Use:   "logout",
+		Short: "Remove a stored credential",
+		Long:  "Removes the selected local profile. This local mutation rejects --dry-run.",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unified, err := authProfileMutationMode(f, cmd.Name())
+			if err != nil {
+				return failErr(f, err)
+			}
+			if unified {
+				return logoutUnifiedProfile(f)
+			}
 			store, err := f.AuthStore()
 			if err != nil {
 				return failErr(f, err)
@@ -329,9 +380,16 @@ func newAuthLogoutCmd(f *cmdutil.Factory) *cobra.Command {
 func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List stored bot credentials (never shows tokens)",
+		Short: "List local profiles (never shows tokens)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			unified, err := f.UsesUnifiedCredentials()
+			if err != nil {
+				return failErr(f, err)
+			}
+			if unified {
+				return listUnifiedProfiles(f)
+			}
 			store, err := f.AuthStore()
 			if err != nil {
 				return failErr(f, err)
@@ -347,6 +405,57 @@ func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 			}
 			return emitJSON(f, payload)
 		},
+	}
+}
+
+func listUnifiedProfiles(f *cmdutil.Factory) error {
+	profiles, err := config.LoadProfileConfig()
+	if err != nil {
+		return failErr(f, credential.ProfileConfigError(err))
+	}
+	if profiles == nil {
+		return emitJSON(f, map[string]any{"profiles": []any{}, "count": 0, "current_profile": nil})
+	}
+
+	names := make([]string, 0, len(profiles.Profiles))
+	for name, profile := range profiles.Profiles {
+		if profile != nil {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	entries := make([]map[string]any, 0, len(names))
+	redact := unifiedProfileRedactor("")
+	for _, name := range names {
+		p := profiles.Profiles[name]
+		// An invalid origin can contain credentials or a query secret.
+		origin, err := config.NormalizeAPIBaseURL(p.APIBaseURL)
+		if err != nil {
+			origin = ""
+		}
+		entries = append(entries, map[string]any{
+			"profile": redact(name), "api_base_url": redact(origin), "space_id": redact(p.SpaceID),
+		})
+	}
+	return emitJSON(f, map[string]any{
+		"profiles": entries, "count": len(entries),
+		"current_profile": nullableString(redact(profiles.CurrentProfile)),
+	})
+}
+
+// unifiedProfileRedactor masks known bearers without resolving credentials.
+// Both environment aliases matter even when a profile or OCTO_TOKEN wins.
+func unifiedProfileRedactor(token string) func(string) string {
+	bearers := []string{
+		token,
+		strings.TrimSpace(os.Getenv(config.EnvToken)),
+		strings.TrimSpace(os.Getenv(config.EnvBotToken)),
+	}
+	return func(value string) string {
+		for _, bearer := range bearers {
+			value = client.RedactBearer(value, bearer)
+		}
+		return value
 	}
 }
 
@@ -589,11 +698,13 @@ func emitJSON(f *cmdutil.Factory, payload any) error {
 	return f.EmitSuccess(raw)
 }
 
-// failErr writes the error envelope (to stderr, setting ErrorEmitted) and
-// returns the error so main can derive the process exit code. EmitError itself
-// returns nil, so RunE must return the error separately.
+// failErr emits the envelope and returns the original error for the exit code.
 func failErr(f *cmdutil.Factory, err error) error {
-	_ = f.EmitError(err) //nolint:errcheck // envelope write is best-effort
+	return failErrContext(context.Background(), f, err)
+}
+
+func failErrContext(ctx context.Context, f *cmdutil.Factory, err error) error {
+	_ = f.EmitErrorContext(ctx, err) //nolint:errcheck // envelope write is best-effort
 	return err
 }
 

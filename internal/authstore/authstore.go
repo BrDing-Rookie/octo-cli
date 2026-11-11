@@ -12,14 +12,17 @@ package authstore
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+
+	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 )
 
 // EnvConfigDir overrides the default config directory when set.
-const EnvConfigDir = "OCTO_CONFIG_DIR"
+const EnvConfigDir = config.EnvConfigDir
 
 const (
 	configFile = "config.json"
@@ -56,6 +59,7 @@ type ProfileMeta struct {
 
 // configFileShape is the on-disk config.json layout.
 type configFileShape struct {
+	Version  json.RawMessage        `json:"version,omitempty"`
 	Profiles map[string]ProfileMeta `json:"profiles"`
 }
 
@@ -106,6 +110,9 @@ func (s *Store) LoadProfiles() (map[string]ProfileMeta, error) {
 	var cf configFileShape
 	if err := json.Unmarshal(data, &cf); err != nil {
 		return nil, fmt.Errorf("parse %s: %w", configFile, err)
+	}
+	if len(cf.Version) != 0 {
+		return nil, fmt.Errorf("versioned config.json cannot be used as a legacy Bot profile store")
 	}
 	if cf.Profiles == nil {
 		cf.Profiles = map[string]ProfileMeta{}
@@ -161,6 +168,12 @@ func (s *Store) saveProfiles(profiles map[string]ProfileMeta) error {
 // orphaned token (invisible, since nothing lists it) rather than a listed
 // profile with no token.
 func (s *Store) SaveProfile(name string, meta *ProfileMeta, token string) error {
+	lock, err := s.lockCredentialWrites()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	profiles, err := s.LoadProfiles()
 	if err != nil {
 		return err
@@ -216,6 +229,12 @@ func profileChangeInvalidatesMailBindings(name string, meta *ProfileMeta, token 
 // UpdateProfileAPIBaseURL changes only the non-secret endpoint metadata for an
 // existing profile. Bot and mailbox credentials remain untouched.
 func (s *Store) UpdateProfileAPIBaseURL(name, apiBaseURL string) error {
+	lock, err := s.lockProfiles(configFile)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	profiles, err := s.LoadProfiles()
 	if err != nil {
 		return err
@@ -236,6 +255,12 @@ func (s *Store) UpdateProfileAPIBaseURL(name, apiBaseURL string) error {
 // metadata first, then the token. A crash in between leaves an orphaned token
 // (harmless) rather than a listed profile whose token is already gone.
 func (s *Store) RemoveProfile(name string) error {
+	lock, err := s.lockCredentialWrites()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = lock.Close() }() //nolint:errcheck // closing releases the advisory lock
+
 	profiles, err := s.LoadProfiles()
 	if err != nil {
 		return err
@@ -270,6 +295,37 @@ func (s *Store) RemoveProfile(name string) error {
 		return err
 	}
 	return s.savePendingMailAuthorizations(pendingMail)
+}
+
+func (s *Store) lockCredentialWrites() (*os.File, error) {
+	return s.lockProfiles(configFile, credFile, saltFile, mailCredFile, mailPendingFile)
+}
+
+func (s *Store) lockProfiles(targets ...string) (*os.File, error) {
+	// Make room for the lock without changing the permissions of an existing
+	// store before LoadProfiles checks its format under the lock.
+	if err := os.MkdirAll(s.dir, dirPerm); err != nil {
+		return nil, fmt.Errorf("create %s: %w", s.dir, err)
+	}
+	dir, err := filepath.Abs(s.dir)
+	if err != nil {
+		return nil, err
+	}
+	lock, err := openProfileLock(dir)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.LoadProfileConfigIn(dir, true)
+	if err == nil && cfg != nil {
+		for i, target := range targets {
+			targets[i] = filepath.Join(dir, target)
+		}
+		err = checkProfileWritePaths(cfg, targets...)
+	}
+	if err != nil {
+		return nil, errors.Join(err, lock.Close())
+	}
+	return lock, nil
 }
 
 // ProfileForRobotID returns the name of the profile that records the given
