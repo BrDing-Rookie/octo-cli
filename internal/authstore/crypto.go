@@ -24,7 +24,7 @@ func (s *Store) loadTokens() (map[string]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", credFile, err)
 	}
-	key, err := s.deriveKey()
+	key, err := s.deriveKey(false)
 	if err != nil {
 		return nil, err
 	}
@@ -60,7 +60,7 @@ func (s *Store) saveTokens(tokens map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("marshal credentials: %w", err)
 	}
-	key, err := s.deriveKey()
+	key, err := s.deriveKey(true)
 	if err != nil {
 		return err
 	}
@@ -76,8 +76,8 @@ func (s *Store) saveTokens(tokens map[string]string) error {
 // decrypted elsewhere; the random salt adds entropy and is created on demand. A
 // machine id that can't be read degrades to salt-only material (still usable on
 // this machine, just without the off-machine binding).
-func (s *Store) deriveKey() ([32]byte, error) {
-	salt, err := s.getOrCreateSalt()
+func (s *Store) deriveKey(createSalt bool) ([32]byte, error) {
+	salt, err := s.saltForKey(createSalt)
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -97,7 +97,7 @@ func (s *Store) deriveKey() ([32]byte, error) {
 	return key, nil
 }
 
-func (s *Store) getOrCreateSalt() ([]byte, error) {
+func (s *Store) saltForKey(create bool) ([]byte, error) {
 	salt, err := os.ReadFile(s.saltPath())
 	if err == nil {
 		if len(salt) == saltLen {
@@ -109,7 +109,7 @@ func (s *Store) getOrCreateSalt() ([]byte, error) {
 			"%s is corrupt: expected %d bytes, got %d — remove %s and run `octo-cli auth login` to re-store",
 			saltFile, saltLen, len(salt), s.saltPath())
 	}
-	if !os.IsNotExist(err) {
+	if !create || !os.IsNotExist(err) {
 		return nil, fmt.Errorf("read %s: %w", saltFile, err)
 	}
 	if err := s.ensureDir(); err != nil {

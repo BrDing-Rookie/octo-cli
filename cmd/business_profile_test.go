@@ -125,6 +125,173 @@ func TestPhaseOneBusinessProfileRequest(t *testing.T) {
 	}
 }
 
+func TestPhaseOneUnavailableV1DoesNotRouteThroughHistoricalToken(t *testing.T) {
+	for _, candidate := range []string{"profiles.json", filepath.Join(".octo-unified", "profiles.json")} {
+		t.Run(candidate, func(t *testing.T) {
+			dir := phaseOneEnv(t)
+			t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+			t.Setenv("OCTO_TOKEN", "environment-fixture-bearer")
+			trusted, untrusted, calls := phaseOneTargets(t, "trusted", "untrusted")
+			v1 := filepath.Join(dir, "config.json")
+			token := filepath.Join(dir, candidate)
+			if err := os.MkdirAll(filepath.Dir(token), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			phaseOneWrite(t, v1, fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":%q}}}}`, trusted, candidate))
+			phaseOneWrite(t, token, "file-fixture-token")
+			args := []string{"--profile", "work", "api", "GET", "/probe"}
+			phaseOneCheckRequest(t, calls, "trusted /probe Bearer environment-fixture-bearer S1", args...)
+
+			// Corruption can leave even opaque bytes. A claim by the only
+			// parseable candidate does not establish its own authority.
+			phaseOneWrite(t, token, fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":"config.json"}}}}`, untrusted))
+			for _, damaged := range []string{"{", "opaque-corruption", ""} {
+				if damaged == "" {
+					if err := os.Remove(v1); err != nil {
+						t.Fatal(err)
+					}
+					phaseOneWrite(t, filepath.Join(dir, "config.v1-1.bak"), "{")
+				} else {
+					phaseOneWrite(t, v1, damaged)
+				}
+				out, err := phaseOneRun(args...)
+				select {
+				case call := <-calls:
+					t.Fatalf("sent a request using unproven metadata: %s", strings.Fields(call)[0])
+				default:
+				}
+				if err == nil {
+					t.Fatalf("unavailable v1 should fail profile resolution: %s", out)
+				}
+			}
+			archive := filepath.Join(dir, "config.v1-1.bak")
+			archived := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1"}}}`, trusted)
+			phaseOneWrite(t, archive, archived)
+			if out, err := phaseOneRun(args...); err == nil {
+				t.Fatalf("an unrelated archive must not authorize a new binding: %s", out)
+			}
+			select {
+			case call := <-calls:
+				t.Fatalf("sent a request using a mismatched archive: %s", strings.Fields(call)[0])
+			default:
+			}
+			phaseOneWrite(t, token, archived)
+			if out, err := phaseOneRun(args...); err == nil {
+				t.Fatalf("matching root files must not authorize a binding: %s", out)
+			}
+			select {
+			case call := <-calls:
+				t.Fatalf("sent a request using a root archive alone: %s", strings.Fields(call)[0])
+			default:
+			}
+			phaseOneWrite(t, v1, archived)
+			phaseOneCheckRequest(t, calls, "trusted /probe Bearer environment-fixture-bearer S1", args...)
+		})
+	}
+}
+
+func TestPhaseOneHistoricalTokenFilesCannotAuthorizeRouting(t *testing.T) {
+	for _, candidate := range []string{"profiles.json", filepath.Join(".octo-unified", "profiles.json")} {
+		for _, scenario := range []string{"original path was a Token", "backup path was a Token"} {
+			t.Run(candidate+"/"+scenario, func(t *testing.T) {
+				dir := phaseOneEnv(t)
+				t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+				t.Setenv("OCTO_TOKEN", "environment-fixture-bearer")
+				trusted, untrusted, calls := phaseOneTargets(t, "trusted", "untrusted")
+				original := filepath.Join(dir, "config.json")
+				historical := filepath.Join(dir, candidate)
+				backup := filepath.Join(dir, "config.v1-123.bak")
+				if err := os.MkdirAll(filepath.Dir(historical), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				poisoned := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1"}}}`, untrusted)
+				if scenario == "original path was a Token" {
+					raw := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":"config.json"}}}}`, trusted)
+					phaseOneWrite(t, historical, raw)
+					phaseOneWrite(t, backup, raw)
+					if err := os.Remove(historical); err != nil {
+						t.Fatal(err)
+					}
+					phaseOneWrite(t, original, poisoned)
+				} else {
+					raw := fmt.Sprintf(`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":%q}},"provider":{"token_source":{"type":"token_file","path":"config.v1-123.bak"}}}}`, trusted, candidate)
+					phaseOneWrite(t, original, raw)
+					phaseOneWrite(t, historical, "provider-token-one")
+					phaseOneWrite(t, backup, "provider-token-two")
+					phaseOneCheckRequest(t, calls, "trusted /probe Bearer environment-fixture-bearer S1", "--profile", "work", "api", "GET", "/probe")
+					if err := os.Remove(original); err != nil {
+						t.Fatal(err)
+					}
+					phaseOneWrite(t, historical, poisoned)
+					phaseOneWrite(t, backup, poisoned)
+				}
+				out, err := phaseOneRun("--profile", "work", "api", "GET", "/probe")
+				select {
+				case call := <-calls:
+					t.Fatalf("sent a request using external Token JSON: %s", strings.Fields(call)[0])
+				default:
+				}
+				if err == nil {
+					t.Fatalf("ambiguous configuration must fail profile resolution: %s", out)
+				}
+			})
+		}
+	}
+}
+
+func TestPhaseOneTokenDirectoryCannotPublishProfile(t *testing.T) {
+	dir := phaseOneEnv(t)
+	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
+	t.Setenv("OCTO_TOKEN", "environment-fixture-bearer")
+	trusted, untrusted, calls := phaseOneTargets(t, "trusted", "untrusted")
+	const candidate = ".octo-managed-profile-123"
+	path := filepath.Join(candidate, "profiles.json")
+	token := filepath.Join(candidate, ".published", "token")
+	phaseOneWrite(t, filepath.Join(dir, "config.json"), fmt.Sprintf(
+		`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1","token_source":{"type":"token_file","path":%q}},"provider":{"token_source":{"type":"token_file","path":%q}}}}`, trusted, path, token))
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, token)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	phaseOneWrite(t, filepath.Join(dir, token), "provider-token")
+	phaseOneWrite(t, filepath.Join(dir, path), fmt.Sprintf(
+		`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1"}}}`, untrusted))
+	for _, scenario := range []string{"missing original", "unreadable original", "copied authority", "hard-linked Token files"} {
+		t.Run(scenario, func(t *testing.T) {
+			original := filepath.Join(dir, "config.json")
+			switch scenario {
+			case "missing original":
+				if err := os.Remove(original); err != nil {
+					t.Fatal(err)
+				}
+			case "unreadable original":
+				phaseOneWrite(t, original, "{")
+			case "copied authority":
+				phaseOneWrite(t, filepath.Join(dir, ".managed-profile"), candidate+"\n")
+				phaseOneWrite(t, filepath.Join(dir, candidate, ".authority"), candidate+"\n")
+			case "hard-linked Token files":
+				if err := os.Remove(filepath.Join(dir, ".managed-profile")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(original); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(filepath.Join(dir, candidate, ".authority"), filepath.Join(dir, ".managed-profile")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			out, err := phaseOneRun("--profile", "work", "api", "GET", "/probe")
+			select {
+			case call := <-calls:
+				t.Fatalf("sent a request using a Token directory: %s", strings.Fields(call)[0])
+			default:
+			}
+			if err == nil {
+				t.Fatalf("ambiguous publication must fail profile resolution: %s", out)
+			}
+		})
+	}
+}
+
 func TestPhaseOneBusinessProfileIdentityRedaction(t *testing.T) {
 	dir := phaseOneEnv(t)
 	t.Setenv("OCTO_CREDENTIAL_MODE", "unified")
@@ -1138,11 +1305,9 @@ func TestPhaseOneAuthDoesNotFallBackToLegacyCredentials(t *testing.T) {
 			commands := [][]string{
 				{"status"},
 				{"login", "--with-token"},
-				{"update", "--api-base-url", "https://other.example"},
-				{"logout"},
 			}
 			if tc.modeError != "" {
-				commands = append([][]string{{"list"}}, commands...)
+				commands = append(commands, []string{"list"}, []string{"update", "--api-base-url", "https://other.example"}, []string{"logout"})
 			}
 			for _, command := range commands {
 				name := command[0]

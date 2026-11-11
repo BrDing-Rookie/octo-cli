@@ -101,6 +101,16 @@ func newMailAuthLoginCmd(f *cmdutil.Factory) *cobra.Command { //nolint:gocyclo /
 			if err != nil {
 				return failErr(f, err)
 			}
+			var store *authstore.Store
+			if !f.Globals.DryRun {
+				store, err = f.AuthStore()
+				if err != nil {
+					return failErr(f, err)
+				}
+				if err := store.CheckMailAuthorizationStorage(); err != nil {
+					return failErr(f, err)
+				}
+			}
 			verifierBytes := make([]byte, 32)
 			if _, err := rand.Read(verifierBytes); err != nil {
 				return failErr(f, err)
@@ -142,10 +152,6 @@ func newMailAuthLoginCmd(f *cmdutil.Factory) *cobra.Command { //nolint:gocyclo /
 			var device mailDeviceResponse
 			if err := json.Unmarshal(raw, &device); err != nil || device.DeviceCode == "" || device.VerificationURIComplete == "" {
 				return failErr(f, output.ErrAPI("INVALID_AUTH_RESPONSE", "Agent Mail returned an invalid authorization response", "retry authorization"))
-			}
-			store, err := f.AuthStore()
-			if err != nil {
-				return failErr(f, err)
 			}
 			expiresAt := time.Now().UTC().Add(time.Duration(device.ExpiresIn) * time.Second)
 			bindingKey, err := cmdutil.MailBindingKeyForBot(bot, cfg.APIBaseURL)
@@ -207,6 +213,11 @@ func newMailAuthStatusCmd(f *cmdutil.Factory) *cobra.Command { //nolint:gocyclo 
 			}
 			applyMailBinding(bot, pendingBinding)
 			pendingKey := pendingBinding.Key
+			if !f.Globals.DryRun {
+				if err := store.CheckMailAuthorizationStorage(); err != nil {
+					return failErr(f, err)
+				}
+			}
 
 			cli, err := newMailAuthorizationClient(f)
 			if err != nil {

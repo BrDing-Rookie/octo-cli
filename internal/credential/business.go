@@ -4,11 +4,15 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
+	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
+
+var errManagedCredentialMissing = errors.New("managed credential entry is missing")
 
 // BusinessContext is the unified bearer and its target for one invocation.
 // It does not encode a Bot identity or infer an execution principal.
@@ -48,21 +52,55 @@ func ResolveBusiness(runtime *config.Config, opts BusinessOptions) (*BusinessCon
 	if err != nil {
 		return nil, err
 	}
-	if !external && p.TokenSource != nil && p.APIBaseURL == "" {
-		return nil, output.ErrValidation("profile token_source requires api_base_url", "set the API origin in the selected profile")
-	}
-	if err := runtime.ApplyProfile(p, opts.Space); err != nil {
-		return nil, output.ErrValidation(err.Error(), "check the profile, OCTO_API_BASE_URL and Space settings")
+	target := *runtime
+	if err := applyBusinessProfile(&target, opts, p, external); err != nil {
+		return nil, err
 	}
 
 	source, token, err := resolveBusinessToken(opts, token, tokenSet, tokenFile, tokenFileSet, profiles, p.TokenSource)
+	if errors.Is(err, errManagedCredentialMissing) {
+		return resolveRotatedBusinessProfile(runtime, opts, name, p.TokenSource, err)
+	}
 	if err != nil {
 		return nil, err
 	}
 
+	*runtime = target
 	return &BusinessContext{
 		Token: token, Source: source, Profile: name, SpaceID: runtime.SpaceID,
 		APIBaseURL: runtime.APIBaseURL,
+	}, nil
+}
+
+func applyBusinessProfile(runtime *config.Config, opts BusinessOptions, p config.Profile, external bool) error {
+	if !external && p.TokenSource != nil && p.APIBaseURL == "" {
+		return output.ErrValidation("profile token_source requires api_base_url", "set the API origin in the selected profile")
+	}
+	if err := runtime.ApplyProfile(p, opts.Space); err != nil {
+		return output.ErrValidation(err.Error(), "check the profile, OCTO_API_BASE_URL and Space settings")
+	}
+	return nil
+}
+
+func resolveRotatedBusinessProfile(runtime *config.Config, opts BusinessOptions, name string, old *config.TokenSource, readErr error) (*BusinessContext, error) {
+	// The writer can delete the old entry between our metadata and secret
+	// reads. Retry once, only for a new managed reference on the same profile.
+	profiles, selected, p, err := selectBusinessProfile(opts, false)
+	if err != nil || selected != name || p.TokenSource == nil || p.TokenSource.Type != "managed_store" || *p.TokenSource == *old {
+		return nil, readErr
+	}
+	target := *runtime
+	if err := applyBusinessProfile(&target, opts, p, false); err != nil {
+		return nil, err
+	}
+	source, token, err := ReadProfileToken(profiles, p.TokenSource)
+	if err != nil {
+		return nil, err
+	}
+	*runtime = target
+	return &BusinessContext{
+		Token: token, Source: source, Profile: name, SpaceID: target.SpaceID,
+		APIBaseURL: target.APIBaseURL,
 	}, nil
 }
 
@@ -95,20 +133,29 @@ func resolveBusinessToken(opts BusinessOptions, envToken string, tokenSet bool, 
 	case tokenFileSet:
 		source, token, err = fileToken("env:"+config.EnvTokenFile, tokenFile)
 	default:
-		source, token, err = profileToken(profiles, ref)
+		return ReadProfileToken(profiles, ref)
 	}
 	if err != nil {
 		return "", "", err
 	}
 	token = strings.TrimSpace(token)
+	if err := ValidateBusinessToken(token, source); err != nil {
+		return "", "", err
+	}
+	return source, token, nil
+}
+
+// ValidateBusinessToken applies the unified credential format guard to an
+// already-trimmed token. Source must be a fixed diagnostic label.
+func ValidateBusinessToken(token, source string) error {
 	if !validBusinessToken(token) {
-		return "", "", output.ErrAuth("invalid unified Token from "+source, "provide a non-empty Token without whitespace")
+		return output.ErrAuth("invalid unified Token from "+source, "provide a non-empty Token without whitespace")
 	}
 	// Legacy formats are rejected after selecting unified mode and its source.
 	if TokenKind(token) != "unknown" || strings.HasPrefix(token, "omb_") {
-		return "", "", output.ErrAuth("legacy Token from "+source+" cannot be used with unified credentials", "provide a unified Token or use the legacy credential mode")
+		return output.ErrAuth("legacy Token from "+source+" cannot be used with unified credentials", "provide a unified Token or use the legacy credential mode")
 	}
-	return source, token, nil
+	return nil
 }
 
 // ProfileConfigError reports a metadata error without echoing file contents.
@@ -117,21 +164,41 @@ func ProfileConfigError(err error) error {
 	var pathErr *os.PathError
 	if !errors.As(err, &pathErr) {
 		message = err.Error()
+	} else if filepath.Base(pathErr.Path) == config.ManagedProfileFile {
+		message = "cannot read " + config.ManagedProfileFile
 	}
-	return output.ErrValidation(message, "check the CLI profile directory and config.json")
+	return output.ErrValidation(message, "check profiles.json or the original v1 config.json in the CLI profile directory")
 }
 
-func profileToken(profiles *config.ProfileConfig, ref *config.TokenSource) (source, token string, err error) {
+// ReadProfileToken reads and validates the Profile source without applying
+// environment or flag overrides. A broken configured reference is an error.
+func ReadProfileToken(profiles *config.ProfileConfig, ref *config.TokenSource) (source, token string, err error) {
 	switch {
 	case ref == nil:
 		return "", "", output.ErrAuth("no unified credential configured", "set OCTO_TOKEN or OCTO_TOKEN_FILE, or select a configured profile")
 	case ref.Type == "token_file" && ref.Backend == "" && ref.Entry == "":
-		return fileToken("profile:token_file", profiles.TokenFilePath(ref.Path))
+		source, token, err = fileToken("profile:token_file", profiles.TokenFilePath(ref.Path))
 	case ref.Type == "managed_store":
-		return "", "", output.ErrAuth("managed credential storage is unavailable", "use an external Token file or environment credential")
+		source = "profile:managed_store"
+		token, err = authstore.ReadManagedToken(profiles, ref)
+		if err != nil {
+			authErr := output.ErrAuth("cannot read credential from "+source, "check the selected profile and managed credential store")
+			if errors.Is(err, os.ErrNotExist) {
+				return "", "", errors.Join(authErr, errManagedCredentialMissing)
+			}
+			return "", "", authErr
+		}
 	default:
-		return "", "", output.ErrValidation("invalid profile token_source", "check the type and reference in config.json")
+		return "", "", output.ErrValidation("invalid profile token_source", "check the type and reference in the selected profile")
 	}
+	if err != nil {
+		return "", "", err
+	}
+	token = strings.TrimSpace(token)
+	if err := ValidateBusinessToken(token, source); err != nil {
+		return "", "", err
+	}
+	return source, token, nil
 }
 
 func fileToken(source, path string) (selectedSource, token string, err error) {
