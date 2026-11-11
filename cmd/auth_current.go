@@ -27,6 +27,7 @@ import (
 const authCurrentPath = "/v1/auth/tokens/_current"
 
 var authPermissionField = regexp.MustCompile(`^(?:[A-Za-z0-9._-]+|\*)$`)
+var authInvalidOffsetMinute = regexp.MustCompile(`[+-]\d{2}:[6-9]\d$`)
 
 type authTokenSelf struct {
 	Token       authTokenMetadata `json:"token"`
@@ -65,6 +66,10 @@ func (timestamp *authTimestamp) UnmarshalJSON(data []byte) error {
 	var value string
 	if err := json.Unmarshal(data, &value); err != nil {
 		return err
+	}
+	// Go's fallback parser normalizes a timezone minute of 60.
+	if authInvalidOffsetMinute.MatchString(value) {
+		return errors.New("invalid timestamp timezone minute")
 	}
 	if err := timestamp.UnmarshalText([]byte(value)); err != nil {
 		return err
@@ -277,8 +282,9 @@ func readUnifiedLoginToken(ctx context.Context, stdin io.Reader) (string, error)
 
 func requestAuthCurrent(ctx context.Context, f *cmdutil.Factory, cred *credential.BusinessContext) ([]byte, error) {
 	return f.NewBusinessClientContext(ctx, cred).Do(ctx, &client.Request{
-		Method: http.MethodGet,
-		Path:   authCurrentPath,
+		Method:                http.MethodGet,
+		Path:                  authCurrentPath,
+		ExpectedSuccessStatus: http.StatusOK,
 	})
 }
 

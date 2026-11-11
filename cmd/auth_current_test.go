@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -373,65 +374,91 @@ func TestUnifiedAuthCurrentImportFailurePreservesProfile(t *testing.T) {
 	}
 }
 
-func TestUnifiedAuthCurrentRejectsUnserializableTimestamp(t *testing.T) {
-	for _, tc := range []struct {
-		field, original string
+func TestUnifiedAuthCurrentRejectsInvalidTimestamp(t *testing.T) {
+	for _, timestamp := range []struct {
+		name, value string
 	}{
-		{"created_at", `"2026-11-04T06:00:00Z"`},
-		{"updated_at", `"2026-11-04T06:00:00Z"`},
-		{"expires_at", `null`},
-		{"last_used_at", `null`},
+		{"timezone hour", `"2026-11-04T06:00:00+24:00"`},
+		{"timezone minute", `"2026-11-04T06:00:00+08:60"`},
+		{"escaped negative timezone minute", `"2026-11-04T06:00:00\u002d08:\u00360"`},
 	} {
-		t.Run(tc.field, func(t *testing.T) {
-			dir := phaseOneEnv(t)
-			t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
-			store := authstore.NewManagedStore(dir, nil)
-			candidate, old := authCurrentFixtureCandidateToken, authCurrentFixtureStoredToken
-			reply := authCurrentFixtureSuccess("fixture-id", "owner", "space")
-			field := `"` + tc.field + `":`
-			reply.body = strings.Replace(reply.body, field+tc.original, field+`"2026-11-04T06:00:00+24:00"`, 1)
-			server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{old: reply, candidate: reply})
-			seedAuthCurrentProfile(t, store, "target", server.URL, "space", old)
-			configPath := filepath.Join(dir, "config.json")
-			before, err := os.ReadFile(configPath)
-			if err != nil {
-				t.Fatal(err)
-			}
-
-			for _, command := range []struct {
-				stdin string
-				args  []string
+		t.Run(timestamp.name, func(t *testing.T) {
+			for _, tc := range []struct {
+				field, original string
 			}{
-				{"", []string{"auth", "get"}},
-				{candidate, []string{"auth", "login", "--with-token"}},
+				{"created_at", `"2026-11-04T06:00:00Z"`},
+				{"updated_at", `"2026-11-04T06:00:00Z"`},
+				{"expires_at", `null`},
+				{"last_used_at", `null`},
 			} {
-				args := append([]string{"--profile", "target"}, command.args...)
-				stdout, stderr, err := runUnifiedAuthCurrent(store, strings.NewReader(command.stdin), args...)
-				exit := output.AsExitError(err)
-				if exit == nil || exit.Type != "api_error" || exit.Code != "INVALID_TOKEN_SELF" || stdout != "" {
-					t.Errorf("%v: expected INVALID_TOKEN_SELF without stdout: %v (%s %s)", command.args, err, stdout, stderr)
-				}
-			}
-			if got := len(requests()); got != 2 {
-				t.Errorf("got %d _current calls, want 2", got)
-			}
-			after, err := os.ReadFile(configPath)
-			if err != nil || !bytes.Equal(before, after) {
-				t.Errorf("invalid TokenSelf changed config.json: %v", err)
-			}
-			cfg, err := config.LoadProfileConfig()
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, profile, err := cfg.SelectProfile("target", true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			token, err := authstore.ReadManagedToken(cfg, profile.TokenSource)
-			if err != nil || token != old {
-				t.Errorf("original Profile no longer resolves the previous Token: %v", err)
+				t.Run(tc.field, func(t *testing.T) {
+					reply := authCurrentFixtureSuccess("fixture-id", "owner", "space")
+					field := `"` + tc.field + `":`
+					reply.body = strings.Replace(reply.body, field+tc.original, field+timestamp.value, 1)
+					assertAuthCurrentReplyRejected(t, reply, "INVALID_TOKEN_SELF")
+				})
 			}
 		})
+	}
+}
+
+func TestUnifiedAuthCurrentRejectsUnexpectedSuccessStatus(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusAccepted, http.StatusNoContent, http.StatusPartialContent} {
+		code := fmt.Sprintf("HTTP_%d", status)
+		t.Run(code, func(t *testing.T) {
+			reply := authCurrentFixtureSuccess("fixture-id", "owner", "space")
+			reply.status = status
+			assertAuthCurrentReplyRejected(t, reply, code)
+		})
+	}
+}
+
+func assertAuthCurrentReplyRejected(t *testing.T, reply authCurrentFixtureReply, code string) {
+	t.Helper()
+	dir := phaseOneEnv(t)
+	t.Setenv(config.EnvCredentialMode, config.CredentialModeUnified)
+	store := authstore.NewManagedStore(dir, nil)
+	candidate, old := authCurrentFixtureCandidateToken, authCurrentFixtureStoredToken
+	server, requests := newAuthCurrentFixture(t, map[string]authCurrentFixtureReply{old: reply, candidate: reply})
+	seedAuthCurrentProfile(t, store, "target", server.URL, "space", old)
+	configPath := filepath.Join(dir, "config.json")
+	before, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, command := range []struct {
+		stdin string
+		args  []string
+	}{
+		{"", []string{"auth", "get"}},
+		{candidate, []string{"auth", "login", "--with-token"}},
+	} {
+		args := append([]string{"--profile", "target"}, command.args...)
+		stdout, stderr, err := runUnifiedAuthCurrent(store, strings.NewReader(command.stdin), args...)
+		exit := output.AsExitError(err)
+		if exit == nil || exit.Type != "api_error" || exit.Code != code || stdout != "" {
+			t.Errorf("%v: expected %s without stdout: %v (%s %s)", command.args, code, err, stdout, stderr)
+		}
+	}
+	if got := len(requests()); got != 2 {
+		t.Errorf("got %d _current calls, want 2", got)
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Errorf("rejected reply changed config.json: %v", err)
+	}
+	cfg, err := config.LoadProfileConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, profile, err := cfg.SelectProfile("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := authstore.ReadManagedToken(cfg, profile.TokenSource)
+	if err != nil || token != old {
+		t.Errorf("original Profile no longer resolves the previous Token: %v", err)
 	}
 }
 
