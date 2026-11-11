@@ -40,6 +40,13 @@ func replaceManagedFile(from, to string) (bool, error) {
 	return true, syncManagedDirectory(filepath.Dir(to))
 }
 
+func publishManagedAnchor(stage, anchor string) (bool, error) {
+	if err := os.Link(stage, anchor); err != nil {
+		return false, err
+	}
+	return true, syncManagedDirectory(filepath.Dir(anchor))
+}
+
 func syncManagedDirectory(path string) error {
 	dir, err := os.Open(path)
 	if err != nil {

@@ -39,10 +39,10 @@ func loadProfileConfigIn(dir string, allowLegacy, writable bool) (*ProfileConfig
 
 func loadPublishedProfiles(dir string) (*ProfileConfig, error) {
 	anchor := filepath.Join(dir, OwnedProfileAnchor)
-	name, err := readPublicationAnchor(anchor)
+	name, err := VerifyProfileAuthority(anchor)
 	if os.IsNotExist(err) {
 		unverified := rejectUnverifiedPublications(dir)
-		name, err = readPublicationAnchor(anchor)
+		name, err = VerifyProfileAuthority(anchor)
 		if os.IsNotExist(err) {
 			return nil, unverified
 		}
@@ -61,21 +61,21 @@ func loadPublishedProfiles(dir string) (*ProfileConfig, error) {
 	return cfg, err
 }
 
-func readPublicationAnchor(anchor string) (string, error) {
+// VerifyProfileAuthority resolves a published or staged anchor with OS-backed proof.
+func VerifyProfileAuthority(anchor string) (string, error) {
 	info, err := os.Lstat(anchor)
 	if err != nil {
 		return "", err
 	}
-	if !info.Mode().IsRegular() || info.Size() > 128 {
+	if !info.Mode().IsRegular() {
 		return "", errors.New("invalid managed profile publication anchor")
 	}
-	raw, err := os.ReadFile(anchor)
+	name, err := verifyAuthorityProof(anchor, info)
 	if err != nil {
-		return "", fmt.Errorf("read managed profile publication anchor: %v", err)
+		return "", errors.New("managed profile publication has no valid OS-backed proof")
 	}
-	name, newline := strings.CutSuffix(string(raw), "\n")
 	suffix, prefix := strings.CutPrefix(name, OwnedProfileDirPrefix)
-	if !newline || !prefix || suffix == "" || strings.Trim(suffix, "0123456789") != "" {
+	if !prefix || suffix == "" || strings.Trim(suffix, "0123456789") != "" {
 		return "", errors.New("invalid managed profile publication directory")
 	}
 	parent := filepath.Join(filepath.Dir(anchor), name)
@@ -114,8 +114,8 @@ func rejectUnverifiedPublications(dir string) error {
 		if err != nil || !seal.Mode().IsRegular() {
 			return errors.New("invalid managed profile authority")
 		}
-		stage, err := os.Lstat(filepath.Join(dir, OwnedProfileStagePrefix+entry.Name()))
-		if err != nil || !stage.Mode().IsRegular() || !os.SameFile(stage, seal) {
+		name, err := VerifyProfileAuthority(filepath.Join(dir, OwnedProfileStagePrefix+entry.Name()))
+		if err != nil || name != entry.Name() {
 			return errors.New("managed profile publication anchor is missing")
 		}
 	}

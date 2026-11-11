@@ -30,7 +30,13 @@ func writeOwnershipFixture(t *testing.T, path string, data []byte) {
 func linkPublicationFixture(t *testing.T, owned string) {
 	t.Helper()
 	seal := filepath.Join(owned, config.OwnedProfileSeal)
-	writeOwnershipFixture(t, seal, []byte(filepath.Base(owned)+"\n"))
+	file, err := os.OpenFile(seal, os.O_CREATE|os.O_EXCL|os.O_RDWR, secPerm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := errors.Join(config.WriteProfileAuthority(file, owned), file.Close()); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Link(seal, filepath.Join(filepath.Dir(owned), config.OwnedProfileAnchor)); err != nil {
 		t.Fatal(err)
 	}
@@ -451,5 +457,30 @@ func TestManagedFirstImportIgnoresExternalEncryptedFilename(t *testing.T) {
 				t.Fatalf("managed entry unreadable: %v", err)
 			}
 		})
+	}
+}
+
+func TestManagedPublicationRejectsAuthorityFromAnotherStore(t *testing.T) {
+	original := t.TempDir()
+	store := NewManagedStore(original, nil)
+	snap, err := store.Snapshot("work", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Import(snap, managedFixtureProfile(), "fixture", BackendEncryptedFile); err != nil {
+		t.Fatal(err)
+	}
+	candidate := filepath.Base(filepath.Dir(publishedConfigPath(t, original)))
+	other := t.TempDir()
+	owned := filepath.Join(other, candidate)
+	writeOwnershipFixture(t, filepath.Join(owned, config.ManagedProfileFile), []byte(`{"version":1,"profiles":{"work":{}}}`))
+	source := filepath.Join(original, config.OwnedProfileAnchor)
+	for _, target := range []string{filepath.Join(owned, config.OwnedProfileSeal), filepath.Join(other, config.OwnedProfileAnchor)} {
+		if err := os.Link(source, target); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cfg, err := config.LoadProfileConfigIn(other, true); cfg != nil || err == nil {
+		t.Fatal("authority from another store authorized a profile")
 	}
 }

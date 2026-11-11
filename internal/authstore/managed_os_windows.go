@@ -58,6 +58,16 @@ func managedWindowsPath(path string) (string, error) {
 }
 
 func replaceManagedFile(from, to string) (bool, error) {
+	return moveManagedFile(from, to, windows.MOVEFILE_REPLACE_EXISTING)
+}
+
+func publishManagedAnchor(stage, anchor string) (bool, error) {
+	// Move the already prepared hard link without replacing any destination.
+	// Write-through makes this publication durable before v1 retirement.
+	return moveManagedFile(stage, anchor, 0)
+}
+
+func moveManagedFile(from, to string, flags uint32) (bool, error) {
 	from, err := managedWindowsPath(from)
 	if err != nil {
 		return false, err
@@ -78,7 +88,7 @@ func replaceManagedFile(from, to string) (bool, error) {
 	// sharing, including another CLI process loading config before locking.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
-		err = windows.MoveFileEx(src, dst, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+		err = windows.MoveFileEx(src, dst, flags|windows.MOVEFILE_WRITE_THROUGH)
 		if (!errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED)) ||
 			!time.Now().Before(deadline) {
 			return err == nil, err

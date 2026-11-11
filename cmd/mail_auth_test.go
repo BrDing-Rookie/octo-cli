@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -85,6 +86,59 @@ func TestMailAuthorizationChecksStorageBeforeRequest(t *testing.T) {
 				t.Fatalf("expected a local storage conflict: %v (%s)", err, out)
 			}
 		})
+	}
+}
+
+func TestMailAuthStatusPreservesCodeWhenDirectoryIsReadOnly(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("requires POSIX directory permissions for an unprivileged user")
+	}
+	dir := phaseOneEnv(t)
+	var exchanges atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != mailTokenPath {
+			http.NotFound(w, r)
+			return
+		}
+		exchanges.Add(1)
+		writeTestJSON(w, http.StatusOK, map[string]any{
+			"accessToken": "omb_fixture", "botId": "fixture-bot", "mailboxAddress": "fixture@example.test",
+		})
+	}))
+	defer srv.Close()
+	t.Setenv(config.EnvAPIBaseURL, srv.URL)
+	t.Setenv(config.EnvBotToken, "app_fixture")
+	t.Setenv(config.EnvBotID, "fixture-bot")
+	t.Setenv(config.EnvSpaceID, "fixture-space")
+	store, err := authstore.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := mailBindingKey(t, "fixture-bot", "fixture-space", "app_fixture", srv.URL)
+	if err := store.SavePendingMailAuthorization(key, &authstore.PendingMailAuthorization{
+		DeviceCode: "omd_fixture", CodeVerifier: "verifier",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+	if out, err := phaseOneRun("mail", "auth", "status"); err == nil || !strings.Contains(err.Error(), "storage is writable") {
+		t.Fatalf("expected the preflight to reject an unwritable directory: %v (%s)", err, out)
+	}
+	if exchanges.Load() != 0 {
+		t.Fatal("the code was exchanged despite an unwritable directory")
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := phaseOneRun("mail", "auth", "status"); err != nil || !strings.Contains(out, "connected") || exchanges.Load() != 1 {
+		t.Fatalf("retry with the original pending code: %v (%s)", err, out)
 	}
 }
 

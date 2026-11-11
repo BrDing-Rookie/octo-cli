@@ -113,8 +113,16 @@ func (s *Store) CheckMailAuthorizationStorage() error {
 	if _, err := s.loadPendingMailAuthorizations(); err != nil {
 		return err
 	}
-	_, err = s.loadMailTokens()
-	return err
+	if _, err := s.loadMailTokens(); err != nil {
+		return err
+	}
+	// The advisory lock and existing ciphertext can remain accessible when
+	// the directory ACL disallows creating the temp file used by atomicWrite.
+	probe, err := os.CreateTemp(s.dir, ".tmp-*")
+	if err != nil {
+		return fmt.Errorf("check Mail authorization storage is writable: %w", err)
+	}
+	return errors.Join(probe.Close(), os.Remove(probe.Name()))
 }
 
 // PendingMailAuthorization is the local proof material for an in-progress

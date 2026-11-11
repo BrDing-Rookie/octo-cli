@@ -327,14 +327,12 @@ func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous 
 	if err := syncManagedDirectory(dir); err != nil {
 		return profileWrite{err: err}
 	}
-	// The non-replacing hard link is the publication point. Both the
-	// prepared metadata and the selected directory precede it on disk.
-	if err := os.Link(seal, anchor); err != nil {
+	published, err = publishManagedAnchor(stage, anchor)
+	if !published {
 		return profileWrite{err: err}
 	}
-	published = true
 	cfg.SetPublishedFile(filepath.Join(name, config.ManagedProfileFile))
-	return profileWrite{committed: true, err: syncManagedDirectory(s.dir), retirementWarning: warning}
+	return profileWrite{committed: true, err: err, retirementWarning: warning}
 }
 
 func stageProfileAuthority(dir, stage, seal string) error {
@@ -343,7 +341,7 @@ func stageProfileAuthority(dir, stage, seal string) error {
 		return err
 	}
 	defer func() { _ = os.Remove(file.Name()) }() //nolint:errcheck // transient name before the authority is linked
-	_, err = file.WriteString(filepath.Base(dir) + "\n")
+	err = config.WriteProfileAuthority(file, dir)
 	if err == nil {
 		err = file.Sync()
 	}
@@ -353,7 +351,7 @@ func stageProfileAuthority(dir, stage, seal string) error {
 	if err := os.Link(file.Name(), stage); err != nil {
 		return err
 	}
-	if err := os.Link(file.Name(), seal); err != nil {
+	if committed, err := replaceManagedFile(file.Name(), seal); !committed || err != nil {
 		return errors.Join(err, os.Remove(stage))
 	}
 	return syncManagedDirectory(filepath.Dir(stage))

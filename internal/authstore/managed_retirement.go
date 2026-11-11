@@ -233,12 +233,8 @@ func (j v1RetirementJournal) ownsStagedJournal(stage, seal, metadata, journal st
 			return false
 		}
 	}
-	stageInfo, err := os.Lstat(stage)
-	if err != nil || !stageInfo.Mode().IsRegular() {
-		return false
-	}
-	sealInfo, err := os.Lstat(seal)
-	if err != nil || !sealInfo.Mode().IsRegular() || !os.SameFile(stageInfo, sealInfo) {
+	name, err := config.VerifyProfileAuthority(stage)
+	if err != nil || name != filepath.Base(filepath.Dir(seal)) {
 		return false
 	}
 	journalInfo, err := os.Lstat(journal)

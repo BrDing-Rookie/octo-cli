@@ -67,11 +67,14 @@ with `OCTO_CONFIG_DIR`):
 Unified profiles are stored in **`profiles.json`** inside a private directory
 allocated under the configured CLI directory (`~/.octo/cli` by default). A
 publication anchor at `.managed-profile` selects the authoritative directory
-by a hard link to its immutable `.authority` file. The CLI refuses a missing
-or damaged selected configuration. A readable original v1 `config.json` can
-disqualify a publication when it reserves a publication path as a Token.
-Older directories with only a `.published` marker require manual recovery
-from verified metadata before migration.
+by a hard link to its immutable `.authority` file. The authority binds the
+store and file identities through an extended attribute on macOS and Linux
+or user-scoped DPAPI on Windows. The CLI refuses a missing or damaged selected
+configuration. A readable original v1 `config.json` can disqualify a
+publication when it reserves a publication path as a Token. Older layouts
+without the platform proof require manual recovery from verified metadata
+before migration. File copies and restored stores with different filesystem
+identities also require recovery from verified metadata.
 The CLI can migrate the original v1 `config.json`.
 Before publication, unmarked dedicated metadata with profiles requires the
 same bindings and default selection in the original v1 file. An empty
@@ -87,7 +90,7 @@ managed credential references keep their original base.
 
 Unified, current Bot and Mail credential writes share `.managed.lock`. They
 protect referenced Token paths and aliases from conflicting writes. Mail
-checks its local storage before starting or exchanging a device code and
+checks its local storage and tests temp-file creation before starting or exchanging a device code and
 rechecks write destinations under the lock. Mail and Bot reads leave a
 missing encryption salt alone. The encrypted-file backend leaves an external
 `master.key` alone and excludes known external Token files from its scan for
@@ -97,8 +100,10 @@ in place when a profile still uses its locator path as an external Token.
 
 When migrating directly from the original v1 configuration, the CLI verifies
 the source inode and bytes, archives them as `config.v1-*.bak`, and publishes
-the new configuration together with the recovery marker. Once the publication
-is durable, the CLI clears the verified v1 file into an empty Bot store.
+the new configuration together with the recovery marker. On Windows, the
+final publication uses a non-replacing, write-through move of the prepared
+anchor. Once the publication is durable, the CLI clears the verified v1 file
+into an empty Bot store.
 A legacy writer that replaces `config.json` keeps its active file. Recovery
 requires a retirement record published with the profile metadata, a matching
 active inode, and the recorded backup digest. A retry after interrupted

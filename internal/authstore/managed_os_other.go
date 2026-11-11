@@ -25,6 +25,10 @@ func replaceManagedFile(string, string) (bool, error) {
 	return false, errors.New("managed credential writes are unavailable on this platform")
 }
 
+func publishManagedAnchor(stage, anchor string) (bool, error) {
+	return replaceManagedFile(stage, anchor)
+}
+
 func protectManagedPath(string, os.FileInfo, os.FileMode) error {
 	return errors.New("managed credential writes are unavailable on this platform")
 }

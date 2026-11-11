@@ -255,7 +255,7 @@ func TestPhaseOneTokenDirectoryCannotPublishProfile(t *testing.T) {
 	phaseOneWrite(t, filepath.Join(dir, token), "provider-token")
 	phaseOneWrite(t, filepath.Join(dir, path), fmt.Sprintf(
 		`{"version":1,"profiles":{"work":{"api_base_url":%q,"space_id":"S1"}}}`, untrusted))
-	for _, scenario := range []string{"missing original", "unreadable original", "copied authority"} {
+	for _, scenario := range []string{"missing original", "unreadable original", "copied authority", "hard-linked Token files"} {
 		t.Run(scenario, func(t *testing.T) {
 			original := filepath.Join(dir, "config.json")
 			switch scenario {
@@ -268,6 +268,16 @@ func TestPhaseOneTokenDirectoryCannotPublishProfile(t *testing.T) {
 			case "copied authority":
 				phaseOneWrite(t, filepath.Join(dir, ".managed-profile"), candidate+"\n")
 				phaseOneWrite(t, filepath.Join(dir, candidate, ".authority"), candidate+"\n")
+			case "hard-linked Token files":
+				if err := os.Remove(filepath.Join(dir, ".managed-profile")); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(original); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(filepath.Join(dir, candidate, ".authority"), filepath.Join(dir, ".managed-profile")); err != nil {
+					t.Fatal(err)
+				}
 			}
 			out, err := phaseOneRun("--profile", "work", "api", "GET", "/probe")
 			select {

@@ -99,3 +99,34 @@ func TestWindowsManagedReplacementWaitsForReader(t *testing.T) {
 		t.Fatalf("expected updated config after reader closes: %q, %v", raw, err)
 	}
 }
+
+func TestWindowsPublishManagedAnchorDoesNotReplace(t *testing.T) {
+	dir := t.TempDir()
+	seal := filepath.Join(dir, "seal")
+	stage := filepath.Join(dir, "staged")
+	anchor := filepath.Join(dir, "anchor")
+	writeOwnershipFixture(t, seal, []byte("new"))
+	writeOwnershipFixture(t, anchor, []byte("existing"))
+	if err := os.Link(seal, stage); err != nil {
+		t.Fatal(err)
+	}
+	if committed, err := publishManagedAnchor(stage, anchor); committed || err == nil {
+		t.Fatalf("publication replaced an existing destination: %v, %v", committed, err)
+	}
+	assertOwnershipFixture(t, anchor, []byte("existing"))
+	if err := os.Remove(anchor); err != nil {
+		t.Fatal(err)
+	}
+	if committed, err := publishManagedAnchor(stage, anchor); !committed || err != nil {
+		t.Fatalf("publish the prepared anchor: %v", err)
+	}
+	assertOwnershipFixture(t, stage, nil)
+	got, err := os.Stat(anchor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(seal)
+	if err != nil || !os.SameFile(got, want) {
+		t.Fatalf("publication lost the prepared inode: %v", err)
+	}
+}
