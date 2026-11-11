@@ -54,7 +54,7 @@ func publishOwnershipFixture(t *testing.T, dir, reference string) *config.Profil
 	p := managedFixtureProfile()
 	p.TokenSource = &config.TokenSource{Type: "token_file", Path: reference}
 	cfg.Profiles["external"] = &p
-	if write := NewManagedStore(dir, nil).persist(cfg, nil); !write.committed || write.err != nil {
+	if write := NewManagedStore(dir, nil).persist(t.Context(), cfg, nil); !write.committed || write.err != nil {
 		t.Fatalf("publish fixture: %v", write.err)
 	}
 	cfg, err = config.LoadWritableProfileConfigIn(dir, true)

@@ -1,6 +1,7 @@
 package authstore
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -37,7 +38,7 @@ type ManagedStore struct {
 	dir         string
 	allowLegacy bool
 	keychain    Keychain
-	writeConfig func(string, []byte) (bool, error)
+	writeConfig func(context.Context, string, []byte) (bool, error)
 }
 
 // ProfileSnapshot captures the target before online verification. Its private
@@ -89,7 +90,7 @@ func NewManagedStore(dir string, keychain Keychain) *ManagedStore {
 	if keychain == nil {
 		keychain = unavailableKeychain{}
 	}
-	return &ManagedStore{dir: dir, allowLegacy: true, keychain: keychain, writeConfig: writeManagedFile}
+	return &ManagedStore{dir: dir, allowLegacy: true, keychain: keychain, writeConfig: writeManagedConfig}
 }
 
 // Snapshot reads only metadata. A missing target has Exists=false, while an
@@ -134,10 +135,18 @@ func cloneProfile(p *config.Profile) *config.Profile {
 // Import commits a verified candidate. The caller performs network
 // verification before invoking Import so the lock covers only local writes.
 func (s *ManagedStore) Import(snap ProfileSnapshot, profile config.Profile, token, backend string) (CommitResult, error) {
+	return s.ImportContext(context.Background(), snap, profile, token, backend)
+}
+
+// ImportContext checks for cancellation until the new Profile becomes visible.
+func (s *ManagedStore) ImportContext(ctx context.Context, snap ProfileSnapshot, profile config.Profile, token, backend string) (CommitResult, error) {
+	if err := ctx.Err(); err != nil {
+		return CommitResult{}, err
+	}
 	if err := validateImport(profile, token, backend); err != nil {
 		return CommitResult{}, err
 	}
-	return s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
+	return s.modify(ctx, snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
 		ref, err := s.stageToken(cfg, token, backend)
 		if err != nil {
 			return CommitResult{}, err
@@ -147,7 +156,7 @@ func (s *ManagedStore) Import(snap ProfileSnapshot, profile config.Profile, toke
 		if cfg.CurrentProfile == "" {
 			cfg.CurrentProfile = snap.baseline.name
 		}
-		write := s.persist(cfg, snap.baseline.original)
+		write := s.persist(ctx, cfg, snap.baseline.original)
 		if !write.committed {
 			return CommitResult{}, errors.Join(write.err, s.removeEntry(cfg, ref))
 		}
@@ -179,7 +188,8 @@ func validateImport(profile config.Profile, token, backend string) error {
 
 // Remove deletes the selected reference before cleaning up its managed entry.
 func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
-	return s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
+	ctx := context.Background()
+	return s.modify(ctx, snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
 		if snap.baseline.original == nil {
 			return CommitResult{}, errors.New("selected profile does not exist")
 		}
@@ -187,7 +197,7 @@ func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
 		if cfg.CurrentProfile == snap.baseline.name {
 			cfg.CurrentProfile = ""
 		}
-		write := s.persist(cfg, snap.baseline.original)
+		write := s.persist(ctx, cfg, snap.baseline.original)
 		if !write.committed {
 			return CommitResult{}, write.err
 		}
@@ -198,7 +208,7 @@ func (s *ManagedStore) Remove(snap ProfileSnapshot) (CommitResult, error) {
 // ConfirmTarget checks an unchanged binding under the write lock. A new
 // origin or Space needs a token verified against that target via Import.
 func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) (CommitResult, error) {
-	return s.modify(snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
+	return s.modify(context.Background(), snap, func(cfg *config.ProfileConfig) (CommitResult, error) {
 		profile := cfg.Profiles[snap.baseline.name]
 		if profile == nil {
 			return CommitResult{}, ErrProfileOriginChange
@@ -209,7 +219,7 @@ func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) (C
 			return CommitResult{}, ErrProfileOriginChange
 		}
 		if !cfg.IsPublished() {
-			write := s.persist(cfg, nil)
+			write := s.persist(context.Background(), cfg, nil)
 			if !write.committed {
 				return CommitResult{}, write.err
 			}
@@ -219,7 +229,7 @@ func (s *ManagedStore) ConfirmTarget(snap ProfileSnapshot, apiBaseURL string) (C
 	})
 }
 
-func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfig) (CommitResult, error)) (CommitResult, error) {
+func (s *ManagedStore) modify(ctx context.Context, snap ProfileSnapshot, fn func(*config.ProfileConfig) (CommitResult, error)) (CommitResult, error) {
 	base := snap.baseline
 	if base == nil || base.dir != s.dir || base.name == "" || strings.TrimSpace(base.name) != base.name {
 		return CommitResult{}, errors.New("a valid target profile is required")
@@ -231,7 +241,7 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 	if err := ensurePrivateDir(s.dir); err != nil {
 		return CommitResult{}, err
 	}
-	lock, err := openProfileLock(s.dir)
+	lock, err := openProfileLockContext(ctx, s.dir)
 	if err != nil {
 		return CommitResult{}, err
 	}
@@ -249,10 +259,16 @@ func (s *ManagedStore) modify(snap ProfileSnapshot, fn func(*config.ProfileConfi
 		exists != (base.original != nil) || !reflect.DeepEqual(actual, base.original) {
 		return CommitResult{}, ErrProfileConflict
 	}
+	if err := ctx.Err(); err != nil {
+		return CommitResult{}, err
+	}
 	return fn(cfg)
 }
 
-func (s *ManagedStore) persist(cfg *config.ProfileConfig, previous *config.Profile) profileWrite {
+func (s *ManagedStore) persist(ctx context.Context, cfg *config.ProfileConfig, previous *config.Profile) profileWrite {
+	if err := ctx.Err(); err != nil {
+		return profileWrite{err: err}
+	}
 	if !cfg.IsPublished() {
 		// Only this migration can publish a retirement record.
 		cfg.V1Retirement = nil
@@ -262,13 +278,13 @@ func (s *ManagedStore) persist(cfg *config.ProfileConfig, previous *config.Profi
 		return profileWrite{err: err}
 	}
 	if !cfg.IsPublished() {
-		return s.publishProfileConfig(cfg, previous, raw)
+		return s.publishProfileConfig(ctx, cfg, previous, raw)
 	}
 	path := filepath.Join(s.dir, cfg.WriteFile())
 	if err := checkProfileWritePaths(cfg, path); err != nil {
 		return profileWrite{err: err}
 	}
-	committed, err := s.writeConfig(path, raw)
+	committed, err := s.writeConfig(ctx, path, raw)
 	return profileWrite{committed: committed, err: err}
 }
 
@@ -277,7 +293,7 @@ func marshalProfileConfig(cfg *config.ProfileConfig) ([]byte, error) {
 	return append(raw, '\n'), err
 }
 
-func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous *config.Profile, data []byte) profileWrite {
+func (s *ManagedStore) publishProfileConfig(ctx context.Context, cfg *config.ProfileConfig, previous *config.Profile, data []byte) profileWrite {
 	dir, err := os.MkdirTemp(s.dir, config.OwnedProfileDirPrefix)
 	if err != nil {
 		return profileWrite{err: err}
@@ -302,7 +318,7 @@ func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous 
 	if err := ensurePrivateDir(dir); err != nil {
 		return profileWrite{err: err}
 	}
-	if committed, err := s.writeConfig(path, data); !committed || err != nil {
+	if committed, err := s.writeConfig(ctx, path, data); !committed || err != nil {
 		return profileWrite{err: err}
 	}
 	if err := stageProfileAuthority(dir, stage, seal); err != nil {
@@ -327,7 +343,7 @@ func (s *ManagedStore) publishProfileConfig(cfg *config.ProfileConfig, previous 
 	if err := syncManagedDirectory(dir); err != nil {
 		return profileWrite{err: err}
 	}
-	published, err = publishManagedAnchor(stage, anchor)
+	published, err = publishManagedAnchor(ctx, stage, anchor)
 	if !published {
 		return profileWrite{err: err}
 	}
@@ -351,7 +367,7 @@ func stageProfileAuthority(dir, stage, seal string) error {
 	if err := os.Link(file.Name(), stage); err != nil {
 		return err
 	}
-	if committed, err := replaceManagedFile(file.Name(), seal); !committed || err != nil {
+	if committed, err := replaceManagedFile(context.Background(), file.Name(), seal); !committed || err != nil {
 		return errors.Join(err, os.Remove(stage))
 	}
 	return syncManagedDirectory(filepath.Dir(stage))

@@ -45,6 +45,7 @@ import (
 // them passed for the wrong reason under a loopback-addressed proxy. Tests that want
 // a proxy now opt in with t.Setenv.
 func TestMain(m *testing.M) {
+	cmdutil.RunOutputWriterIfRequested()
 	dir, err := os.MkdirTemp("", "octo-cmd-test")
 	if err != nil {
 		panic(err)

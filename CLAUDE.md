@@ -131,7 +131,7 @@ octo-cli loop      workspace list|get
                expert-team list|get|create|update|delete
                # Additional Fleet resources: run `octo-cli loop --help`.
 
-octo-cli auth      login | status | update | logout | list
+octo-cli auth      login | get | status | update | logout | list
 octo-cli schema [--list [domain] | <operation-id>]
 octo-cli api <METHOD> <PATH> [--params ...] [--data ...] [--service ...] [--workspace-id <uuid>]
 octo-cli config show
@@ -146,7 +146,14 @@ authentication configuration. It resolves stable `latest` to an exact version an
 verifies the installed platform binary. `--dry-run` checks ownership locally
 without registry access. Upgrade requires no Octo credentials.
 
-`octo-cli auth login` stores a bot token (read from a hidden prompt, `--with-token` stdin, or `--token-file` — never argv) under a profile keyed by `--bot-id`/`--profile`. `update` changes non-secret profile settings such as the API base URL without re-entering or rewriting the token, and `--clear-api-base-url` removes the stored origin so the environment or default applies again. `status`/`list` show metadata only (tokens always masked); `logout` removes a profile.
+In unified mode, `octo-cli auth login --with-token` verifies the stdin
+Token against the target gateway and Space before saving it to the selected
+Profile. `--owner-id` adds an expected account check. `octo-cli auth get`
+resolves the unified credential and queries `GET /v1/auth/tokens/_current`.
+The success envelope contains Token metadata, effective permissions, and Bot
+bindings under `data`.
+
+In legacy mode, `octo-cli auth login` stores a bot token (read from a hidden prompt, `--with-token` stdin, or `--token-file` — never argv) under a profile keyed by `--bot-id`/`--profile`. `update` changes non-secret profile settings such as the API base URL without re-entering or rewriting the token, and `--clear-api-base-url` removes the stored origin so the environment or default applies again. `status`/`list` show metadata only (tokens always masked); `logout` removes a profile.
 
 Bot-type capability and per-command flags are in `docs/octo-cli-design.md`. Agent-facing usage lives under `skills/` (`octo-shared`, `octo-matter` (withheld — see above), `octo-summary` (withheld — see CHANGELOG "Currently withheld" note), `octo-messaging`, `octo-files`, `octo-drive`, `octo-docs`, `octo-html`, `octo-marketplace`, `octo-mail`, `octo-loop`) — keep those in sync when command shapes change.
 

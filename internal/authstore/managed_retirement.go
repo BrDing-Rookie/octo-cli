@@ -2,6 +2,7 @@ package authstore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -62,7 +63,7 @@ func (s *ManagedStore) retireV1Config(cfg *config.ProfileConfig, previous *confi
 	// Disable recovery before unlinking the pin. If interrupted here, a
 	// leftover link cannot be adopted by a later mutation.
 	cfg.V1Retirement = nil
-	write := s.persist(cfg, nil)
+	write := s.persist(context.Background(), cfg, nil)
 	if !write.committed || write.err != nil {
 		return retirementWarning + ", recovery record could not be cleared"
 	}
@@ -302,7 +303,7 @@ func (j v1RetirementJournal) mark(active *os.File, backup string) (string, error
 	if same, err := sameOpenFile(active, stage); err != nil || !same {
 		return "", err
 	}
-	if committed, err := replaceManagedFile(stage, pending); !committed || err != nil {
+	if committed, err := replaceManagedFile(context.Background(), stage, pending); !committed || err != nil {
 		return "", err
 	}
 	return pending, nil

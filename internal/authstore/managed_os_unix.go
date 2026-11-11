@@ -3,6 +3,7 @@
 package authstore
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,13 +11,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func lockManagedFile(f *os.File) error {
-	for {
-		err := unix.Flock(int(f.Fd()), unix.LOCK_EX)
-		if !errors.Is(err, unix.EINTR) {
-			return err
-		}
+func tryLockManagedFile(f *os.File) (bool, error) {
+	err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EINTR) {
+		return false, nil
 	}
+	return err == nil, err
 }
 
 func openExistingManagedFile(path string) (*os.File, error) {
@@ -33,14 +33,20 @@ func managedFileLinkCount(file *os.File) (uint64, error) {
 	return uint64(info.Nlink), err
 }
 
-func replaceManagedFile(from, to string) (bool, error) {
+func replaceManagedFile(ctx context.Context, from, to string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if err := os.Rename(from, to); err != nil {
 		return false, err
 	}
 	return true, syncManagedDirectory(filepath.Dir(to))
 }
 
-func publishManagedAnchor(stage, anchor string) (bool, error) {
+func publishManagedAnchor(ctx context.Context, stage, anchor string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if err := os.Link(stage, anchor); err != nil {
 		return false, err
 	}

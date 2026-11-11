@@ -1,6 +1,7 @@
 package authstore
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -12,8 +13,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func lockManagedFile(f *os.File) error {
-	return windows.LockFileEx(windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &windows.Overlapped{})
+func tryLockManagedFile(f *os.File) (bool, error) {
+	flags := uint32(windows.LOCKFILE_EXCLUSIVE_LOCK | windows.LOCKFILE_FAIL_IMMEDIATELY)
+	err := windows.LockFileEx(windows.Handle(f.Fd()), flags, 0, 1, 0, &windows.Overlapped{})
+	if errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func openExistingManagedFile(path string) (*os.File, error) {
@@ -57,17 +63,17 @@ func managedWindowsPath(path string) (string, error) {
 	return `\\?\` + full, nil
 }
 
-func replaceManagedFile(from, to string) (bool, error) {
-	return moveManagedFile(from, to, windows.MOVEFILE_REPLACE_EXISTING)
+func replaceManagedFile(ctx context.Context, from, to string) (bool, error) {
+	return moveManagedFile(ctx, from, to, windows.MOVEFILE_REPLACE_EXISTING)
 }
 
-func publishManagedAnchor(stage, anchor string) (bool, error) {
+func publishManagedAnchor(ctx context.Context, stage, anchor string) (bool, error) {
 	// Move the already prepared hard link without replacing any destination.
 	// Write-through makes this publication durable before v1 retirement.
-	return moveManagedFile(stage, anchor, 0)
+	return moveManagedFile(ctx, stage, anchor, 0)
 }
 
-func moveManagedFile(from, to string, flags uint32) (bool, error) {
+func moveManagedFile(ctx context.Context, from, to string, flags uint32) (bool, error) {
 	from, err := managedWindowsPath(from)
 	if err != nil {
 		return false, err
@@ -88,6 +94,9 @@ func moveManagedFile(from, to string, flags uint32) (bool, error) {
 	// sharing, including another CLI process loading config before locking.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
 		err = windows.MoveFileEx(src, dst, flags|windows.MOVEFILE_WRITE_THROUGH)
 		if (!errors.Is(err, windows.ERROR_SHARING_VIOLATION) && !errors.Is(err, windows.ERROR_ACCESS_DENIED)) ||
 			!time.Now().Before(deadline) {

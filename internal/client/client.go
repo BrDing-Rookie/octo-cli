@@ -69,6 +69,9 @@ type Request struct {
 	Headers     map[string]string
 	RawBody     []byte
 	ContentType string
+	// ExpectedSuccessStatus restricts successful responses to a specific 2xx
+	// status. Zero accepts any 2xx status.
+	ExpectedSuccessStatus int
 	// BinaryResponse asks the client to treat 3xx/non-JSON responses as
 	// structured metadata envelopes rather than parsing JSON. See file.download.
 	BinaryResponse bool
@@ -886,8 +889,8 @@ func NewMail(cfg *config.Config, cred *credential.MailCredential, opts Options) 
 }
 
 // Do performs req against the service URL, applying auth, retry, and dry-run.
-// Returns the raw response body on 2xx; an *output.ExitError on non-2xx or
-// transport failure.
+// Returns the response body on an accepted 2xx, or an *output.ExitError on
+// an unexpected status or transport failure.
 //
 // Every error leaving this method is redacted against req.SecretValues. That is
 // deliberately a boundary rather than a set of per-site calls: three rounds of
@@ -1165,6 +1168,13 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if req.ExpectedSuccessStatus != 0 && resp.StatusCode != req.ExpectedSuccessStatus {
+			return nil, output.ErrAPI(
+				fmt.Sprintf("HTTP_%d", resp.StatusCode),
+				fmt.Sprintf("expected HTTP %d, received HTTP %d", req.ExpectedSuccessStatus, resp.StatusCode),
+				"",
+			)
+		}
 		// Binary/redirect opt-in: don't try to parse as JSON, just describe.
 		if req.BinaryResponse {
 			env := map[string]any{

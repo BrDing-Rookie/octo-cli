@@ -25,6 +25,8 @@ type fixtureKeychain struct {
 	tooLarge  bool
 	keep      string
 	readsFail bool
+	onRead    func()
+	onCreate  func()
 }
 
 func (f *fixtureKeychain) Read(account string) ([]byte, error) {
@@ -34,6 +36,9 @@ func (f *fixtureKeychain) Read(account string) ([]byte, error) {
 	data, ok := f.entries[account]
 	if !ok {
 		return nil, os.ErrNotExist
+	}
+	if f.onRead != nil {
+		f.onRead()
 	}
 	return bytes.Clone(data), nil
 }
@@ -46,6 +51,9 @@ func (f *fixtureKeychain) Create(account string, data []byte) error {
 		return errKeychainEntryTooLarge
 	}
 	f.entries[account] = bytes.Clone(data)
+	if f.onCreate != nil {
+		f.onCreate()
+	}
 	return nil
 }
 
@@ -141,10 +149,10 @@ func TestLegacyProfileWritesWaitForManagedCommit(t *testing.T) {
 			}
 
 			commitReady, commit := make(chan struct{}), make(chan struct{})
-			managed.writeConfig = func(path string, data []byte) (bool, error) {
+			managed.writeConfig = func(ctx context.Context, path string, data []byte) (bool, error) {
 				close(commitReady)
 				<-commit
-				return writeManagedFile(path, data)
+				return writeManagedConfig(ctx, path, data)
 			}
 			managedDone := make(chan error, 1)
 			go func() {
@@ -316,8 +324,8 @@ func TestManagedMigrationPreservesConcurrentLegacyWrite(t *testing.T) {
 		t.Fatalf("select original v1 profile: %v", err)
 	}
 	legacy := &Store{dir: dir}
-	store.writeConfig = func(path string, data []byte) (bool, error) {
-		committed, err := writeManagedFile(path, data)
+	store.writeConfig = func(ctx context.Context, path string, data []byte) (bool, error) {
+		committed, err := writeManagedConfig(ctx, path, data)
 		if err == nil {
 			// Published legacy writers replace config.json without our lock.
 			err = legacy.saveProfiles(map[string]ProfileMeta{"bot": {RobotID: "cli_bot"}})
@@ -345,8 +353,8 @@ func TestManagedMigrationDoesNotRetireChangedV1Source(t *testing.T) {
 		t.Fatalf("select v1 profile: %v", err)
 	}
 	replacement := []byte(`{"version":1,"profiles":{"external":{"api_base_url":"https://external.example"}}}`)
-	store.writeConfig = func(configPath string, data []byte) (bool, error) {
-		committed, err := writeManagedFile(configPath, data)
+	store.writeConfig = func(ctx context.Context, configPath string, data []byte) (bool, error) {
+		committed, err := writeManagedConfig(ctx, configPath, data)
 		if err == nil {
 			// Even the same inode can have new, parseable contents.
 			err = os.WriteFile(path, replacement, secPerm)
@@ -547,7 +555,7 @@ func TestManagedMutationResumesShortV1Retirement(t *testing.T) {
 					t.Fatalf("persist recovery marker: %v", err)
 				}
 				cfg.V1Retirement = &config.V1Retirement{Backup: filepath.Base(backup), Digest: sha256.Sum256(raw)}
-				if write := store.persist(cfg, nil); !write.committed || write.err != nil {
+				if write := store.persist(t.Context(), cfg, nil); !write.committed || write.err != nil {
 					t.Fatalf("persist recovery record: %v", write.err)
 				}
 			}
@@ -757,7 +765,7 @@ func TestManagedLogoutProtectsPreviouslyReferencedOwnedMarkerPath(t *testing.T) 
 		t.Fatal(err)
 	}
 	cfg.Profiles["target"].TokenSource = &config.TokenSource{Type: "token_file", Path: marker}
-	if write := store.persist(cfg, nil); !write.committed || write.err != nil {
+	if write := store.persist(t.Context(), cfg, nil); !write.committed || write.err != nil {
 		t.Fatalf("seed external reference: %v", write.err)
 	}
 	snap, err = store.Snapshot("target", true)
@@ -801,7 +809,7 @@ func TestManagedLaterUpdatePreservesFormerConfigJSONToken(t *testing.T) {
 	work := profile
 	work.TokenSource = &config.TokenSource{Type: "token_file", Path: configFile}
 	cfg.Profiles["work"] = &work
-	if write := store.persist(cfg, nil); !write.committed || write.err != nil {
+	if write := store.persist(t.Context(), cfg, nil); !write.committed || write.err != nil {
 		t.Fatalf("seed external reference: %v", write.err)
 	}
 	snap, err := store.Snapshot("work", true)
@@ -893,7 +901,7 @@ func TestManagedCommitFailures(t *testing.T) {
 			old := snap.Profile.TokenSource
 			switch scenario {
 			case "pre-commit":
-				store.writeConfig = func(string, []byte) (bool, error) { return false, os.ErrPermission }
+				store.writeConfig = func(context.Context, string, []byte) (bool, error) { return false, os.ErrPermission }
 			case "verify-entry":
 				keychain.readsFail = true
 			case "cleanup":
@@ -902,8 +910,8 @@ func TestManagedCommitFailures(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "directory-sync":
-				store.writeConfig = func(path string, data []byte) (bool, error) {
-					committed, err := writeManagedFile(path, data)
+				store.writeConfig = func(ctx context.Context, path string, data []byte) (bool, error) {
+					committed, err := writeManagedConfig(ctx, path, data)
 					return committed, errors.Join(err, os.ErrPermission)
 				}
 			}
@@ -997,7 +1005,7 @@ func TestManagedReferenceSharingAndFailedReads(t *testing.T) {
 	}
 	cfg.Profiles["second"] = cfg.Profiles["first"]
 	ref := cfg.Profiles["first"].TokenSource
-	if write := store.persist(cfg, nil); !write.committed || write.err != nil {
+	if write := store.persist(t.Context(), cfg, nil); !write.committed || write.err != nil {
 		t.Fatalf("seed shared reference: %v", write.err)
 	}
 	snap, err = store.Snapshot("first", true)
@@ -1103,7 +1111,7 @@ func TestManagedImportRejectsMissingMasterKey(t *testing.T) {
 			if location == "file with orphaned entry" {
 				delete(cfg.Profiles, "existing")
 				cfg.CurrentProfile = ""
-				if write := store.persist(cfg, nil); !write.committed || write.err != nil {
+				if write := store.persist(t.Context(), cfg, nil); !write.committed || write.err != nil {
 					t.Fatalf("leave ciphertext without a profile: %v", write.err)
 				}
 			}
@@ -1153,6 +1161,165 @@ func TestManagedImportRejectsMissingMasterKey(t *testing.T) {
 				t.Fatalf("credential still unreadable after restoring the original key: %v", err)
 			}
 		})
+	}
+}
+
+func TestManagedImportCancelsWhileWriteLockHeld(t *testing.T) {
+	dir := t.TempDir()
+	store := NewManagedStore(dir, nil)
+	target := managedFixtureProfile()
+	before, err := store.Snapshot("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Import(before, target, "original-token", BackendEncryptedFile); err != nil {
+		t.Fatal(err)
+	}
+	before, err = store.Snapshot("target", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := publishedConfigPath(t, dir)
+	originalConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock, err := openProfileLockContext(t.Context(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = lock.Close() })
+	ctx, cancel := context.WithTimeout(t.Context(), 150*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := store.ImportContext(ctx, before, target, "candidate-token", BackendEncryptedFile)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("expected lock wait cancellation, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("import did not cancel while the write lock was held")
+	}
+	after, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Equal(originalConfig, after) {
+		t.Fatalf("cancelled import changed the Profile configuration: %v", err)
+	}
+	if token, err := store.readEntry(before.Profile.TokenSource); err != nil || token != "original-token" {
+		t.Fatalf("expected the original Token after cancellation: %v", err)
+	}
+}
+
+func TestManagedImportCancellationAtCommit(t *testing.T) {
+	for _, phase := range []string{"credential write", "credential readback", "before replacement", "after replacement"} {
+		t.Run(phase, func(t *testing.T) {
+			dir := t.TempDir()
+			keychain := &fixtureKeychain{entries: map[string][]byte{}}
+			store := NewManagedStore(dir, keychain)
+			target := managedFixtureProfile()
+			before, err := store.Snapshot("target", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.Import(before, target, "original-token", BackendKeychain); err != nil {
+				t.Fatal(err)
+			}
+			before, err = store.Snapshot("target", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			configPath := publishedConfigPath(t, dir)
+			originalConfig, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var stagedConfig []byte
+			switch phase {
+			case "credential write":
+				keychain.onCreate = cancel
+			case "credential readback":
+				keychain.onRead = cancel
+			default:
+				store.writeConfig = func(ctx context.Context, path string, data []byte) (bool, error) {
+					return writeManagedFileWithReplace(path, data, func(from, to string) (bool, error) {
+						stagedConfig = bytes.Clone(data)
+						if phase == "before replacement" {
+							cancel()
+						} else {
+							defer cancel()
+						}
+						return replaceManagedFile(ctx, from, to)
+					})
+				}
+			}
+			_, importErr := store.ImportContext(ctx, before, target, "candidate-token", BackendKeychain)
+			keychain.onRead = nil
+			if ctx.Err() == nil {
+				t.Fatal("import did not reach the cancellation point")
+			}
+
+			wantConfig, wantToken, wantErr := originalConfig, "original-token", context.Canceled
+			if phase == "after replacement" {
+				wantConfig, wantToken, wantErr = stagedConfig, "candidate-token", nil
+			}
+			if !errors.Is(importErr, wantErr) {
+				t.Errorf("import error = %v, want %v", importErr, wantErr)
+			}
+			after, err := os.ReadFile(configPath)
+			if err != nil || !bytes.Equal(wantConfig, after) {
+				t.Errorf("unexpected config.json after cancellation: %v", err)
+			}
+			current, err := store.Snapshot("target", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if token, err := store.readEntry(current.Profile.TokenSource); err != nil || token != wantToken {
+				t.Errorf("Profile does not resolve the expected Token: %v", err)
+			}
+			if len(keychain.entries) != 1 {
+				t.Errorf("expected one Keychain entry after import, got %d", len(keychain.entries))
+			}
+			if pending, err := filepath.Glob(filepath.Join(filepath.Dir(configPath), ".managed-*")); err != nil || len(pending) != 0 {
+				t.Errorf("temporary config files after import: %v (%v)", pending, err)
+			}
+		})
+	}
+}
+
+func TestManagedImportCanceledBeforeInitialPublication(t *testing.T) {
+	dir := t.TempDir()
+	keychain := &fixtureKeychain{entries: map[string][]byte{}}
+	store := NewManagedStore(dir, keychain)
+	before, err := store.Snapshot("target", true)
+	if err != nil || before.Exists {
+		t.Fatalf("expected an empty store: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	store.writeConfig = func(ctx context.Context, path string, data []byte) (bool, error) {
+		committed, err := writeManagedConfig(ctx, path, data)
+		cancel()
+		return committed, err
+	}
+
+	if _, err := store.ImportContext(ctx, before, managedFixtureProfile(), "candidate-token", BackendKeychain); !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected cancellation before publication, got %v", err)
+	}
+	if after, err := store.Snapshot("target", true); err != nil || after.Exists {
+		t.Fatalf("cancelled import published a Profile: %v", err)
+	}
+	if len(keychain.entries) != 0 {
+		t.Errorf("cancelled import left %d staged credentials", len(keychain.entries))
+	}
+	if _, err := os.Lstat(filepath.Join(dir, config.OwnedProfileAnchor)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("cancelled import created a Profile anchor: %v", err)
 	}
 }
 

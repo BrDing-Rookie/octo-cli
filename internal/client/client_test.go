@@ -249,7 +249,7 @@ func TestDo_RetryOn503ThenSucceed(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(srv)
-	body, err := c.Do(context.Background(), &Request{Method: "GET", Path: "/t"})
+	body, err := c.Do(context.Background(), &Request{Method: http.MethodGet, Path: "/t", ExpectedSuccessStatus: http.StatusOK})
 	if err != nil {
 		t.Fatalf("Do: %v", err)
 	}

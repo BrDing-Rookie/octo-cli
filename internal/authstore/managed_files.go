@@ -1,6 +1,7 @@
 package authstore
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 )
@@ -332,6 +334,13 @@ func readPrivateFile(root *os.Root, name string, limit int64) ([]byte, error) {
 
 // openProfileLock serializes both Bot and unified profile writes.
 func openProfileLock(dir string) (*os.File, error) {
+	return openProfileLockContext(context.Background(), dir)
+}
+
+func openProfileLockContext(ctx context.Context, dir string) (*os.File, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
@@ -357,7 +366,7 @@ func openProfileLock(dir string) (*os.File, error) {
 	if err := checkLockFile(lock); err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
-	if err := lockManagedFile(lock); err != nil {
+	if err := waitForProfileLock(ctx, lock); err != nil {
 		return nil, errors.Join(err, lock.Close())
 	}
 	if err := checkLockFile(lock); err != nil {
@@ -367,6 +376,20 @@ func openProfileLock(dir string) (*os.File, error) {
 		return nil, errors.Join(err, lock.Close())
 	}
 	return lock, nil
+}
+
+func waitForProfileLock(ctx context.Context, lock *os.File) error {
+	for ctx.Err() == nil {
+		acquired, err := tryLockManagedFile(lock)
+		if err != nil || acquired {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	return ctx.Err()
 }
 
 func checkLockFile(lock *os.File) error {
@@ -396,9 +419,19 @@ func checkLockTokenReference(dir, path string) error {
 	return nil
 }
 
-// writeManagedFile returns true once replacement is visible, even if a
-// subsequent directory sync fails.
 func writeManagedFile(path string, data []byte) (bool, error) {
+	return writeManagedConfig(context.Background(), path, data)
+}
+
+func writeManagedConfig(ctx context.Context, path string, data []byte) (bool, error) {
+	return writeManagedFileWithReplace(path, data, func(from, to string) (bool, error) {
+		return replaceManagedFile(ctx, from, to)
+	})
+}
+
+// writeManagedFileWithReplace returns true once replacement is visible, even
+// if a subsequent directory sync fails.
+func writeManagedFileWithReplace(path string, data []byte, replace func(from, to string) (bool, error)) (bool, error) {
 	dir := filepath.Dir(path)
 	tmp, err := os.CreateTemp(dir, ".managed-*")
 	if err != nil {
@@ -416,7 +449,7 @@ func writeManagedFile(path string, data []byte) (bool, error) {
 	if err := errors.Join(err, tmp.Close()); err != nil {
 		return false, err
 	}
-	return replaceManagedFile(tmp.Name(), path)
+	return replace(tmp.Name(), path)
 }
 
 func secureManagedTemp(tmp *os.File) error {

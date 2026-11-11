@@ -88,7 +88,7 @@ func TestWindowsManagedReplacementWaitsForReader(t *testing.T) {
 	}
 	closed := make(chan error, 1)
 	time.AfterFunc(75*time.Millisecond, func() { closed <- reader.Close() })
-	committed, err := replaceManagedFile(staged, path)
+	committed, err := replaceManagedFile(t.Context(), staged, path)
 	if closeErr := <-closed; closeErr != nil {
 		t.Fatal(closeErr)
 	}
@@ -110,14 +110,14 @@ func TestWindowsPublishManagedAnchorDoesNotReplace(t *testing.T) {
 	if err := os.Link(seal, stage); err != nil {
 		t.Fatal(err)
 	}
-	if committed, err := publishManagedAnchor(stage, anchor); committed || err == nil {
+	if committed, err := publishManagedAnchor(t.Context(), stage, anchor); committed || err == nil {
 		t.Fatalf("publication replaced an existing destination: %v, %v", committed, err)
 	}
 	assertOwnershipFixture(t, anchor, []byte("existing"))
 	if err := os.Remove(anchor); err != nil {
 		t.Fatal(err)
 	}
-	if committed, err := publishManagedAnchor(stage, anchor); !committed || err != nil {
+	if committed, err := publishManagedAnchor(t.Context(), stage, anchor); !committed || err != nil {
 		t.Fatalf("publish the prepared anchor: %v", err)
 	}
 	assertOwnershipFixture(t, stage, nil)
