@@ -110,7 +110,15 @@ func redactRedirectLocation(location string, requestSecrets, responseSecretField
 	if len(responseSecretFields) > 0 {
 		return secretMask
 	}
-	return maskOrSuppressValue(location, requestSecrets)
+	if len(requestSecrets) == 0 {
+		return location
+	}
+	// Decode percent escapes for inspection and keep the original signed URL for output.
+	decoded, err := url.PathUnescape(location)
+	if err != nil || containsAnySecret(location, requestSecrets) || containsAnySecret(decoded, requestSecrets) {
+		return secretMask
+	}
+	return location
 }
 
 // redactSecrets masks every non-empty SecretValues entry found in s. Values are
@@ -950,15 +958,17 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && strings.HasPrefix(urlErr.Err.Error(), "failed to parse Location header ") {
+			// net/http received the redirect before failing to parse its
+			// Location. Return a terminal error to avoid replaying the request.
+			return nil, output.ErrNetwork("server returned an invalid redirect location", "")
+		}
 		// *url.Error.Error() embeds the whole request URL, so an x-octo-secret
 		// path parameter (invite / share token) would otherwise reach the default
 		// stderr error envelope — no --verbose needed to leak it.
 		msg := redactSecrets(err.Error(), req.SecretValues)
-		var urlErr *url.Error
-		if len(req.ResponseSecretFields) > 0 ||
-			(errors.As(err, &urlErr) && strings.HasPrefix(urlErr.Err.Error(), "failed to parse Location header ")) {
-			// net/http parses Location before CheckRedirect and includes the
-			// raw header in the error when parsing fails.
+		if len(req.ResponseSecretFields) > 0 {
 			msg = "transport error"
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
