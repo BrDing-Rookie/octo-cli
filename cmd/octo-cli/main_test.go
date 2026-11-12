@@ -8,13 +8,7 @@ import (
 	"testing"
 )
 
-// hermeticEnv returns the inherited environment with every OCTO_-prefixed
-// variable removed, followed by extra. Subprocess tests must not read the
-// developer's own credentials or output settings: the CLI resolves a token from
-// an ordered variable list (internal/credential/env_provider.go) and also reads
-// OCTO_CONFIG_DIR, OCTO_SPACE_ID and OCTO_FORMAT, so neutralising names one by
-// one silently drifts out of date whenever a variable is added. Sweeping the
-// prefix and re-adding only what a test needs keeps the list explicit.
+// hermeticEnv gives subprocess fixtures an explicit credential and config environment.
 func hermeticEnv(extra ...string) []string {
 	inherited := os.Environ()
 	env := make([]string, 0, len(inherited)+len(extra))
@@ -95,7 +89,7 @@ func TestMain_MissingTokenExitCode(t *testing.T) {
 	// Drop every OCTO_ token/selector variable and point at an empty credential
 	// store so no profile and no env token resolve, and Validate trips on the
 	// missing token instead of the command reaching the network.
-	cmd.Env = hermeticEnv("OCTO_CONFIG_DIR=" + t.TempDir())
+	cmd.Env = hermeticEnv("OCTO_CONFIG_DIR=" + filepath.Join(t.TempDir(), "cli"))
 	errOut, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatal("expected non-zero exit")

@@ -56,7 +56,7 @@ func TestNewRootCmd_ParentCommandSkipAuthAndRejectUnknown(t *testing.T) {
 			// Empty token: the auth gate would fail loudly if it ran. The
 			// whole point of the annotation is that it does NOT run for
 			// service parents.
-			f.SetConfig(&config.Config{APIBaseURL: "http://localhost", BotToken: ""})
+			f.SetConfig(&config.Config{APIBaseURL: "http://localhost", Token: ""})
 			root := NewRootCmd(f.Factory)
 			root.SetArgs(tc.args)
 			var buf bytes.Buffer
@@ -96,7 +96,7 @@ func TestNewRootCmd_ParentCommandSkipAuthAndRejectUnknown(t *testing.T) {
 // command from auth.
 func TestNewRootCmd_LeafStillRequiresAuth(t *testing.T) {
 	f := newTestFactoryWithReg()
-	f.SetConfig(&config.Config{APIBaseURL: "http://localhost", BotToken: ""})
+	f.SetConfig(&config.Config{APIBaseURL: "http://localhost", Token: ""})
 	root := NewRootCmd(f.Factory)
 	// `octo-cli example record list` is a leaf under `example record` (which has the annotation).
 	root.SetArgs([]string{"example", "record", "list"})

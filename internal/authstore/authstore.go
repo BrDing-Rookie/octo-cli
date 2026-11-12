@@ -1,345 +1,346 @@
-// Package authstore persists bot credentials on disk: non-secret profile
-// metadata in plaintext config.json and the tokens themselves in an AES-256-GCM
-// encrypted credentials.enc. Everything lives in a single per-user directory
-// (~/.octo-cli by default, override with OCTO_CONFIG_DIR).
-//
-// The trust boundary is the OS user account: the encryption key is derived from
-// machine-bound material, so the encrypted file resists off-machine leakage
-// (accidental commit, backup, cloud sync) but not a same-user process that can
-// run octo. Isolating mutually-distrusting bots requires separate OS users or
-// separate OCTO_CONFIG_DIR values — the CLI does not pretend otherwise.
 package authstore
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
-)
+	"unicode/utf8"
 
-// EnvConfigDir overrides the default config directory when set.
-const EnvConfigDir = "OCTO_CONFIG_DIR"
+	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
+	"github.com/Mininglamp-OSS/octo-cli/internal/output"
+)
 
 const (
-	configFile = "config.json"
-	credFile   = "credentials.enc"
-	saltFile   = "cred.salt"
-
-	dirPerm  os.FileMode = 0o700
-	metaPerm os.FileMode = 0o644
-	secPerm  os.FileMode = 0o600
+	configFile  = "config.json"
+	entryIDSize = 16
+	storeHint   = "check the configuration directory and credential storage"
 )
 
-// Status is the outcome of resolving an active profile from selectors.
-type Status int
+type storeError string
 
-const (
-	// StatusFound means exactly one profile resolved (by selector or as the sole entry).
-	StatusFound Status = iota
-	// StatusNone means zero profiles are configured — the caller should fall back to env.
-	StatusNone
-	// StatusAmbiguous means two or more profiles exist and no selector was given — the caller must error.
-	StatusAmbiguous
-	// StatusMissing means a selector was given but matched nothing or was inconsistent.
-	StatusMissing
-)
+func (e storeError) Error() string { return string(e) }
 
-// ProfileMeta is the non-secret metadata stored per profile (never the token).
-type ProfileMeta struct {
-	APIBaseURL string `json:"api_base_url,omitempty"`
-	SpaceID    string `json:"space_id,omitempty"`
-	BotKind    string `json:"bot_kind,omitempty"`
-	RobotID    string `json:"robot_id,omitempty"`
-	CreatedAt  string `json:"created_at,omitempty"`
+// ErrUnavailable means the system credential store is absent or unavailable.
+const ErrUnavailable = storeError("system credential storage is unavailable")
+
+// SystemStore reads and writes a system credential by its namespaced account.
+// It returns fs.ErrNotExist for a missing entry and ErrUnavailable only when
+// the backend cannot be used. Permission and other failures are returned as-is.
+type SystemStore interface {
+	Put(context.Context, string, string) error
+	Get(context.Context, string) (string, error)
+	Delete(context.Context, string) error
 }
 
-// configFileShape is the on-disk config.json layout.
-type configFileShape struct {
-	Profiles map[string]ProfileMeta `json:"profiles"`
-}
-
-// Store reads and writes the credential directory.
+// Store persists configuration and immutable credential entries.
 type Store struct {
-	dir string
+	dir    string
+	system SystemStore
 }
 
-// New resolves the config directory and returns a Store. The directory is not
-// created until a write occurs, so read-only callers on a fresh machine see an
-// empty store rather than an error.
-func New() (*Store, error) {
-	dir, err := resolveDir()
-	if err != nil {
-		return nil, err
+// New resolves the config directory. A nil backend uses the native store.
+func New(system SystemStore) (*Store, error) {
+	dir := os.Getenv(EnvConfigDir)
+	if dir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, storageError("could not locate the user home directory", err)
+		}
+		dir = filepath.Join(home, ".octo", "cli")
 	}
-	return &Store{dir: dir}, nil
+	absolute, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, storageError("could not resolve the configuration directory", err)
+	}
+	if system == nil {
+		system = nativeStore{}
+	}
+	return &Store{dir: absolute, system: system}, nil
 }
 
-// Dir returns the resolved config directory.
-func (s *Store) Dir() string { return s.dir }
-
-func resolveDir() (string, error) {
-	if d := os.Getenv(EnvConfigDir); d != "" {
-		return d, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home dir: %w", err)
-	}
-	return filepath.Join(home, ".octo-cli"), nil
+// View runs a read while holding the same lock used for publication and cleanup.
+func (s *Store) View(ctx context.Context, fn func(*Config) error) error {
+	return s.withConfig(ctx, false, fn)
 }
 
-func (s *Store) configPath() string { return filepath.Join(s.dir, configFile) }
-func (s *Store) credPath() string   { return filepath.Join(s.dir, credFile) }
-func (s *Store) saltPath() string   { return filepath.Join(s.dir, saltFile) }
-
-// LoadProfiles returns the profile metadata map. A missing config.json yields an
-// empty (non-nil) map.
-func (s *Store) LoadProfiles() (map[string]ProfileMeta, error) {
-	data, err := os.ReadFile(s.configPath())
-	if os.IsNotExist(err) {
-		return map[string]ProfileMeta{}, nil
+func (s *Store) withConfig(ctx context.Context, create bool, fn func(*Config) error) error {
+	if err := ctx.Err(); err != nil {
+		return storageError("configuration access was canceled", err)
 	}
+	exists, err := s.checkDir(create)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", configFile, err)
+		return storageError("could not access a private configuration directory", err)
 	}
-	var cf configFileShape
-	if err := json.Unmarshal(data, &cf); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", configFile, err)
+	if !exists {
+		return fn(emptyConfig())
 	}
-	if cf.Profiles == nil {
-		cf.Profiles = map[string]ProfileMeta{}
+	unlock, err := lockDirectory(ctx, s.dir)
+	if err != nil {
+		return storageError("could not lock the configuration directory", err)
 	}
-	return cf.Profiles, nil
+	defer unlock()
+	cfg, err := s.load()
+	if err != nil {
+		return err
+	}
+	return fn(cfg)
 }
 
-// Count returns the number of configured profiles.
-func (s *Store) Count() (int, error) {
-	p, err := s.LoadProfiles()
-	if err != nil {
-		return 0, err
-	}
-	return len(p), nil
+func emptyConfig() *Config {
+	return &Config{Version: 1, Profiles: make(map[string]Profile)}
 }
 
-// ensureDir creates the config directory and tightens its permissions when a
-// pre-existing directory is more permissive than dirPerm. MkdirAll alone leaves
-// an already-existing (e.g. 0755, restored-from-backup) directory untouched,
-// which would leak profile names via a directory listing.
-func (s *Store) ensureDir() error {
-	if err := os.MkdirAll(s.dir, dirPerm); err != nil {
-		return fmt.Errorf("create %s: %w", s.dir, err)
+func (s *Store) load() (*Config, error) {
+	raw, err := readPrivate(filepath.Join(s.dir, configFile))
+	if errors.Is(err, fs.ErrNotExist) {
+		return emptyConfig(), nil
 	}
-	info, err := os.Stat(s.dir)
 	if err != nil {
-		return fmt.Errorf("stat %s: %w", s.dir, err)
+		return nil, storageError("could not read the profile configuration", err)
 	}
-	if info.Mode().Perm()&0o077 != 0 { // any group/other access → tighten
-		if err := os.Chmod(s.dir, dirPerm); err != nil {
-			return fmt.Errorf("chmod %s: %w", s.dir, err)
+
+	var cfg Config
+	if !utf8.Valid(raw) || json.Unmarshal(raw, &cfg) != nil || cfg.Version != 1 || cfg.Profiles == nil {
+		return nil, invalidProfile("invalid or unsupported profile configuration version")
+	}
+	if cfg.CurrentProfile != "" {
+		if _, ok := cfg.Profiles[cfg.CurrentProfile]; !ok || ValidateName(cfg.CurrentProfile) != nil {
+			return nil, invalidProfile("current_profile does not identify a valid configured profile")
 		}
 	}
-	return nil
+	return &cfg, nil
 }
 
-func (s *Store) saveProfiles(profiles map[string]ProfileMeta) error {
-	if err := s.ensureDir(); err != nil {
-		return err
+// ReadToken reads the chosen profile source. Call it inside View when
+// resolving a stored profile, so its entry cannot be removed during the read.
+func (s *Store) ReadToken(ctx context.Context, p *Profile) (string, error) {
+	if err := p.ValidateSource(); err != nil {
+		return "", err
 	}
-	data, err := json.MarshalIndent(configFileShape{Profiles: profiles}, "", "  ")
+	if p.TokenSource.Type == TokenFile {
+		token, err := credential.ReadFile(s.externalPath(p.TokenSource.Path))
+		if err != nil {
+			return "", output.ErrAuth("profile credential file: "+err.Error(), "check the configured token file")
+		}
+		return token, nil
+	}
+
+	token, err := s.readManaged(ctx, p.TokenSource)
 	if err != nil {
-		return fmt.Errorf("marshal %s: %w", configFile, err)
+		return "", storageError("could not read the profile's managed credential", err)
 	}
-	return atomicWrite(s.configPath(), append(data, '\n'), metaPerm)
+	if credential.ValidateBearer(token) != nil {
+		return "", invalidProfile("profile has an invalid managed credential")
+	}
+	return token, nil
 }
 
-// SaveProfile stores (or replaces) a profile's metadata and token.
-//
-// The two files can't be written atomically together, so order them to keep the
-// invariant "a profile listed in config.json has a token in credentials.enc":
-// write the token first, then the metadata. A crash in between leaves an
-// orphaned token (invisible, since nothing lists it) rather than a listed
-// profile with no token.
-func (s *Store) SaveProfile(name string, meta *ProfileMeta, token string) error {
-	profiles, err := s.LoadProfiles()
-	if err != nil {
-		return err
+func (s *Store) readManaged(ctx context.Context, source TokenSource) (string, error) {
+	if source.Backend == EncryptedFile {
+		return s.readEncrypted(source.entryID())
 	}
-	tokens, err := s.loadTokens()
-	if err != nil {
-		return err
-	}
-	profiles[name] = *meta
-	tokens[name] = token
-	if err := s.saveTokens(tokens); err != nil {
-		return err
-	}
-	return s.saveProfiles(profiles)
-}
-
-// UpdateProfileAPIBaseURL changes only the non-secret endpoint metadata for an
-// existing profile.
-func (s *Store) UpdateProfileAPIBaseURL(name, apiBaseURL string) error {
-	profiles, err := s.LoadProfiles()
-	if err != nil {
-		return err
-	}
-	meta, ok := profiles[name]
-	if !ok {
-		return fmt.Errorf("profile %q not found", name)
-	}
-	meta.APIBaseURL = apiBaseURL
-	profiles[name] = meta
-	return s.saveProfiles(profiles)
-}
-
-// RemoveProfile deletes a profile's metadata and token. Removing an absent
-// profile is a no-op.
-//
-// Mirror SaveProfile's ordering to preserve the same invariant: drop the
-// metadata first, then the token. A crash in between leaves an orphaned token
-// (harmless) rather than a listed profile whose token is already gone.
-func (s *Store) RemoveProfile(name string) error {
-	profiles, err := s.LoadProfiles()
-	if err != nil {
-		return err
-	}
-	tokens, err := s.loadTokens()
-	if err != nil {
-		return err
-	}
-	delete(profiles, name)
-	delete(tokens, name)
-	if err := s.saveProfiles(profiles); err != nil {
-		return err
-	}
-	return s.saveTokens(tokens)
-}
-
-// ProfileForRobotID returns the name of the profile that records the given
-// robot id, if any. Used at login to reject a second profile claiming a bot id
-// already owned by another profile (which would make --bot-id ambiguous).
-func (s *Store) ProfileForRobotID(robotID string) (name string, found bool, err error) {
-	profiles, err := s.LoadProfiles()
-	if err != nil {
-		return "", false, err
-	}
-	n, _, ok := findByRobotID(profiles, robotID)
-	return n, ok, nil
-}
-
-// GetToken returns the token for a profile, or an error if absent.
-func (s *Store) GetToken(name string) (string, error) {
-	tokens, err := s.loadTokens()
+	account, legacy, err := s.accounts(source.Entry)
 	if err != nil {
 		return "", err
 	}
-	tok, ok := tokens[name]
-	if !ok {
-		return "", fmt.Errorf("no stored token for profile %q", name)
+	token, err := s.system.Get(ctx, account)
+	if errors.Is(err, fs.ErrNotExist) && legacy != "" {
+		return s.system.Get(ctx, legacy)
 	}
-	return tok, nil
+	return token, err
 }
 
-// ActiveProfile resolves which profile to use from the given selectors:
-//   - both name and botID: select by name, require its robot_id == botID
-//   - botID only: select the profile whose robot_id == botID
-//   - name only: select by name
-//   - neither: sole profile if exactly one, else ambiguous/none
-//
-// The returned status tells the caller how to react (found / none / ambiguous /
-// missing). resolvedName and meta are only meaningful when status is found.
-func (s *Store) ActiveProfile(name, botID string) (string, ProfileMeta, Status, error) {
-	profiles, err := s.LoadProfiles()
+func (s *Store) accounts(entry string) (account, legacy string, err error) {
+	dir, err := filepath.EvalSymlinks(s.dir)
 	if err != nil {
-		return "", ProfileMeta{}, StatusMissing, err
+		return "", "", err
+	}
+	canonical, err := credentialDirectory(dir)
+	if err != nil {
+		return "", "", err
+	}
+	if canonical != dir {
+		// Older imports may have hashed the original spelling of the path.
+		legacy = credentialAccount(dir, entry)
+	}
+	return credentialAccount(canonical, entry), legacy, nil
+}
+
+func credentialAccount(dir, entry string) string {
+	// The digest also keeps arbitrary path and entry characters out of helpers.
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(dir+"\x00"+entry)))
+}
+
+// Import publishes a new credential and its profile if the target still
+// matches the snapshot used to resolve the import.
+// The warning describes failures after the configuration became visible.
+func (s *Store) Import(ctx context.Context, name string, snapshot *Config, implicit bool, p *Profile, token string) (warning string, err error) {
+	if err := ValidateName(name); err != nil {
+		return "", err
+	}
+	target, err := p.Scope()
+	if err != nil {
+		return "", err
+	}
+	if err := credential.ValidateBearer(token); err != nil {
+		return "", output.ErrAuth(err.Error(), "")
 	}
 
-	switch {
-	case name != "" && botID != "":
-		meta, ok := profiles[name]
-		if !ok || meta.RobotID != botID {
-			return "", ProfileMeta{}, StatusMissing, nil
+	err = s.withConfig(ctx, true, func(cfg *Config) error {
+		previous := snapshot.Profiles[name]
+		if cfg.Profiles[name] != previous || implicit && cfg.CurrentProfile != snapshot.CurrentProfile {
+			return output.ErrWithHint("config", "PROFILE_CHANGED", "profile changed during import", "retry the import")
 		}
-		return name, meta, StatusFound, nil
 
-	case botID != "":
-		if n, meta, ok := findByRobotID(profiles, botID); ok {
-			return n, meta, StatusFound, nil
+		source, err := s.stageCredential(ctx, token)
+		if err != nil {
+			return err
 		}
-		return "", ProfileMeta{}, StatusMissing, nil
+		target.TokenSource = source
+		cfg.Profiles[name] = target
+		cfg.CurrentProfile = name
+		warning, err = s.publish(ctx, cfg, previous.TokenSource)
+		if err != nil {
+			s.discard(source)
+		}
+		return err
+	})
+	return warning, err
+}
 
-	case name != "":
-		meta, ok := profiles[name]
+// Logout removes a selected profile and cleans its unreferenced managed entry.
+func (s *Store) Logout(ctx context.Context, name string, scope func(*Profile) error) (removed, warning string, err error) {
+	err = s.withConfig(ctx, false, func(cfg *Config) error {
+		removed = name
+		if removed == "" {
+			removed = cfg.CurrentProfile
+		}
+		p, ok := cfg.Profiles[removed]
 		if !ok {
-			return "", ProfileMeta{}, StatusMissing, nil
+			return output.ErrAuth("profile not found", "select an existing profile")
 		}
-		return name, meta, StatusFound, nil
-
-	default:
-		switch len(profiles) {
-		case 0:
-			return "", ProfileMeta{}, StatusNone, nil
-		case 1:
-			n := soleKey(profiles)
-			return n, profiles[n], StatusFound, nil
-		default:
-			return "", ProfileMeta{}, StatusAmbiguous, nil
+		if err := scope(&p); err != nil {
+			return err
 		}
-	}
-}
-
-func findByRobotID(profiles map[string]ProfileMeta, robotID string) (string, ProfileMeta, bool) {
-	// Deterministic order so a duplicated robot_id resolves consistently.
-	names := sortedKeys(profiles)
-	for _, n := range names {
-		if profiles[n].RobotID == robotID {
-			return n, profiles[n], true
+		if err := p.ValidateSource(); err != nil {
+			return err
 		}
-	}
-	return "", ProfileMeta{}, false
+		delete(cfg.Profiles, removed)
+		if cfg.CurrentProfile == removed {
+			cfg.CurrentProfile = ""
+		}
+		warning, err = s.publish(ctx, cfg, p.TokenSource)
+		return err
+	})
+	return removed, warning, err
 }
 
-func soleKey(profiles map[string]ProfileMeta) string {
-	for k := range profiles {
-		return k
-	}
-	return ""
-}
-
-func sortedKeys(profiles map[string]ProfileMeta) []string {
-	names := make([]string, 0, len(profiles))
-	for k := range profiles {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	return names
-}
-
-// atomicWrite writes data to a temp file in the same directory then renames it
-// into place, so a crash never leaves a half-written file.
-func atomicWrite(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
+func (s *Store) stageCredential(ctx context.Context, token string) (TokenSource, error) {
+	source, err := s.putManaged(ctx, token)
 	if err != nil {
-		return fmt.Errorf("create temp in %s: %w", dir, err)
+		return TokenSource{}, storageError("could not save the new managed credential", err)
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() //nolint:errcheck // no-op after a successful rename
+	saved, err := s.readManaged(ctx, source)
+	if err != nil || saved != token {
+		s.discard(source)
+		return TokenSource{}, storageError("could not verify the saved managed credential", err)
+	}
+	return source, nil
+}
 
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close() //nolint:errcheck // returning the write error, which is primary
-		return fmt.Errorf("write temp: %w", err)
+func (s *Store) putManaged(ctx context.Context, token string) (TokenSource, error) {
+	if err := ctx.Err(); err != nil {
+		return TokenSource{}, err
 	}
-	if err := tmp.Chmod(perm); err != nil {
-		_ = tmp.Close() //nolint:errcheck // returning the chmod error, which is primary
-		return fmt.Errorf("chmod temp: %w", err)
+	var id [entryIDSize]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return TokenSource{}, err
 	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp: %w", err)
+	source := TokenSource{Type: ManagedStore, Backend: Keychain, Entry: hex.EncodeToString(id[:])}
+	account, _, err := s.accounts(source.Entry)
+	if err != nil {
+		return TokenSource{}, err
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename temp to %s: %w", path, err)
+	if err := s.system.Put(ctx, account, token); !errors.Is(err, ErrUnavailable) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// The system store may have committed the new entry before cancellation.
+			s.discard(source)
+		}
+		return source, err
 	}
-	return nil
+	source.Backend = EncryptedFile
+	published, err := s.writeEncrypted(ctx, source.entryID(), token)
+	if published && err != nil {
+		s.discard(source)
+	}
+	return source, err
+}
+
+func (s *Store) publish(ctx context.Context, cfg *Config, previous TokenSource) (string, error) {
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", storageError("could not encode the profile configuration", err)
+	}
+	published, err := writePrivate(ctx, filepath.Join(s.dir, configFile), append(raw, '\n'))
+	if !published {
+		return "", storageError("could not publish the profile configuration", err)
+	}
+	if err != nil {
+		return "profile was published, but its directory could not be synced", nil
+	}
+	if previous.Type == ManagedStore && !referenced(cfg, previous) {
+		if err := s.deleteManaged(context.WithoutCancel(ctx), previous); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "could not clean up the unreferenced managed credential", nil
+		}
+	}
+	return "", nil
+}
+
+func referenced(cfg *Config, source TokenSource) bool {
+	entry := source.entryID()
+	for _, p := range cfg.Profiles {
+		if p.TokenSource.Type == ManagedStore && p.TokenSource.Backend == source.Backend && p.TokenSource.entryID() == entry {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Store) discard(source TokenSource) {
+	_ = s.deleteManaged(context.Background(), source) //nolint:errcheck // preserve the original failure
+}
+
+func (s *Store) deleteManaged(ctx context.Context, source TokenSource) error {
+	if source.Backend == EncryptedFile {
+		if entry, err := hex.DecodeString(source.Entry); err != nil || len(entry) != entryIDSize {
+			return invalidProfile("profile has an invalid encrypted credential reference")
+		}
+		return os.Remove(s.encryptedPath(source.entryID()))
+	}
+	if source.Backend != Keychain || !validID(source.Entry) {
+		return invalidProfile("profile has an invalid system credential reference")
+	}
+	account, legacy, err := s.accounts(source.Entry)
+	if err != nil {
+		return err
+	}
+	err = s.system.Delete(ctx, account)
+	if errors.Is(err, fs.ErrNotExist) && legacy != "" {
+		return s.system.Delete(ctx, legacy)
+	}
+	return err
+}
+
+func storageError(message string, cause error) error {
+	if errors.Is(cause, fs.ErrPermission) {
+		return output.ErrWithHint("permission", "PERMISSION_DENIED", message, storeHint)
+	}
+	return output.ErrWithHint("config", "PROFILE_STORAGE_ERROR", message, storeHint)
 }

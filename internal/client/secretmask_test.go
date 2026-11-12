@@ -55,7 +55,7 @@ func TestSecretValues_JSONEscapingDoesNotDefeatTheMask(t *testing.T) {
 			var trace bytes.Buffer
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "bf_t"},
+				&credential.Credential{Token: "bf_t"},
 				Options{Verbose: true, ErrOut: &trace},
 			)
 			if _, err := c.Do(context.Background(), &Request{
@@ -89,7 +89,7 @@ func TestSecretValues_JSONEscapingDoesNotDefeatTheDryRunMask(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := New(
 				&config.Config{APIBaseURL: "https://octo.test"},
-				&credential.BotCredential{Token: "bf_t"},
+				&credential.Credential{Token: "bf_t"},
 				Options{DryRun: true, ErrOut: io.Discard},
 			)
 			body, err := c.Do(context.Background(), &Request{
@@ -119,7 +119,7 @@ func TestSecretValues_NestedAndRepeatedSecretsAreMasked(t *testing.T) {
 
 	c := New(
 		&config.Config{APIBaseURL: srv.URL},
-		&credential.BotCredential{Token: "bf_t"},
+		&credential.Credential{Token: "bf_t"},
 		Options{Verbose: true, ErrOut: &trace},
 	)
 	if _, err := c.Do(context.Background(), &Request{
@@ -163,7 +163,7 @@ func TestTransportError_DoesNotLeakASecretPathParameter(t *testing.T) {
 
 	c := New(
 		&config.Config{APIBaseURL: deadURL},
-		&credential.BotCredential{Token: "uk_t"},
+		&credential.Credential{Token: "uk_t"},
 		Options{NoRetry: true, ErrOut: io.Discard},
 	)
 	_, err := c.Do(context.Background(), &Request{
@@ -203,7 +203,7 @@ func TestTransportError_RedactionSurvivesRetries(t *testing.T) {
 	var trace bytes.Buffer
 	c := New(
 		&config.Config{APIBaseURL: deadURL},
-		&credential.BotCredential{Token: "uk_t"},
+		&credential.Credential{Token: "uk_t"},
 		// Verbose so the per-retry "last error" lines are captured too.
 		Options{Verbose: true, ErrOut: &trace, Timeout: "2s"},
 	)
@@ -272,7 +272,7 @@ func TestBackendError_DoesNotLeakASecretItEchoes(t *testing.T) {
 
 	c := New(
 		&config.Config{APIBaseURL: srv.URL},
-		&credential.BotCredential{Token: "uk_t"},
+		&credential.Credential{Token: "uk_t"},
 		Options{NoRetry: true, ErrOut: io.Discard},
 	)
 	_, err := c.Do(context.Background(), &Request{
@@ -391,7 +391,7 @@ func TestBackendError_RedactionKeepsTheBodyParseable(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -436,7 +436,7 @@ func TestBackendError_RedactionSurvivesForeignJSONEscaping(t *testing.T) {
 
 	c := New(
 		&config.Config{APIBaseURL: srv.URL},
-		&credential.BotCredential{Token: "uk_t"},
+		&credential.Credential{Token: "uk_t"},
 		Options{NoRetry: true, ErrOut: io.Discard},
 	)
 	_, err := c.Do(context.Background(), &Request{
@@ -474,7 +474,7 @@ func TestBackendError_NonJSONBodyStillRedacted(t *testing.T) {
 
 	c := New(
 		&config.Config{APIBaseURL: srv.URL},
-		&credential.BotCredential{Token: "uk_t"},
+		&credential.Credential{Token: "uk_t"},
 		Options{NoRetry: true, ErrOut: io.Discard},
 	)
 	_, err := c.Do(context.Background(), &Request{
@@ -597,7 +597,7 @@ func TestBackendError_MachineReadableCodeSurvivesRedaction(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -770,7 +770,7 @@ func TestBackendError_CodeExemptionFollowsTheRule(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -826,7 +826,7 @@ func TestBackendError_CodePositionAgreesWithOtherCodeKeys(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -881,7 +881,7 @@ func TestResponseMask_ASecretInAKeyPositionIsMasked(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -945,7 +945,7 @@ func TestResponseMask_KeyMaskingDoesNotDestroyTheContract(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -1050,7 +1050,7 @@ func TestBackendError_AShortSecretNeverSurvivesInTheCodePosition(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -1094,7 +1094,7 @@ func TestBackendError_ARecognisedCodeIsStillExemptFromTheNewRule(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -1186,7 +1186,7 @@ func TestBackendError_AShortSecretNeverSurvivesANonJSONBody(t *testing.T) {
 			var errOut bytes.Buffer
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: &errOut},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -1231,7 +1231,7 @@ func TestBackendError_ANonJSONBodyWithoutASecretKeepsItsDiagnostic(t *testing.T)
 
 	c := New(
 		&config.Config{APIBaseURL: srv.URL},
-		&credential.BotCredential{Token: "uk_t"},
+		&credential.Credential{Token: "uk_t"},
 		Options{NoRetry: true, ErrOut: io.Discard},
 	)
 	_, err := c.Do(context.Background(), &Request{
@@ -1278,7 +1278,7 @@ func TestBackendError_AJSONPrefixDoesNotTruncateTheDiagnostic(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -1329,7 +1329,7 @@ func TestResponseMask_ADeclaredSecretIsMaskedInEveryJSONScalarKind(t *testing.T)
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{
@@ -1369,7 +1369,7 @@ func TestResponseMask_OrdinaryNumbersAreNotSuppressed(t *testing.T) {
 
 	c := New(
 		&config.Config{APIBaseURL: srv.URL},
-		&credential.BotCredential{Token: "uk_t"},
+		&credential.Credential{Token: "uk_t"},
 		Options{NoRetry: true, ErrOut: io.Discard},
 	)
 	_, err := c.Do(context.Background(), &Request{
@@ -1408,7 +1408,7 @@ func TestResponseMask_AShortSecretNeverSurvivesInAKeyPosition(t *testing.T) {
 
 			c := New(
 				&config.Config{APIBaseURL: srv.URL},
-				&credential.BotCredential{Token: "uk_t"},
+				&credential.Credential{Token: "uk_t"},
 				Options{NoRetry: true, ErrOut: io.Discard},
 			)
 			_, err := c.Do(context.Background(), &Request{

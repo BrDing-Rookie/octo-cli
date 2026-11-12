@@ -21,31 +21,12 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/testfixture"
 )
 
-// TestMain isolates the whole package from the developer's own OCTO_
-// environment. Tests here build their fixtures with t.Setenv or an injected
-// Config, and any ambient OCTO_ variable can outrank or redirect that fixture:
-// OCTO_BOT_ID selects a stored credential profile, OCTO_TOKEN outranks
-// OCTO_BOT_TOKEN, OCTO_FORMAT reshapes the output the assertions read.
-//
-// The sweep is by prefix rather than by name on purpose. Naming variables is
-// what kept breaking: the clear list has been out of date three times
-// (OCTO_TOKEN, then OCTO_FORMAT, then OCTO_BOT_ID), each time because a new
-// variable was added without updating the tests. OCTO_MARKETPLACE_API_PREFIX
-// (cmd/service/run.go) is read straight from the environment with no config
-// constant behind it, so it is exactly the kind a by-name list misses.
-//
-// OCTO_CONFIG_DIR is re-set *after* the sweep: it must point at an empty temp
-// dir rather than be absent, or authstore falls back to the real user config
-// dir and a developer's stored profiles leak back in. Tests that need their own
-// store still override it with t.Setenv.
-//
-// The proxy family is swept for the same reason and is the second family that was
-// leaking in. An ambient https_proxy changes which machine the transfer transport
-// connects to, which is the exact property the transfer guard tests assert — so
-// those tests meant different things in different developers' shells, and one of
-// them passed for the wrong reason under a loopback-addressed proxy. Tests that want
-// a proxy now opt in with t.Setenv.
+// TestMain isolates the config, credentials, and proxy settings for fixtures.
 func TestMain(m *testing.M) {
+	if os.Getenv("OCTO_PROFILE_TEST_PROCESS") == "1" {
+		os.Exit(runProfileTestProcess())
+	}
+
 	dir, err := os.MkdirTemp("", "octo-cmd-test")
 	if err != nil {
 		panic(err)
@@ -206,7 +187,7 @@ func TestCmd_ConfigShow(t *testing.T) {
 	f.SetConfig(&config.Config{
 		APIBaseURL:       "http://gateway.local",
 		APIBaseURLSource: "profile",
-		BotToken:         "app_abcdefgh12345",
+		Token:            "app_abcdefgh12345",
 		Format:           "json",
 	})
 
@@ -225,19 +206,9 @@ func TestCmd_ConfigShow(t *testing.T) {
 	if data["api_base_url_source"] != "profile" {
 		t.Errorf("api_base_url_source = %v", data["api_base_url_source"])
 	}
-	// Masked token: "app_abcd***".
-	tok, _ := data["bot_token"].(string)
-	if !strings.HasSuffix(tok, "***") {
-		t.Errorf("bot_token not masked: %q", tok)
-	}
-	if strings.Contains(tok, "12345") {
-		t.Errorf("bot_token leaks raw suffix: %q", tok)
-	}
-	if data["bot_kind"] != "app_bot" {
-		t.Errorf("bot_kind = %v", data["bot_kind"])
-	}
-	if data["dmworkim_url"] != nil {
-		t.Errorf("empty URL should be null, got %v", data["dmworkim_url"])
+
+	if data["source"] != "test" || strings.Contains(out, "app_abcdefgh12345") {
+		t.Errorf("unexpected credential diagnostics: %s", out)
 	}
 }
 
@@ -253,9 +224,9 @@ func TestCmd_API_GET(t *testing.T) {
 	defer srv.Close()
 
 	f := newTestFactoryWithReg()
-	cfg := &config.Config{APIBaseURL: srv.URL, BotToken: "app_test", Format: "json"}
+	cfg := &config.Config{APIBaseURL: srv.URL, Token: "app_test", Format: "json"}
 	f.SetConfig(cfg)
-	cred := &credential.BotCredential{Token: "app_test"}
+	cred := &credential.Credential{Token: "app_test"}
 	f.SetCredential(cred)
 	cli := client.New(cfg, cred, client.Options{})
 	f.SetClient(cli)
@@ -290,10 +261,10 @@ func TestCmd_API_POSTBody(t *testing.T) {
 	defer srv.Close()
 
 	f := newTestFactoryWithReg()
-	cfg := &config.Config{APIBaseURL: srv.URL, BotToken: "app_test", Format: "json"}
+	cfg := &config.Config{APIBaseURL: srv.URL, Token: "app_test", Format: "json"}
 	f.SetConfig(cfg)
-	f.SetCredential(&credential.BotCredential{Token: "app_test"})
-	f.SetClient(client.New(cfg, &credential.BotCredential{Token: "app_test"}, client.Options{}))
+	f.SetCredential(&credential.Credential{Token: "app_test"})
+	f.SetClient(client.New(cfg, &credential.Credential{Token: "app_test"}, client.Options{}))
 
 	_, _, err := execRoot(t, f, "api", "POST", "/t", "--data", `{"key":"val"}`)
 	if err != nil {
@@ -345,9 +316,9 @@ func TestCmd_DryRunNoServerCall(t *testing.T) {
 	defer srv.Close()
 
 	f := newTestFactoryWithReg()
-	cfg := &config.Config{APIBaseURL: srv.URL, BotToken: "app_test", Format: "json"}
+	cfg := &config.Config{APIBaseURL: srv.URL, Token: "app_test", Format: "json"}
 	f.SetConfig(cfg)
-	cred := &credential.BotCredential{Token: "app_test"}
+	cred := &credential.Credential{Token: "app_test"}
 	f.SetCredential(cred)
 	// Dry-run goes through Client so we must build one with DryRun=true.
 	cli := client.New(cfg, cred, client.Options{DryRun: true})
@@ -382,13 +353,13 @@ func TestCmd_UnknownCommand(t *testing.T) {
 // yielding an authentication error for that command.
 func TestCmd_MissingTokenOnServiceCommand(t *testing.T) {
 	f := newTestFactoryWithReg()
-	f.SetConfig(&config.Config{APIBaseURL: "http://x", Format: "json"}) // no BotToken
+	f.SetConfig(&config.Config{APIBaseURL: "http://x", Format: "json"}) // no Token
 
 	_, _, err := execRoot(t, f, "example", "record", "list")
 	if err == nil {
 		t.Fatal("expected PersistentPreRunE to reject missing token")
 	}
-	if !strings.Contains(err.Error(), config.EnvToken) || strings.Contains(err.Error(), config.EnvBotToken) {
+	if !strings.Contains(err.Error(), config.EnvToken) || strings.Contains(err.Error(), "OCTO_BOT_TOKEN") {
 		t.Errorf("error should reference only %s, got: %v", config.EnvToken, err)
 	}
 }
@@ -430,27 +401,6 @@ func TestParseParamsJSON_EmptyAndInvalid(t *testing.T) {
 	}
 	if _, err := parseParamsJSON(`{bad json}`); err == nil {
 		t.Error("malformed spec should error")
-	}
-}
-
-func TestDefaultTokenSource(t *testing.T) {
-	t.Setenv(config.EnvToken, "")
-	t.Setenv(config.EnvBotToken, "")
-	if got := defaultTokenSource(""); got != "" {
-		t.Errorf("empty token → %q, want \"\"", got)
-	}
-	t.Setenv(config.EnvToken, "app_x")
-	if got := defaultTokenSource("app_x"); got != "env:"+config.EnvToken {
-		t.Errorf("source = %q, want env:%s", got, config.EnvToken)
-	}
-}
-
-func TestNullableString(t *testing.T) {
-	if got := nullableString(""); got != nil {
-		t.Errorf("empty → %v, want nil", got)
-	}
-	if got := nullableString("x"); got != "x" {
-		t.Errorf("non-empty → %v", got)
 	}
 }
 

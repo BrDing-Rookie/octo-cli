@@ -2,583 +2,194 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"sort"
-	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
-	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-// newAuthCmd returns `octo-cli auth` and its subcommands. These manage stored bot
-// credentials; tokens enter via stdin or a hidden prompt and are never accepted
-// on argv, so they don't leak into shell history or transcripts.
 func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "auth",
-		Short: "Manage stored Octo credentials (profiles)",
-	}
-	cmd.AddCommand(
-		newAuthLoginCmd(f),
-		newAuthStatusCmd(f),
-		newAuthUpdateCmd(f),
-		newAuthLogoutCmd(f),
-		newAuthListCmd(f),
-	)
+	cmd := &cobra.Command{Use: "auth", Short: "Manage local Token profiles"}
+	cmd.AddCommand(newAuthLoginCmd(f), newAuthListCmd(f), newAuthLogoutCmd(f))
 	return cmd
 }
 
 func authMutationPreRun(f *cmdutil.Factory, hint string) func(*cobra.Command, []string) error {
-	return func(cmd *cobra.Command, _ []string) error {
-		if !f.Globals.DryRun {
-			return nil
+	return func(_ *cobra.Command, _ []string) error {
+		if f.Globals.DryRun {
+			return failErr(f, output.ErrValidation("--dry-run is not supported for this command", hint))
 		}
-		return failErr(f, output.ErrValidation(
-			"--dry-run is not supported for auth "+cmd.Name(),
-			hint,
-		))
+		return nil
 	}
-}
-
-func newAuthUpdateCmd(f *cmdutil.Factory) *cobra.Command {
-	var (
-		apiBaseURL      string
-		clearAPIBaseURL bool
-	)
-
-	cmd := &cobra.Command{
-		Use:     "update",
-		Short:   "Update non-secret settings for a stored bot profile",
-		Long:    "Updates the selected profile's API base URL, or clears it with --clear-api-base-url. This local mutation rejects --dry-run.",
-		Args:    cobra.NoArgs,
-		PreRunE: authMutationPreRun(f, "omit --dry-run to update the stored profile"),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if clearAPIBaseURL && cmd.Flags().Changed("api-base-url") {
-				return failErr(f, output.ErrValidation(
-					"--api-base-url and --clear-api-base-url are mutually exclusive",
-					"pass exactly one of them",
-				))
-			}
-			if clearAPIBaseURL {
-				apiBaseURL = ""
-			} else {
-				if strings.TrimSpace(apiBaseURL) == "" {
-					return failErr(f, output.ErrValidation(
-						"--api-base-url or --clear-api-base-url is required",
-						"pass the public OCTO API origin for this Bot profile, or clear the stored origin",
-					))
-				}
-				normalized, err := config.NormalizeAPIBaseURL(apiBaseURL)
-				if err != nil {
-					return failErr(f, output.ErrValidation(
-						err.Error(),
-						"pass only the Octo gateway base URL, without a service path",
-					))
-				}
-				apiBaseURL = normalized
-			}
-
-			store, err := f.AuthStore()
-			if err != nil {
-				return failErr(f, err)
-			}
-			name, meta, status, err := store.ActiveProfile(f.Globals.Profile, selectorBotID(f))
-			if err != nil {
-				return failErr(f, err)
-			}
-			switch status {
-			case authstore.StatusFound:
-				if err := store.UpdateProfileAPIBaseURL(name, apiBaseURL); err != nil {
-					return failErr(f, err)
-				}
-				result := map[string]any{
-					"profile": name, "api_base_url": apiBaseURL,
-				}
-				putIfSet(result, "robot_id", meta.RobotID)
-				return emitJSON(f, result)
-			case authstore.StatusAmbiguous:
-				return failErr(f, output.ErrValidation(
-					"multiple profiles configured; specify which Bot to update",
-					"pass --bot-id <robot_id> or --profile <name>",
-				))
-			case authstore.StatusMissing:
-				return failErr(f, output.ErrAuth(
-					"no matching profile", "check `octo-cli auth list`",
-				))
-			default:
-				return failErr(f, output.ErrValidation(
-					"no stored profiles", "run `octo-cli auth login` first",
-				))
-			}
-		},
-	}
-	cmd.Flags().StringVar(&apiBaseURL, "api-base-url", "", "set this profile's API base URL (takes precedence over OCTO_API_BASE_URL)")
-	cmd.Flags().BoolVar(&clearAPIBaseURL, "clear-api-base-url", false, "remove the stored API base URL so OCTO_API_BASE_URL or the default applies")
-	return cmd
 }
 
 func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	var withToken bool
-	var tokenFile string
-	var apiBaseURL string
-
+	var tokenFile, apiBaseURL string
 	cmd := &cobra.Command{
-		Use:   "login",
-		Short: "Store a credential (read from a hidden prompt or stdin, never argv)",
-		Long: "Store a bearer credential under a profile. Identify a bot with --bot-id " +
-			"(its robot id, recommended) and/or --profile (a friendly name). The " +
-			"token is read from a hidden prompt on a terminal, or from stdin with " +
-			"--with-token, or from --token-file — never from the command line. " +
-			"This local credential write rejects --dry-run.",
+		Use:     "login",
+		Short:   "Import a Token into a local profile",
 		Args:    cobra.NoArgs,
-		PreRunE: authMutationPreRun(f, "omit --dry-run to store the credential locally"),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			botID := f.Globals.BotID
-			name := f.Globals.Profile
-
-			if botID == "" && name == "" {
-				id, perr := promptBotID(f)
-				if perr != nil {
-					return failErr(f, output.ErrValidation(fmt.Sprintf("read bot id: %v", perr), ""))
-				}
-				botID = id
-			}
-			if name == "" {
-				name = botID // profile name defaults to the robot id
-			}
-			if name == "" {
-				return failErr(f, output.ErrValidation(
-					"no profile identifier given",
-					"pass --bot-id <robot_id> (recommended) and/or --profile <name>"))
-			}
-
-			token, err := readToken(f, withToken, tokenFile)
+		PreRunE: authMutationPreRun(f, "remove --dry-run to import a token"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			token, err := loginTokenInput(cmd, f, withToken, tokenFile)
 			if err != nil {
 				return failErr(f, err)
 			}
-			if token == "" {
-				return failErr(f, output.ErrValidation(
-					"empty token", "provide a non-empty bearer credential"))
-			}
-
-			store, err := f.AuthStore()
-			if err != nil {
-				return failErr(f, err)
-			}
-			if err := assertBotIDFree(store, botID, name); err != nil {
-				return failErr(f, err)
-			}
-			if apiBaseURL != "" {
-				apiBaseURL, err = config.NormalizeAPIBaseURL(apiBaseURL)
-				if err != nil {
-					return failErr(f, output.ErrValidation(err.Error(), "pass only the Octo gateway base URL, without a service path"))
-				}
-			}
-			meta := authstore.ProfileMeta{
-				APIBaseURL: apiBaseURL,
-				SpaceID:    f.Globals.Space,
-				BotKind:    credential.TokenKind(token),
-				RobotID:    botID,
-				CreatedAt:  time.Now().UTC().Format(time.RFC3339),
-			}
-			if err := store.SaveProfile(name, &meta, token); err != nil {
-				return failErr(f, err)
-			}
-
-			count, _ := store.Count() //nolint:errcheck // advisory count for the hint only
-			payload := map[string]any{
-				"profile":       name,
-				"bot_kind":      credential.TokenKind(token),
-				"bot_token":     credential.MaskToken(token),
-				"profile_count": count,
-			}
-			putIfSet(payload, "robot_id", botID)
-			if count >= 2 {
-				payload["hint"] = "multiple profiles stored; pass --bot-id or --profile on subsequent commands"
-			}
-			raw, err := json.Marshal(payload)
-			if err != nil {
-				return failErr(f, err)
-			}
-			return f.EmitSuccess(raw)
+			return importProfile(cmd, f, apiBaseURL, token)
 		},
 	}
-	cmd.Flags().BoolVar(&withToken, "with-token", false, "read the token from stdin instead of a prompt")
-	cmd.Flags().StringVar(&tokenFile, "token-file", "", "read the token from this file")
-	cmd.Flags().StringVar(&apiBaseURL, "api-base-url", "", "store this profile's API base URL (takes precedence over OCTO_API_BASE_URL)")
-	cmd.MarkFlagsMutuallyExclusive("with-token", "token-file")
+	cmd.Flags().BoolVar(&withToken, "with-token", false, "read the Token from stdin")
+	cmd.Flags().StringVar(&tokenFile, "token-file", "", "import the Token from a file")
+	cmd.Flags().StringVar(&apiBaseURL, "api-base-url", "", "API origin to bind to the profile")
 	return cmd
 }
 
-func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Show the single active bot identity (whoami); use `auth list` to enumerate",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			// Report the selected local identity. Environment credentials
-			// bypass the local store unless a profile was explicitly selected.
-			cred, resolveErr := f.Credential()
-			if resolveErr == nil {
-				cfg, err := f.Config()
-				if err != nil {
-					return failErr(f, err)
-				}
-				active := map[string]any{
-					"bot_token": credential.MaskToken(cred.Token),
-					"source":    cred.Source,
-				}
-				putIfSet(active, "profile", cred.Profile)
-				if cred.Profile != "" {
-					putIfSet(active, "robot_id", cred.RobotID)
-				} else {
-					putIfSet(active, "robot_id_claimed", cred.RobotID)
-				}
-				putIfSet(active, "bot_kind", cred.BotKind)
-				putIfSet(active, "api_base_url", cfg.APIBaseURL)
-				putIfSet(active, "api_base_url_source", cfg.APIBaseURLSource)
-				putIfSet(active, "space_id", cfg.SpaceID)
-				return emitJSON(f, map[string]any{"active": active})
-			}
-			// Preserve informational output for an empty or ambiguous store,
-			// but never hide invalid selectors, configuration, or I/O errors.
-			ee := output.AsExitError(resolveErr)
-			if !errors.Is(resolveErr, credential.ErrNoCredential) && (ee == nil || ee.Type != "validation") {
-				return failErr(f, resolveErr)
-			}
-			store, err := f.AuthStore()
-			if err != nil {
-				return failErr(f, err)
-			}
-			_, _, status, err := store.ActiveProfile(f.Globals.Profile, selectorBotID(f))
-			if err != nil {
-				return failErr(f, err)
-			}
-			// status answers a single question — "who would I act as right now?".
-			// It never enumerates profiles (that is `auth list`): the active
-			// identity, or null with a pointer when nothing is selected.
-			switch status {
-			case authstore.StatusAmbiguous:
-				count, _ := store.Count() //nolint:errcheck // advisory count for the hint only
-				return emitJSON(f, map[string]any{
-					"active":        nil,
-					"profile_count": count,
-					"hint":          "no bot selected; pass --bot-id <id> or --profile <name> (or set OCTO_BOT_ID), or run `octo-cli auth list`",
-				})
-			case authstore.StatusNone:
-				return emitJSON(f, map[string]any{
-					"active":        nil,
-					"profile_count": 0,
-					"env_token_set": config.ResolveEnvToken().Token != "",
-					"hint":          "no stored profiles; run `octo-cli auth login`",
-				})
-			default:
-				return failErr(f, resolveErr)
-			}
-		},
+func loginTokenInput(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, path string) (string, error) {
+	fileSet := cmd.Flags().Changed("token-file")
+	if f.Globals.CredentialFileSet {
+		if fileSet {
+			return "", output.ErrValidation("use either --token-file or --credential-file", "")
+		}
+		path, fileSet = f.Globals.CredentialFile, true
 	}
+	if withToken && fileSet {
+		return "", output.ErrValidation("--with-token cannot be combined with a token file flag",
+			"use --with-token for stdin or one of --token-file and --credential-file for a file")
+	}
+	if !fileSet && !withToken {
+		return "", output.ErrValidation("a token input is required", "pass --with-token for stdin or --token-file for a file")
+	}
+
+	var token string
+	var err error
+	switch {
+	case fileSet:
+		token, err = credential.ReadFile(path)
+	case isTerminal(f.IOStreams.In):
+		input := f.IOStreams.In.(*os.File)
+		fmt.Fprint(f.IOStreams.ErrOut, "Token: ") //nolint:errcheck // best-effort prompt
+		var data []byte
+		data, err = term.ReadPassword(int(input.Fd()))
+		fmt.Fprintln(f.IOStreams.ErrOut) //nolint:errcheck // best-effort prompt
+		if err != nil {
+			return "", output.ErrValidation("could not read token from the terminal", "")
+		}
+		token = string(data)
+		err = credential.ValidateBearer(token)
+	default:
+		token, err = credential.Read(f.IOStreams.In)
+	}
+	if err != nil {
+		return "", output.ErrAuth(err.Error(), "check the supplied token")
+	}
+	return token, nil
 }
 
-func newAuthLogoutCmd(f *cmdutil.Factory) *cobra.Command {
-	return &cobra.Command{
-		Use:     "logout",
-		Short:   "Remove a stored bot credential",
-		Long:    "Removes the selected local profile. This local mutation rejects --dry-run.",
-		Args:    cobra.NoArgs,
-		PreRunE: authMutationPreRun(f, "omit --dry-run to remove the stored profile"),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			store, err := f.AuthStore()
-			if err != nil {
-				return failErr(f, err)
-			}
-			name, _, status, err := store.ActiveProfile(f.Globals.Profile, selectorBotID(f))
-			if err != nil {
-				return failErr(f, err)
-			}
-			switch status {
-			case authstore.StatusFound:
-				if rerr := store.RemoveProfile(name); rerr != nil {
-					return failErr(f, rerr)
-				}
-				return emitJSON(f, map[string]any{"removed": name})
-			case authstore.StatusAmbiguous:
-				return failErr(f, output.ErrValidation(
-					"multiple profiles configured; specify which to remove",
-					"pass --bot-id <robot_id> or --profile <name>"))
-			case authstore.StatusMissing:
-				return failErr(f, output.ErrValidation(
-					"no matching profile to remove", "check `octo-cli auth list`"))
-			default: // none
-				return failErr(f, output.ErrValidation(
-					"no stored profiles", "nothing to remove"))
-			}
-		},
-	}
+func isTerminal(reader any) bool {
+	file, ok := reader.(*os.File)
+	return ok && term.IsTerminal(int(file.Fd()))
 }
 
 func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List stored bot credentials (never shows tokens)",
+		Short: "List local profiles and the saved default",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
 			store, err := f.AuthStore()
 			if err != nil {
 				return failErr(f, err)
 			}
-			profiles, err := store.LoadProfiles()
+			var result profileList
+			err = store.View(cmd.Context(), func(cfg *authstore.Config) error {
+				result, err = listProfiles(cfg)
+				return err
+			})
 			if err != nil {
 				return failErr(f, err)
 			}
-			entries := profileEntries(profiles)
-			payload := map[string]any{"profiles": entries, "count": len(entries)}
-			if len(entries) >= 2 {
-				payload["hint"] = "multiple profiles; pass --bot-id or --profile to select one"
-			}
-			return emitJSON(f, payload)
+			return emitJSON(f, result)
 		},
 	}
 }
 
-// promptBotID asks for the bot id interactively when no selector was given and
-// stdin is a terminal (visible — the id is not a secret). Non-terminals return
-// "" so scripted/agent use still requires an explicit --bot-id / --profile.
-func promptBotID(f *cmdutil.Factory) (string, error) {
-	if !isTerminal(f.IOStreams.In) {
-		return "", nil
-	}
-	writeUI(f.IOStreams.ErrOut, "Bot id (robot id, e.g. cli_xxx): ")
-	return readLineVisible(f.IOStreams.In)
+type profileListEntry struct {
+	Profile    string `json:"profile"`
+	APIBaseURL string `json:"api_base_url"`
+	SpaceID    string `json:"space_id"`
+	Source     string `json:"source"`
+	Backend    string `json:"backend,omitempty"`
 }
 
-// assertBotIDFree rejects storing a bot id already owned by a different profile,
-// which would make --bot-id selection ambiguous. Re-login to the same profile
-// (owner == name) is allowed.
-func assertBotIDFree(store *authstore.Store, botID, name string) error {
-	if botID == "" {
-		return nil
-	}
-	owner, ok, err := store.ProfileForRobotID(botID)
-	if err != nil {
-		return err
-	}
-	if ok && owner != name {
-		return output.ErrValidation(
-			fmt.Sprintf("bot id %q is already stored under profile %q", botID, owner),
-			"log in under that profile, or remove it first with `octo-cli auth logout`")
-	}
-	return nil
+type profileList struct {
+	CurrentProfile string             `json:"current_profile"`
+	Profiles       []profileListEntry `json:"profiles"`
 }
 
-// selectorBotID returns the --bot-id flag, falling back to OCTO_BOT_ID — the
-// same selection source the runtime credential chain uses.
-func selectorBotID(f *cmdutil.Factory) string {
-	if f.Globals.BotID != "" {
-		return f.Globals.BotID
-	}
-	return os.Getenv(config.EnvBotID)
-}
-
-// readToken obtains the token without ever touching argv: from --token-file, or
-// stdin with --with-token, or a hidden terminal prompt otherwise.
-func readToken(f *cmdutil.Factory, withToken bool, tokenFile string) (string, error) {
-	switch {
-	case tokenFile != "":
-		data, err := os.ReadFile(tokenFile)
-		if err != nil {
-			return "", output.ErrValidation(
-				fmt.Sprintf("read token file: %v", err), "check the path passed to --token-file")
+func listProfiles(cfg *authstore.Config) (profileList, error) {
+	result := profileList{CurrentProfile: cfg.CurrentProfile, Profiles: make([]profileListEntry, 0, len(cfg.Profiles))}
+	for name, profile := range cfg.Profiles {
+		if err := authstore.ValidateName(name); err != nil {
+			return profileList{}, err
 		}
-		return strings.TrimSpace(string(data)), nil
-
-	case withToken:
-		data, err := io.ReadAll(f.IOStreams.In)
+		p, err := profile.Scope()
 		if err != nil {
-			return "", output.ErrValidation(
-				fmt.Sprintf("read token from stdin: %v", err), "pipe the token into the command")
+			return profileList{}, err
 		}
-		return strings.TrimSpace(string(data)), nil
+		if err := p.ValidateSource(); err != nil {
+			return profileList{}, err
+		}
+		result.Profiles = append(result.Profiles, profileListEntry{
+			Profile: name, APIBaseURL: p.APIBaseURL, SpaceID: p.SpaceID,
+			Source: p.TokenSource.Type, Backend: p.TokenSource.Backend,
+		})
+	}
+	sort.Slice(result.Profiles, func(i, j int) bool {
+		return result.Profiles[i].Profile < result.Profiles[j].Profile
+	})
+	return result, nil
+}
 
-	default:
-		if isTerminal(f.IOStreams.In) {
-			writeUI(f.IOStreams.ErrOut, "Paste bot token: ")
-			tok, err := readPasswordMasked(f.IOStreams.In.(*os.File), f.IOStreams.ErrOut)
+func newAuthLogoutCmd(f *cmdutil.Factory) *cobra.Command {
+	return &cobra.Command{
+		Use:     "logout",
+		Short:   "Remove a local profile",
+		Args:    cobra.NoArgs,
+		PreRunE: authMutationPreRun(f, "remove --dry-run to remove the profile"),
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			name, err := f.ProfileSelector()
 			if err != nil {
-				return "", output.ErrValidation(
-					fmt.Sprintf("read token: %v", err), "")
+				return failErr(f, err)
 			}
-			return strings.TrimSpace(tok), nil
-		}
-		return "", output.ErrValidation(
-			"no terminal available for interactive token entry",
-			"pass --with-token to read the token from stdin, or --token-file <path>")
-	}
-}
-
-// escape-sequence parser states for readPasswordMasked.
-const (
-	escNormal   = iota // not in an escape sequence
-	escAfterEsc        // saw ESC, awaiting the sequence introducer
-	escInCSI           // inside a CSI/SS3 body, awaiting the final byte
-)
-
-// advanceEsc tracks a terminal escape sequence (CSI/SS3). Given the current
-// state and the next byte, it returns the new state and whether the byte was
-// part of a sequence — such bytes (ESC, arrow keys, bracketed-paste markers like
-// ESC[200~) must never be captured into the token.
-func advanceEsc(state int, c byte) (newState int, inSequence bool) {
-	switch state {
-	case escAfterEsc:
-		// ESC '[' (CSI) or 'O' (SS3) opens a sequence; anything else was a
-		// lone/Alt key — drop just this byte.
-		if c == '[' || c == 'O' {
-			return escInCSI, true
-		}
-		return escNormal, true
-	case escInCSI:
-		if c >= 0x40 && c <= 0x7e { // final byte ends the sequence
-			return escNormal, true
-		}
-		return escInCSI, true
-	default:
-		if c == 0x1b { // ESC starts a sequence
-			return escAfterEsc, true
-		}
-		return escNormal, false
-	}
-}
-
-// applyMaskByte applies a non-escape byte to the password buffer, echoing a '*'
-// (or erasing one on backspace). It reports done=true when input ends — Enter
-// (abort=false) or Ctrl-C (abort=true).
-func applyMaskByte(c byte, pw *[]byte, out io.Writer) (done, abort bool) {
-	switch {
-	case c == '\r' || c == '\n':
-		return true, false
-	case c == 0x03: // Ctrl-C
-		return true, true
-	case c == 0x7f || c == 0x08: // Backspace / Delete
-		if len(*pw) > 0 {
-			*pw = (*pw)[:len(*pw)-1]
-			writeUI(out, "\b \b")
-		}
-	case c >= 0x20 && c < 0x7f: // printable ASCII only
-		*pw = append(*pw, c)
-		writeUI(out, "*")
-	}
-	return false, false
-}
-
-// readPasswordMasked reads a line from the terminal without echoing the typed
-// characters, printing a '*' per keystroke as feedback. It accepts only
-// printable ASCII and swallows escape sequences (see advanceEsc) so they never
-// land in the token. The terminal state is restored on return; Enter ends input,
-// Ctrl-C aborts.
-func readPasswordMasked(file *os.File, out io.Writer) (string, error) {
-	fd := int(file.Fd())
-	oldState, err := term.MakeRaw(fd)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = term.Restore(fd, oldState) }() //nolint:errcheck // best-effort restore
-
-	var pw []byte
-	state := escNormal
-	b := make([]byte, 1)
-	for {
-		n, rerr := file.Read(b)
-		if n > 0 {
-			if ns, inSeq := advanceEsc(state, b[0]); inSeq {
-				state = ns
-			} else if done, abort := applyMaskByte(b[0], &pw, out); done {
-				writeUI(out, "\r\n")
-				if abort {
-					return "", errors.New("interrupted")
-				}
-				return string(pw), nil
+			store, err := f.AuthStore()
+			if err != nil {
+				return failErr(f, err)
 			}
-		}
-		if rerr != nil {
-			if errors.Is(rerr, io.EOF) {
-				writeUI(out, "\r\n")
-				return string(pw), nil
+			removed, warning, err := store.Logout(cmd.Context(), name, func(p *authstore.Profile) error {
+				_, err := cmdutil.ApplyProfileScope(f.RuntimeConfig(), p)
+				return err
+			})
+			if err != nil {
+				return failErr(f, err)
 			}
-			return "", rerr
-		}
+			writeStoreWarning(f, warning)
+			return emitJSON(f, map[string]string{"removed": removed})
+		},
 	}
 }
 
-// isTerminal reports whether r is an interactive terminal.
-func isTerminal(r io.Reader) bool {
-	file, ok := r.(*os.File)
-	return ok && term.IsTerminal(int(file.Fd()))
-}
-
-// readLineVisible reads a single echoed line one byte at a time so it never
-// buffers past the newline — leaving a subsequent hidden token read on the same
-// fd intact.
-func readLineVisible(r io.Reader) (string, error) {
-	var sb strings.Builder
-	buf := make([]byte, 1)
-	for {
-		n, err := r.Read(buf)
-		if n > 0 {
-			if buf[0] == '\n' {
-				break
-			}
-			if buf[0] != '\r' {
-				sb.WriteByte(buf[0])
-			}
-		}
-		if err != nil {
-			if errors.Is(err, io.EOF) {
-				break
-			}
-			return "", err
-		}
+func writeStoreWarning(f *cmdutil.Factory, warning string) {
+	if warning != "" {
+		fmt.Fprintln(f.IOStreams.ErrOut, "warning: "+warning) //nolint:errcheck // best-effort post-commit diagnostic
 	}
-	return strings.TrimSpace(sb.String()), nil
-}
-
-// putIfSet adds k=v to m only when v is non-empty, so auth output omits empty
-// fields rather than emitting noisy nulls (e.g. space_id for a DM-only bot).
-func putIfSet(m map[string]any, k, v string) {
-	if v != "" {
-		m[k] = v
-	}
-}
-
-// profileEntries renders the stored profiles as sorted, token-free summaries —
-// shared by `auth list` and `auth status` (ambiguous case).
-func profileEntries(profiles map[string]authstore.ProfileMeta) []map[string]any {
-	names := make([]string, 0, len(profiles))
-	for n := range profiles {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-
-	entries := make([]map[string]any, 0, len(names))
-	for _, n := range names {
-		m := profiles[n]
-		e := map[string]any{"profile": n}
-		putIfSet(e, "robot_id", m.RobotID)
-		putIfSet(e, "bot_kind", m.BotKind)
-		putIfSet(e, "api_base_url", m.APIBaseURL)
-		putIfSet(e, "space_id", m.SpaceID)
-		putIfSet(e, "created_at", m.CreatedAt)
-		entries = append(entries, e)
-	}
-	return entries
 }
 
 func emitJSON(f *cmdutil.Factory, payload any) error {
@@ -589,16 +200,8 @@ func emitJSON(f *cmdutil.Factory, payload any) error {
 	return f.EmitSuccess(raw)
 }
 
-// failErr writes the error envelope (to stderr, setting ErrorEmitted) and
-// returns the error so main can derive the process exit code. EmitError itself
-// returns nil, so RunE must return the error separately.
+// failErr emits the structured error while returning it for the exit code.
 func failErr(f *cmdutil.Factory, err error) error {
 	_ = f.EmitError(err) //nolint:errcheck // envelope write is best-effort
 	return err
-}
-
-// writeUI writes an interactive prompt or echo to a terminal stream; the error
-// is intentionally ignored (best-effort UI, never a command failure).
-func writeUI(w io.Writer, s string) {
-	_, _ = fmt.Fprint(w, s) //nolint:errcheck // best-effort interactive UI
 }
