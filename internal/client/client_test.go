@@ -495,28 +495,41 @@ func newBinaryClient(srv *httptest.Server) *Client {
 }
 
 func TestDo_BinaryResponse_RedirectReturnsLocationEnvelope(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Location", "https://cdn.example.com/object?sig=abc")
-		w.WriteHeader(http.StatusFound)
-	}))
-	defer srv.Close()
+	const signed = "https://cdn.example.com/object%2Fpart?sig=ab%2Bcd%2Fef&expires=123"
+	for _, tc := range []struct{ name, location, wantURL string }{
+		{"signed download", signed, signed},
+		{"literal bearer", signed + "&echo=app_test", secretMask},
+		{"encoded bearer in query", signed + "&echo=%61pp_test", secretMask},
+		{"encoded bearer in path", "https://cdn.example.com/%61pp_test?sig=abc", secretMask},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Location", tc.location)
+				w.WriteHeader(http.StatusFound)
+			}))
+			defer srv.Close()
 
-	c := newBinaryClient(srv)
-	body, err := c.Do(context.Background(), &Request{
-		Method: "GET", Path: "/dl", BinaryResponse: true,
-	})
-	if err != nil {
-		t.Fatalf("Do: %v", err)
-	}
-	var env map[string]any
-	if err := json.Unmarshal(body, &env); err != nil {
-		t.Fatalf("unmarshal: %v -- %s", err, body)
-	}
-	if env["url"] != "https://cdn.example.com/object?sig=abc" {
-		t.Errorf("url = %v", env["url"])
-	}
-	if n, _ := env["status"].(float64); int(n) != http.StatusFound {
-		t.Errorf("status = %v", env["status"])
+			c := newBinaryClient(srv)
+			body, err := c.Do(context.Background(), &Request{
+				Method: http.MethodGet, Path: "/dl", BinaryResponse: true,
+			})
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			var env struct {
+				URL    string
+				Status int
+			}
+			if err := json.Unmarshal(body, &env); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if env.URL != tc.wantURL {
+				t.Errorf("url = %q, want %q", env.URL, tc.wantURL)
+			}
+			if env.Status != http.StatusFound {
+				t.Errorf("status = %d, want %d", env.Status, http.StatusFound)
+			}
+		})
 	}
 }
 

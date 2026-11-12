@@ -110,7 +110,15 @@ func redactRedirectLocation(location string, requestSecrets, responseSecretField
 	if len(responseSecretFields) > 0 {
 		return secretMask
 	}
-	return redactSecrets(location, requestSecrets)
+	if len(requestSecrets) == 0 {
+		return location
+	}
+	// Decode percent escapes for inspection and keep the original signed URL for output.
+	decoded, err := url.PathUnescape(location)
+	if err != nil || containsAnySecret(location, requestSecrets) || containsAnySecret(decoded, requestSecrets) {
+		return secretMask
+	}
+	return location
 }
 
 // redactSecrets masks every non-empty SecretValues entry found in s. Values are
@@ -337,7 +345,7 @@ func redactBodyForLog(req *Request, marshalled []byte) string {
 			return string(buf)
 		}
 	}
-	return redactSecrets(string(marshalled), req.SecretValues)
+	return maskOrSuppressValue(string(marshalled), req.SecretValues)
 }
 
 // redactResponseBody masks secrets in a backend error body before it is parsed.
@@ -751,8 +759,8 @@ func New(cfg *config.Config, cred *credential.BotCredential, opts Options) *Clie
 }
 
 // Do performs req against the service URL, applying auth, retry, and dry-run.
-// Returns the raw response body on 2xx; an *output.ExitError on non-2xx or
-// transport failure.
+// Returns the response body on 2xx and an *output.ExitError on non-2xx or
+// transport failure. The bearer is masked in diagnostics and response echoes.
 //
 // Every error leaving this method is redacted against req.SecretValues. That is
 // deliberately a boundary rather than a set of per-site calls: three rounds of
@@ -762,9 +770,24 @@ func New(cfg *config.Config, cred *credential.BotCredential, opts Options) *Clie
 // response read — echoed freely. Redacting on the way out makes the property hold
 // for sites that do not exist yet.
 func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
+	var bearer []string
+	if c.cred != nil && c.cred.Token != "" {
+		safeReq := *req
+		safeReq.SecretValues = make([]string, len(req.SecretValues)+1)
+		safeReq.SecretValues[0] = c.cred.Token
+		copy(safeReq.SecretValues[1:], req.SecretValues)
+		bearer = safeReq.SecretValues[:1]
+		req = &safeReq
+	}
+
 	body, err := c.do(ctx, req)
 	if err != nil {
 		return nil, redactError(err, req.SecretValues)
+	}
+	// An escaped JSON string can echo the bearer without containing it literally.
+	if len(bearer) != 0 && !c.options.DryRun &&
+		(bytes.ContainsRune(body, '\\') || containsAnySecret(string(body), bearer)) {
+		body = redactResponseBody(body, bearer)
 	}
 	return body, nil
 }
@@ -791,7 +814,7 @@ func redactError(err error, secrets []string) error {
 	}
 	// Not one of ours: wrap so the text is still masked rather than passed
 	// through, since the caller renders whatever it receives.
-	return output.ErrNetwork(redactSecrets(err.Error(), secrets), "")
+	return output.ErrNetwork(maskOrSuppressValue(err.Error(), secrets), "")
 }
 
 // redactExitError copies e with its message, hint and detail masked. A copy
@@ -802,8 +825,8 @@ func redactExitError(e *output.ExitError, secrets []string) *output.ExitError {
 		return nil
 	}
 	out := *e
-	out.Message = redactSecrets(e.Message, secrets)
-	out.Hint = redactSecrets(e.Hint, secrets)
+	out.Message = maskOrSuppressValue(e.Message, secrets)
+	out.Hint = maskOrSuppressValue(e.Hint, secrets)
 	if len(e.Detail) > 0 {
 		out.Detail = redactSecretBytes(e.Detail, secrets)
 	}
@@ -915,9 +938,6 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		return nil, output.ErrNetwork(redactSecrets(err.Error(), req.SecretValues), "invalid request")
 	}
 
-	if c.cred != nil && c.cred.Token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.cred.Token)
-	}
 	if c.cred != nil && c.cred.SpaceID != "" && !req.SuppressSpaceHeader {
 		httpReq.Header.Set("X-Space-Id", c.cred.SpaceID)
 	}
@@ -927,25 +947,28 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
 	}
+	if c.cred != nil && c.cred.Token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.cred.Token)
+	}
 
-	c.verbosef("%s %s", req.Method, redactSecrets(urlStr, req.SecretValues))
+	c.verbosef("%s %s", req.Method, maskOrSuppressValue(urlStr, req.SecretValues))
 	if c.options.Verbose && len(body) > 0 {
 		c.verbosef("request body: %s", truncate(redactDiagnosticBody(req, body), 1024))
 	}
 
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
+		var urlErr *url.Error
+		if errors.As(err, &urlErr) && strings.HasPrefix(urlErr.Err.Error(), "failed to parse Location header ") {
+			// net/http received the redirect before failing to parse its
+			// Location. Return a terminal error to avoid replaying the request.
+			return nil, output.ErrNetwork("server returned an invalid redirect location", "")
+		}
 		// *url.Error.Error() embeds the whole request URL, so an x-octo-secret
 		// path parameter (invite / share token) would otherwise reach the default
 		// stderr error envelope — no --verbose needed to leak it.
 		msg := redactSecrets(err.Error(), req.SecretValues)
 		if len(req.ResponseSecretFields) > 0 {
-			// Go parses Location before CheckRedirect runs. A malformed redirect
-			// therefore surfaces here as a *url.Error containing the raw signed
-			// URL, before the response can reach redactRedirectLocation. There is
-			// no structured field to isolate, so fail closed rather than echo an
-			// arbitrary transport error from an operation that can return a
-			// response secret.
 			msg = "transport error"
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -987,7 +1010,7 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		}
 		return nil, output.ErrAPI(
 			fmt.Sprintf("HTTP_%d", resp.StatusCode),
-			fmt.Sprintf("unexpected redirect to %q", redactRedirectLocation(resp.Header.Get("Location"), req.SecretValues, req.ResponseSecretFields)),
+			"unexpected redirect",
 			"",
 		)
 	}
@@ -1200,19 +1223,19 @@ func (c *Client) renderDryRun(req *Request, urlStr string, body []byte) ([]byte,
 	}
 	hdr := map[string]string{}
 	for k, v := range req.Headers {
-		hdr[k] = redactSecrets(v, req.SecretValues)
+		hdr[k] = maskOrSuppressValue(v, req.SecretValues)
 	}
 	removeHeader(hdr, "Authorization")
 	if c.cred != nil && c.cred.Token != "" {
-		hdr["Authorization"] = "Bearer " + credential.MaskToken(c.cred.Token)
+		hdr["Authorization"] = "Bearer ***"
 	}
 	if c.cred != nil && c.cred.SpaceID != "" && !req.SuppressSpaceHeader {
-		hdr["X-Space-Id"] = c.cred.SpaceID
+		hdr["X-Space-Id"] = maskOrSuppressValue(c.cred.SpaceID, req.SecretValues)
 	}
 	out := map[string]any{
 		"dry_run": true,
 		"method":  req.Method,
-		"url":     redactSecrets(urlStr, req.SecretValues),
+		"url":     maskOrSuppressValue(urlStr, req.SecretValues),
 		"headers": hdr,
 	}
 	if bodyField != nil {

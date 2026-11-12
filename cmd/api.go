@@ -97,7 +97,7 @@ Examples:
 				_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 				return err
 			}
-			return f.EmitSuccess(respBody)
+			return f.EmitRequestSuccess(respBody)
 		},
 	}
 

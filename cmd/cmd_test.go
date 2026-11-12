@@ -178,6 +178,14 @@ func TestCmd_SchemaGetOperation(t *testing.T) {
 			t.Errorf("schema detail is empty: %v", env)
 		}
 	}
+	if data["path"] != "/v1/records" {
+		t.Errorf("schema path = %v, want the registered path", data["path"])
+	}
+	for _, name := range []string{"allowed_token_kinds", "mount_by_token_kind"} {
+		if _, ok := data[name]; ok {
+			t.Errorf("schema exposed inactive routing field %q", name)
+		}
+	}
 }
 
 func TestCmd_SchemaUnknownOperation(t *testing.T) {
@@ -371,7 +379,7 @@ func TestCmd_UnknownCommand(t *testing.T) {
 }
 
 // A config with no token should trip PersistentPreRunE on a service command,
-// yielding a validation error (NOT on skip-list commands like `version`).
+// yielding an authentication error for that command.
 func TestCmd_MissingTokenOnServiceCommand(t *testing.T) {
 	f := newTestFactoryWithReg()
 	f.SetConfig(&config.Config{APIBaseURL: "http://x", Format: "json"}) // no BotToken
@@ -380,10 +388,8 @@ func TestCmd_MissingTokenOnServiceCommand(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected PersistentPreRunE to reject missing token")
 	}
-	for _, name := range []string{config.EnvToken, config.EnvBotToken} {
-		if !strings.Contains(err.Error(), name) {
-			t.Errorf("error should reference %s, got: %v", name, err)
-		}
+	if !strings.Contains(err.Error(), config.EnvToken) || strings.Contains(err.Error(), config.EnvBotToken) {
+		t.Errorf("error should reference only %s, got: %v", config.EnvToken, err)
 	}
 }
 

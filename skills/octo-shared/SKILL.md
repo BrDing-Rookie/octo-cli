@@ -9,11 +9,9 @@ Use `octo-cli schema --list` to discover embedded operations. Inspect an operati
 with `octo-cli schema <operation-id>`. This framework build starts with an empty
 service registry.
 
-Set `OCTO_TOKEN` or use a stored profile. Explicit `--profile` or `--bot-id`
-selectors win over environment credentials. Otherwise `OCTO_TOKEN` takes
-precedence over `OCTO_BOT_TOKEN` and implicit profile selection. Inspect the
-resolved identity and gateway with `octo-cli auth status` or
-`octo-cli config show`.
+Set `OCTO_TOKEN` for HTTP commands and use `OCTO_API_BASE_URL` to select
+the gateway origin. Use `octo-cli auth status` or `octo-cli config show`
+to inspect local bot profile settings.
 
 Use `octo-cli api <METHOD> <PATH>` for a direct request to the configured
 gateway. `--params` accepts a JSON object and `--data` accepts inline JSON,

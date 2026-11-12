@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -107,27 +108,14 @@ func TestResolveEnvTokenPrecedence(t *testing.T) {
 	}
 }
 
-// The auth gate's message must name both variables, or an operator who only set
-// OCTO_TOKEN gets told to set a variable they already decided against.
-func TestValidate_MessageNamesBothTokenVars(t *testing.T) {
+func TestValidate_MessageNamesRequestToken(t *testing.T) {
 	err := (&Config{}).Validate()
 	if err == nil {
 		t.Fatal("expected an error")
 	}
-	for _, want := range []string{EnvToken, EnvBotToken} {
-		if !contains(err.Error(), want) {
-			t.Errorf("Validate message %q should name %s", err.Error(), want)
-		}
+	if !strings.Contains(err.Error(), EnvToken) || strings.Contains(err.Error(), EnvBotToken) {
+		t.Errorf("Validate message %q should name only %s", err.Error(), EnvToken)
 	}
-}
-
-func contains(haystack, needle string) bool {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return true
-		}
-	}
-	return false
 }
 
 func TestLoad_TokenPrecedence(t *testing.T) {

@@ -226,8 +226,8 @@ func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "Show the single active bot identity (whoami); use `auth list` to enumerate",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Report the same credential an ordinary request would use. In
-			// particular, environment credentials must bypass the local store.
+			// Report the selected local identity. Environment credentials
+			// bypass the local store unless a profile was explicitly selected.
 			cred, resolveErr := f.Credential()
 			if resolveErr == nil {
 				cfg, err := f.Config()
