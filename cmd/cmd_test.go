@@ -178,6 +178,14 @@ func TestCmd_SchemaGetOperation(t *testing.T) {
 			t.Errorf("schema detail is empty: %v", env)
 		}
 	}
+	if data["path"] != "/v1/records" {
+		t.Errorf("schema path = %v, want the registered path", data["path"])
+	}
+	for _, name := range []string{"allowed_token_kinds", "mount_by_token_kind"} {
+		if _, ok := data[name]; ok {
+			t.Errorf("schema exposed inactive routing field %q", name)
+		}
+	}
 }
 
 func TestCmd_SchemaUnknownOperation(t *testing.T) {

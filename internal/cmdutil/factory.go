@@ -62,8 +62,9 @@ type Factory struct {
 	cred   *credential.BotCredential
 	cli    *client.Client
 	// HTTP commands resolve their config independently of local bot profiles.
-	requestConfig func() *config.Config
-	requestSource string
+	requestConfig          func() *config.Config
+	validatedRequestConfig *config.Config
+	requestSource          string
 	// Compiled output query, paired with its expression for safe Factory reuse.
 	jqExpression string
 	jqProgram    *output.JQProgram
@@ -108,16 +109,9 @@ func NewDefaultFactory() *Factory {
 		if f.cli != nil {
 			return f.cli, nil
 		}
-		cfg, err := f.RequestConfig()
+		cfg, err := f.ValidatedRequestConfig()
 		if err != nil {
 			return nil, err
-		}
-		if err := cfg.Validate(); err != nil {
-			return nil, err
-		}
-		if f.Globals.Profile != "" || f.Globals.BotID != "" {
-			return nil, output.ErrValidation("--profile and --bot-id cannot select a credential for HTTP commands",
-				"set OCTO_TOKEN and omit the profile or bot selector")
 		}
 		space := strings.TrimSpace(cfg.SpaceID)
 		if f.Globals.Space != "" {
@@ -266,6 +260,26 @@ func (f *Factory) RequestConfig() (*config.Config, error) {
 		return f.Config()
 	}
 	return f.requestConfig(), nil
+}
+
+// ValidatedRequestConfig checks HTTP options and shares config validation
+// between command preflight and client construction.
+func (f *Factory) ValidatedRequestConfig() (*config.Config, error) {
+	if f.Globals.Profile != "" || f.Globals.BotID != "" {
+		return nil, output.ErrValidation("--profile and --bot-id cannot select a credential for HTTP commands",
+			"set OCTO_TOKEN and omit the profile or bot selector")
+	}
+	cfg, err := f.RequestConfig()
+	if err != nil {
+		return nil, err
+	}
+	if cfg != f.validatedRequestConfig {
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
+		f.validatedRequestConfig = cfg
+	}
+	return cfg, nil
 }
 
 // Credential returns the resolved credential (cached).

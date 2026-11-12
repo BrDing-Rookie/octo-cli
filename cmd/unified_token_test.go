@@ -21,11 +21,15 @@ const authRequiredFixture = `{"error":{"code":"AUTH_REQUIRED","message":"Authent
 
 func runPhaseOneCommand(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	return execRoot(t, newPhaseOneTestFactory(), args...)
+}
+
+func newPhaseOneTestFactory() *cmdutil.TestFactory {
 	streams, in, out, errOut := cmdutil.NewTestIOStreams()
 	f := cmdutil.NewDefaultFactory()
 	f.IOStreams = streams
 	f.RegistryFunc = testfixture.Registry
-	return execRoot(t, &cmdutil.TestFactory{Factory: f, In: in, Out: out, ErrOut: errOut}, args...)
+	return &cmdutil.TestFactory{Factory: f, In: in, Out: out, ErrOut: errOut}
 }
 
 func TestPhaseOneBusinessBearer(t *testing.T) {
@@ -154,6 +158,36 @@ func TestPhaseOneBearerPreviewSource(t *testing.T) {
 				t.Errorf("identity.source = %q, want env:%s", source, config.EnvToken)
 			}
 		})
+	}
+}
+
+func TestPhaseOneUnsupportedSelectorsLeaveStdinUnread(t *testing.T) {
+	server, calls := newOutputPreflightServer(t)
+	t.Setenv(config.EnvAPIBaseURL, server.URL)
+	t.Setenv(config.EnvToken, phaseOneToken)
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"api profile", []string{"api", "POST", "/v1/records", "--profile", "stored"}},
+		{"generated bot id", []string{"example", "record", "create", "--bot-id", "stored"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPhaseOneTestFactory()
+			f.In.WriteString(outputPreflightBody)
+			_, _, err := execRoot(t, f, append(tc.args, "--data", "@-")...)
+			ee := output.AsExitError(err)
+			if ee == nil || ee.Type != "validation" ||
+				!strings.Contains(ee.Message, "cannot select a credential for HTTP commands") {
+				t.Errorf("expected a selector validation error, got %v", err)
+			}
+			if f.In.String() != outputPreflightBody {
+				t.Error("command read stdin before rejecting the selector")
+			}
+		})
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("business requests = %d, want none", got)
 	}
 }
 

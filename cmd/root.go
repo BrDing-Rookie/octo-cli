@@ -38,14 +38,11 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				}
 				return nil
 			}
-			cfg, err := f.RequestConfig()
-			if err != nil {
-				return err
-			}
 			if err := f.PreflightOutput(f.Format()); err != nil {
 				return err
 			}
-			return cfg.Validate()
+			_, err := f.ValidatedRequestConfig()
+			return err
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,

@@ -391,19 +391,9 @@ type OperationDetail struct {
 	// effects where a lost response must be reported as an
 	// unknown result rather than risking a duplicate action.
 	RetryMode string `json:"retry_mode,omitempty"`
-	// AllowedTokenKinds captures x-octo-allowed-token-kinds (spec top level or
-	// per-operation override). When non-empty the CLI checks the active
-	// credential's kind against the list before sending, failing locally with
-	// TOKEN_KIND_NOT_ALLOWED (validation / exit 2) instead of relying on a
-	// backend 401. Empty means "no local gate" — the historical behaviour for
-	// every domain that does not declare it.
-	AllowedTokenKinds []string `json:"allowed_token_kinds,omitempty"`
-	// MountByTokenKind captures x-octo-mount-by-token-kind: a token-kind →
-	// server mount-prefix table. When non-empty, the operation's own path must
-	// begin with exactly one of the table's values (the mount the spec paths are
-	// written against); that prefix is swapped for the mount matching the active
-	// credential's kind. Empty leaves the spec path byte-identical.
-	MountByTokenKind map[string]string `json:"mount_by_token_kind,omitempty"`
+	// MountByTokenKind retains legacy mounts for matching raw API paths to
+	// redaction metadata.
+	MountByTokenKind map[string]string `json:"-"`
 	// ResponseFieldAliases captures x-octo-response-fields: source key →
 	// target keys. The CLI renames (one target) or duplicates (several) the
 	// value in the response before emitting it. Paths use the same syntax as LosslessIDFields.
@@ -546,13 +536,6 @@ func buildDetail(service string, doc map[string]any, pathStr, method string, op 
 	d.Multipart = boolOf(op["x-octo-multipart"])
 	d.BinaryResponse = boolOf(op["x-octo-binary-response"])
 	d.RetryMode = stringOf(op["x-octo-retry"])
-	// Identity routing is declared at the spec top level (every operation in a
-	// domain shares one mount table) but an operation may narrow the allowed
-	// kinds. Both default to absent → no gate, no rewrite.
-	d.AllowedTokenKinds = stringSliceOf(doc["x-octo-allowed-token-kinds"])
-	if opKinds := stringSliceOf(op["x-octo-allowed-token-kinds"]); len(opKinds) > 0 {
-		d.AllowedTokenKinds = opKinds
-	}
 	d.MountByTokenKind = stringMapOf(doc["x-octo-mount-by-token-kind"])
 	d.ResponseFieldAliases = stringSliceMapOf(op["x-octo-response-fields"])
 	d.LosslessIDFields = stringSliceOf(op["x-octo-lossless-id-fields"])
