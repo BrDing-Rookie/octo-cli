@@ -59,11 +59,11 @@ func rootWithService(t *testing.T, handler http.HandlerFunc) (*cobra.Command, *c
 	tf := cmdutil.NewTestFactory()
 	cfg := &config.Config{
 		APIBaseURL: srv.URL,
-		BotToken:   "app_test",
+		Token:      "app_test",
 		Format:     "json",
 	}
 	tf.SetConfig(cfg)
-	cred := &credential.BotCredential{Token: "app_test", Source: "test"}
+	cred := &credential.Credential{Token: "app_test", Source: "test"}
 	tf.SetCredential(cred)
 	cli := client.New(cfg, cred, client.Options{ErrOut: io.Discard})
 	tf.SetClient(cli)
@@ -186,8 +186,8 @@ func TestDryRun_NoRequest(t *testing.T) {
 	root, tf, server := rootWithService(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("dry-run sent an HTTP request")
 	})
-	cfg := &config.Config{APIBaseURL: server.URL, BotToken: "app_test", Format: "json"}
-	cred := &credential.BotCredential{Token: "app_test", Source: "test"}
+	cfg := &config.Config{APIBaseURL: server.URL, Token: "app_test", Format: "json"}
+	cred := &credential.Credential{Token: "app_test", Source: "test"}
 	tf.Globals.DryRun = true
 	tf.SetClient(client.New(cfg, cred, client.Options{DryRun: true, ErrOut: io.Discard}))
 
@@ -268,9 +268,9 @@ func TestPagination_BodyCursorEndpoint(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	tf := cmdutil.NewTestFactory()
-	cfg := &config.Config{APIBaseURL: srv.URL, BotToken: "app_test", Format: "json"}
+	cfg := &config.Config{APIBaseURL: srv.URL, Token: "app_test", Format: "json"}
 	tf.SetConfig(cfg)
-	cred := &credential.BotCredential{Token: "app_test", Source: "test"}
+	cred := &credential.Credential{Token: "app_test", Source: "test"}
 	tf.SetCredential(cred)
 	tf.SetClient(client.New(cfg, cred, client.Options{ErrOut: io.Discard}))
 	tf.RegistryFunc = testfixture.Registry

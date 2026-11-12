@@ -1,75 +1,63 @@
-// Package credential resolves bot credentials from one or more sources.
-// Phase 1 supports environment variables only; future phases add config files
-// and sidecar providers behind the same interface.
+// Package credential validates and reads opaque Bearer credentials.
 package credential
 
 import (
-	"errors"
-	"fmt"
+	"io"
+	"os"
+	"strings"
 )
 
-// BotCredential is the resolved App Bot credential. SpaceID is optional here:
-// space-scoped bots have it resolved server-side; platform-scoped bots need
-// --space or OCTO_SPACE_ID to populate it. Source is a human tag (e.g.
-// "env:OCTO_BOT_TOKEN") used in verbose output and error messages.
-//
-// Profile is populated only for stored credentials. RobotID may come from a
-// stored profile or OCTO_BOT_ID, while BotKind is derived from the token prefix.
-// An OCTO_BOT_ID beside an environment token remains an unverified claim: it is
-// exposed as robot_id_claimed in the output envelope.
-type BotCredential struct {
+// Credential is the Bearer and its resolved request context.
+type Credential struct {
 	Token   string
 	SpaceID string
 	Source  string
-
 	Profile string
-	RobotID string
-	BotKind string
+	TokenID string
+	OwnerID string
 }
 
-// Source resolves a credential from a single source. Implementations should
-// return a nil credential and no error when the source is simply absent; the
-// chain treats that as "move on to the next provider". An error means the
-// source is present but malformed / unreadable and the chain should stop.
-type Source interface {
-	Name() string
-	Resolve() (*BotCredential, error)
-}
+type inputError string
 
-// ErrNoCredential is wrapped into the error returned when every source in the
-// chain reports absent. Callers can errors.Is it to distinguish "nothing
-// configured" (fall back / prompt for a token) from a structured resolution
-// failure (which must surface).
-var ErrNoCredential = errors.New("no credential found")
+func (e inputError) Error() string { return string(e) }
 
-// Provider is a chain of credential sources tried in order. The first source
-// that yields a non-nil credential wins.
-type Provider struct {
-	providers []Source
-}
-
-// NewChain builds a chain. Sources are consulted in the given order.
-func NewChain(providers ...Source) *Provider {
-	return &Provider{providers: providers}
-}
-
-// Resolve walks the chain. It returns the first credential found, or an error
-// listing every source it tried when none match. Errors from individual
-// sources short-circuit the chain.
-func (c *Provider) Resolve() (*BotCredential, error) {
-	if c == nil || len(c.providers) == 0 {
-		return nil, errors.New("no credential providers configured")
+// ValidateBearer checks only whether the value can be sent as a Bearer.
+func ValidateBearer(token string) error {
+	if token == "" {
+		return inputError("token is required")
 	}
-	var sources []string
-	for _, p := range c.providers {
-		cred, err := p.Resolve()
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", p.Name(), err)
+	for i := 0; i < len(token); i++ {
+		if token[i] <= ' ' || token[i] == 0x7f {
+			return inputError("token contains whitespace or control characters unsafe for a Bearer header")
 		}
-		if cred != nil {
-			return cred, nil
-		}
-		sources = append(sources, p.Name())
 	}
-	return nil, fmt.Errorf("%w (tried: %v)", ErrNoCredential, sources)
+	return nil
+}
+
+// Read reads a single opaque token, allowing a text file's final line ending.
+func Read(r io.Reader) (string, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", inputError("could not read token")
+	}
+	token := string(data)
+	if strings.HasSuffix(token, "\n") {
+		token = strings.TrimSuffix(strings.TrimSuffix(token, "\n"), "\r")
+	}
+	return token, ValidateBearer(token)
+}
+
+// ReadFile reads a caller-owned credential file without including its path in
+// errors. A mistyped flag may contain the token itself.
+func ReadFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", inputError("could not read a regular credential file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", inputError("could not open the credential file")
+	}
+	defer file.Close() //nolint:errcheck // read-only file
+	return Read(file)
 }

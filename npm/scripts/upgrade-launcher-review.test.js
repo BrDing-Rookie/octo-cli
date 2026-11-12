@@ -74,6 +74,7 @@ test("ordinary root flag values named upgrade retain platform dependency diagnos
   const fixture = createLauncherFixture(t);
   for (const args of [
     ["--profile", "upgrade", "config", "show"],
+    ["--credential-file", "upgrade", "config", "show"],
     ["-q", "upgrade", "config", "show"],
     ["config", "show", "--profile", "upgrade"],
   ]) {

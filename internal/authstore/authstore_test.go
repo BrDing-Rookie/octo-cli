@@ -2,274 +2,240 @@ package authstore
 
 import (
 	"bytes"
+	"context"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
+
+	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-// newTestStore points the store at an isolated temp dir via OCTO_CONFIG_DIR.
-func newTestStore(t *testing.T) *Store {
+type memoryKeychain struct {
+	entries   map[string]string
+	putErr    error
+	get       func(string) (string, error)
+	deleteErr error
+}
+
+func (k *memoryKeychain) Put(_ context.Context, account, token string) error {
+	if k.putErr != nil {
+		return k.putErr
+	}
+	k.entries[account] = token
+	return nil
+}
+
+func (k *memoryKeychain) Get(_ context.Context, account string) (string, error) {
+	if k.get != nil {
+		return k.get(account)
+	}
+	return k.read(account)
+}
+
+func (k *memoryKeychain) read(account string) (string, error) {
+	token, ok := k.entries[account]
+	if !ok {
+		return "", fs.ErrNotExist
+	}
+	return token, nil
+}
+
+func (k *memoryKeychain) Delete(_ context.Context, account string) error {
+	if k.deleteErr != nil {
+		return k.deleteErr
+	}
+	delete(k.entries, account)
+	return nil
+}
+
+func testStore(t *testing.T, keychain *memoryKeychain) *Store {
 	t.Helper()
-	t.Setenv(EnvConfigDir, t.TempDir())
-	s, err := New()
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	return s
-}
-
-func TestStore_RoundTrip(t *testing.T) {
-	s := newTestStore(t)
-
-	meta := ProfileMeta{APIBaseURL: "https://api.example.com", BotKind: "app_bot", RobotID: "cli_demo"}
-	if err := s.SaveProfile("prod", &meta, "app_secret_token"); err != nil {
-		t.Fatalf("SaveProfile: %v", err)
-	}
-
-	got, err := s.GetToken("prod")
-	if err != nil {
-		t.Fatalf("GetToken: %v", err)
-	}
-	if got != "app_secret_token" {
-		t.Errorf("token = %q", got)
-	}
-
-	profiles, err := s.LoadProfiles()
-	if err != nil {
-		t.Fatalf("LoadProfiles: %v", err)
-	}
-	if profiles["prod"].RobotID != "cli_demo" {
-		t.Errorf("robot_id = %q", profiles["prod"].RobotID)
-	}
-}
-
-func TestStore_UpdateProfileAPIBaseURLChangesMetadataOnly(t *testing.T) {
-	s := newTestStore(t)
-	meta := ProfileMeta{APIBaseURL: "https://old.example", RobotID: "cli_demo"}
-	if err := s.SaveProfile("prod", &meta, "app_secret_token"); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := s.UpdateProfileAPIBaseURL("prod", "https://new.example"); err != nil {
-		t.Fatal(err)
-	}
-	profiles, err := s.LoadProfiles()
+	t.Setenv(EnvConfigDir, filepath.Join(t.TempDir(), "cli"))
+	store, err := New(keychain)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if profiles["prod"].APIBaseURL != "https://new.example" || profiles["prod"].RobotID != "cli_demo" {
-		t.Fatalf("profile metadata = %+v", profiles["prod"])
+	return store
+}
+
+func snapshot(t *testing.T, store *Store) *Config {
+	t.Helper()
+	var cfg *Config
+	if err := store.View(context.Background(), func(current *Config) error {
+		cfg = current
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
-	if token, err := s.GetToken("prod"); err != nil || token != "app_secret_token" {
-		t.Fatalf("stored token = %q, %v", token, err)
+	return cfg
+}
+
+func testProfile(id string) *Profile {
+	return &Profile{
+		APIBaseURL: "https://gateway.example.test", SpaceID: "space-a",
+		Verified: &Verified{TokenID: id, OwnerID: "owner-a", SpaceID: "space-a"},
 	}
 }
 
-func TestStore_CiphertextHidesToken(t *testing.T) {
-	s := newTestStore(t)
-	const secret = "app_super_secret_value"
-	if err := s.SaveProfile("prod", &ProfileMeta{RobotID: "cli_x"}, secret); err != nil {
-		t.Fatalf("SaveProfile: %v", err)
-	}
-
-	blob, err := os.ReadFile(s.credPath())
-	if err != nil {
-		t.Fatalf("read enc: %v", err)
-	}
-	if bytes.Contains(blob, []byte(secret)) {
-		t.Error("credentials.enc contains the plaintext token")
-	}
-
-	// config.json must never contain the token either.
-	cfg, err := os.ReadFile(s.configPath())
-	if err != nil {
-		t.Fatalf("read config: %v", err)
-	}
-	if bytes.Contains(cfg, []byte(secret)) {
-		t.Error("config.json contains the plaintext token")
+func saveTestProfile(t *testing.T, store *Store, name, id, token string) {
+	t.Helper()
+	warning, err := store.Import(context.Background(), name, snapshot(t, store), false, testProfile(id), token)
+	if err != nil || warning != "" {
+		t.Fatalf("import = %v, warning = %q", err, warning)
 	}
 }
 
-func TestStore_FilePermissions(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.SaveProfile("p", &ProfileMeta{RobotID: "cli_x"}, "app_t"); err != nil {
-		t.Fatalf("SaveProfile: %v", err)
+func requireCredential(t *testing.T, store *Store, profile *Profile, token string) {
+	t.Helper()
+	got, err := store.ReadToken(context.Background(), profile)
+	if err != nil || got != token {
+		t.Fatalf("credential did not round trip: %v", err)
 	}
-	for _, p := range []string{s.credPath(), s.saltPath()} {
-		info, err := os.Stat(p)
+}
+
+func TestEncryptedFallbackPrivateFilesAndIntegrity(t *testing.T) {
+	store := testStore(t, &memoryKeychain{putErr: ErrUnavailable})
+	const secret = "opaque-fallback-test-bearer"
+	saveTestProfile(t, store, "agent", "id-1", secret)
+	cfg := snapshot(t, store)
+	p := cfg.Profiles["agent"]
+	if p.TokenSource.Backend != EncryptedFile {
+		t.Fatalf("backend = %s", p.TokenSource.Backend)
+	}
+	requireCredential(t, store, &p, secret)
+
+	ciphertext := store.encryptedPath(p.TokenSource.Entry)
+	for _, path := range []string{ciphertext, filepath.Join(store.dir, configFile), filepath.Join(store.dir, masterKeyFile)} {
+		info, err := os.Stat(path)
 		if err != nil {
-			t.Fatalf("stat %s: %v", p, err)
+			t.Fatal(err)
 		}
-		if perm := info.Mode().Perm(); perm != secPerm {
-			t.Errorf("%s perm = %o, want %o", filepath.Base(p), perm, secPerm)
+		if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
+			t.Errorf("managed file mode = %o", info.Mode().Perm())
+		}
+		data, err := os.ReadFile(path)
+		if err != nil || bytes.Contains(data, []byte(secret)) {
+			t.Fatalf("managed file exposed the bearer: %v", err)
 		}
 	}
-}
-
-func TestStore_Remove(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.SaveProfile("a", &ProfileMeta{RobotID: "cli_a"}, "app_a"); err != nil {
-		t.Fatalf("SaveProfile a: %v", err)
+	if info, err := os.Stat(store.dir); err != nil || runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		t.Fatalf("configuration directory is not private: %v", err)
 	}
-	if err := s.SaveProfile("b", &ProfileMeta{RobotID: "cli_b"}, "app_b"); err != nil {
-		t.Fatalf("SaveProfile b: %v", err)
+	key, err := store.masterKey()
+	if err != nil || len(key) != masterKeySize {
+		t.Fatalf("master key is missing or malformed: %v", err)
 	}
-	if err := s.RemoveProfile("a"); err != nil {
-		t.Fatalf("RemoveProfile: %v", err)
-	}
-	if _, err := s.GetToken("a"); err == nil {
-		t.Error("token for removed profile still present")
-	}
-	if _, err := s.GetToken("b"); err != nil {
-		t.Errorf("token for b lost after removing a: %v", err)
-	}
-	n, _ := s.Count()
-	if n != 1 {
-		t.Errorf("Count = %d, want 1", n)
-	}
-}
-
-func TestStore_RemoveLastClearsEncFile(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.SaveProfile("only", &ProfileMeta{RobotID: "cli_o"}, "app_o"); err != nil {
-		t.Fatalf("SaveProfile: %v", err)
-	}
-	if err := s.RemoveProfile("only"); err != nil {
-		t.Fatalf("RemoveProfile: %v", err)
-	}
-	if _, err := os.Stat(s.credPath()); !os.IsNotExist(err) {
-		t.Errorf("credentials.enc should be removed when empty, stat err = %v", err)
-	}
-}
-
-func TestStore_CorruptEncErrors(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.SaveProfile("p", &ProfileMeta{RobotID: "cli_x"}, "app_t"); err != nil {
-		t.Fatalf("SaveProfile: %v", err)
-	}
-	// Flip bytes to break GCM authentication.
-	if err := os.WriteFile(s.credPath(), []byte("not-a-valid-ciphertext-blob!!"), secPerm); err != nil {
-		t.Fatalf("corrupt write: %v", err)
-	}
-	if _, err := s.GetToken("p"); err == nil {
-		t.Error("expected error decrypting corrupt credentials.enc")
-	}
-}
-
-// TestStore_OrphanedTokenIsHarmless simulates the post-crash residue of the
-// write ordering (token written, metadata not yet): a token in credentials.enc
-// with no config.json entry must be invisible and must not break resolution.
-func TestStore_OrphanedTokenIsHarmless(t *testing.T) {
-	s := newTestStore(t)
-	if err := s.saveTokens(map[string]string{"ghost": "app_ghost"}); err != nil {
-		t.Fatalf("seed orphan token: %v", err)
-	}
-
-	profiles, err := s.LoadProfiles()
+	second, err := New(&memoryKeychain{putErr: ErrUnavailable})
 	if err != nil {
-		t.Fatalf("LoadProfiles: %v", err)
+		t.Fatal(err)
 	}
-	if len(profiles) != 0 {
-		t.Errorf("orphan token leaked into the catalog: %v", profiles)
+	requireCredential(t, second, &p, secret)
+	data, err := os.ReadFile(ciphertext)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, _, status, _ := s.ActiveProfile("", ""); status != StatusNone {
-		t.Errorf("status = %v, want StatusNone (orphan must not count as a profile)", status)
+	data[len(data)-1] ^= 1
+	if err := os.WriteFile(ciphertext, data, 0o600); err != nil {
+		t.Fatal(err)
 	}
-
-	// A real save still works alongside the orphan.
-	if err := s.SaveProfile("real", &ProfileMeta{RobotID: "cli_real"}, "app_real"); err != nil {
-		t.Fatalf("SaveProfile: %v", err)
-	}
-	if tok, err := s.GetToken("real"); err != nil || tok != "app_real" {
-		t.Errorf("GetToken(real) = %q, %v", tok, err)
+	if _, err := store.ReadToken(context.Background(), &p); output.AsExitError(err) == nil {
+		t.Fatalf("tampered ciphertext was not rejected: %v", err)
 	}
 }
 
-func TestActiveProfile(t *testing.T) {
-	type want struct {
-		name   string
-		status Status
+func TestSystemPermissionFailureDoesNotFallBack(t *testing.T) {
+	keychain := &memoryKeychain{entries: make(map[string]string)}
+	store := testStore(t, keychain)
+	saveTestProfile(t, store, "agent", "id-1", "old-token-fixture")
+	old := snapshot(t, store)
+	if old.Profiles["agent"].TokenSource.Backend != Keychain {
+		t.Fatal("available system storage was bypassed")
 	}
-	cases := []struct {
-		desc     string
-		profiles map[string]ProfileMeta
-		name     string
-		botID    string
-		want     want
-	}{
-		{
-			desc:     "no profiles -> none",
-			profiles: map[string]ProfileMeta{},
-			want:     want{"", StatusNone},
-		},
-		{
-			desc:     "single profile, no selector -> found",
-			profiles: map[string]ProfileMeta{"only": {RobotID: "cli_o"}},
-			want:     want{"only", StatusFound},
-		},
-		{
-			desc:     "two profiles, no selector -> ambiguous",
-			profiles: map[string]ProfileMeta{"a": {RobotID: "cli_a"}, "b": {RobotID: "cli_b"}},
-			want:     want{"", StatusAmbiguous},
-		},
-		{
-			desc:     "select by name -> found",
-			profiles: map[string]ProfileMeta{"a": {RobotID: "cli_a"}, "b": {RobotID: "cli_b"}},
-			name:     "b",
-			want:     want{"b", StatusFound},
-		},
-		{
-			desc:     "select by name missing -> missing",
-			profiles: map[string]ProfileMeta{"a": {RobotID: "cli_a"}},
-			name:     "nope",
-			want:     want{"", StatusMissing},
-		},
-		{
-			desc:     "select by bot-id -> found",
-			profiles: map[string]ProfileMeta{"a": {RobotID: "cli_a"}, "b": {RobotID: "cli_b"}},
-			botID:    "cli_b",
-			want:     want{"b", StatusFound},
-		},
-		{
-			desc:     "select by bot-id no match -> missing",
-			profiles: map[string]ProfileMeta{"a": {RobotID: "cli_a"}},
-			botID:    "cli_zzz",
-			want:     want{"", StatusMissing},
-		},
-		{
-			desc:     "both consistent -> found",
-			profiles: map[string]ProfileMeta{"a": {RobotID: "cli_a"}},
-			name:     "a",
-			botID:    "cli_a",
-			want:     want{"a", StatusFound},
-		},
-		{
-			desc:     "both inconsistent -> missing",
-			profiles: map[string]ProfileMeta{"a": {RobotID: "cli_a"}},
-			name:     "a",
-			botID:    "cli_b",
-			want:     want{"", StatusMissing},
-		},
+	keychain.putErr = fs.ErrPermission
+	_, err := store.Import(context.Background(), "agent", old, false, testProfile("id-2"), "new-token-fixture")
+	if exit := output.AsExitError(err); exit == nil || exit.Type != "permission" {
+		t.Fatalf("expected a permission error, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(store.dir, masterKeyFile)); !os.IsNotExist(err) {
+		t.Fatalf("permission denial used fallback storage: %v", err)
+	}
+	current := snapshot(t, store).Profiles["agent"]
+	requireCredential(t, store, &current, "old-token-fixture")
+}
+
+func TestInterruptedImportKeepsOldReference(t *testing.T) {
+	for _, mode := range []string{"cancel after readback", "readback mismatch"} {
+		t.Run(mode, func(t *testing.T) {
+			keychain := &memoryKeychain{entries: make(map[string]string)}
+			store := testStore(t, keychain)
+			saveTestProfile(t, store, "agent", "id-1", "old-token-fixture")
+			old := snapshot(t, store)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			keychain.get = func(account string) (string, error) {
+				if mode == "readback mismatch" {
+					return "unexpected-token", nil
+				}
+				cancel()
+				return keychain.read(account)
+			}
+			_, err := store.Import(ctx, "agent", old, false, testProfile("id-2"), "new-token-fixture")
+			if exit := output.AsExitError(err); exit == nil || exit.Code != "PROFILE_STORAGE_ERROR" {
+				t.Fatalf("interrupted import should fail before commit: %v", err)
+			}
+			keychain.get = nil
+			p := snapshot(t, store).Profiles["agent"]
+			if p.TokenSource != old.Profiles["agent"].TokenSource || p.Verified.TokenID != "id-1" || len(keychain.entries) != 1 {
+				t.Fatal("failed import changed the profile reference or left a staged credential")
+			}
+			requireCredential(t, store, &p, "old-token-fixture")
+		})
+	}
+}
+
+func TestCleanupFailureKeepsPublishedState(t *testing.T) {
+	keychain := &memoryKeychain{entries: make(map[string]string)}
+	store := testStore(t, keychain)
+	saveTestProfile(t, store, "agent", "id-1", "old-token-fixture")
+	old := snapshot(t, store)
+	keychain.deleteErr = fs.ErrPermission
+	warning, err := store.Import(context.Background(), "agent", old, false, testProfile("id-2"), "new-token-fixture")
+	if err != nil || warning == "" {
+		t.Fatalf("expected a successful publication with a cleanup warning: %v %q", err, warning)
+	}
+	p := snapshot(t, store).Profiles["agent"]
+	if p.Verified.TokenID != "id-2" || p.TokenSource == old.Profiles["agent"].TokenSource {
+		t.Fatal("cleanup failure rolled back the new profile")
+	}
+	requireCredential(t, store, &p, "new-token-fixture")
+	removed, warning, err := store.Logout(context.Background(), "agent", func(*Profile) error { return nil })
+	if err != nil || warning == "" || removed != "agent" || len(snapshot(t, store).Profiles) != 0 {
+		t.Fatalf("expected logout with cleanup warning: %s %q %v", removed, warning, err)
+	}
+}
+
+func TestLogoutRetainsReferencedEntries(t *testing.T) {
+	keychain := &memoryKeychain{entries: make(map[string]string)}
+	store := testStore(t, keychain)
+	saveTestProfile(t, store, "agent", "id-1", "shared-token-fixture")
+	cfg := snapshot(t, store)
+	cfg.Profiles["second"] = cfg.Profiles["agent"]
+	if warning, err := store.publish(context.Background(), cfg, TokenSource{}); err != nil || warning != "" {
+		t.Fatalf("publish test fixture: %v %q", err, warning)
 	}
 
-	for _, c := range cases {
-		t.Run(c.desc, func(t *testing.T) {
-			s := newTestStore(t)
-			for n, m := range c.profiles {
-				if err := s.SaveProfile(n, &m, "app_"+n); err != nil {
-					t.Fatalf("seed %s: %v", n, err)
-				}
-			}
-			name, _, status, err := s.ActiveProfile(c.name, c.botID)
-			if err != nil {
-				t.Fatalf("ActiveProfile: %v", err)
-			}
-			if status != c.want.status {
-				t.Errorf("status = %v, want %v", status, c.want.status)
-			}
-			if name != c.want.name {
-				t.Errorf("name = %q, want %q", name, c.want.name)
-			}
-		})
+	scope := func(*Profile) error { return nil }
+	if _, _, err := store.Logout(context.Background(), "agent", scope); err != nil {
+		t.Fatal(err)
+	}
+	remaining := snapshot(t, store).Profiles["second"]
+	requireCredential(t, store, &remaining, "shared-token-fixture")
+	if _, _, err := store.Logout(context.Background(), "second", scope); err != nil {
+		t.Fatal(err)
+	}
+	if len(keychain.entries) != 0 {
+		t.Fatal("logout left an unreferenced managed entry")
 	}
 }

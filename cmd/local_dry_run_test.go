@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,50 +53,17 @@ func TestAuthLoginDryRunRejectsBeforeReadingTokenOrCreatingProfile(t *testing.T)
 	}
 }
 
-func TestAuthUpdateDryRunLeavesProfileUnchanged(t *testing.T) {
-	store := seedLocalDryRunProfile(t)
-	before := loadLocalDryRunProfile(t, store)
-	beforeToken, err := store.GetToken("cli_dryrun")
-	if err != nil {
-		t.Fatalf("GetToken before dry-run: %v", err)
-	}
-
-	f := newTestFactoryWithReg()
-	_, _, err = execRoot(t, f,
-		"auth", "update", "--dry-run", "--bot-id", "cli_dryrun",
-		"--api-base-url", "https://after.example")
-	requireDryRunValidation(t, err)
-
-	if after := loadLocalDryRunProfile(t, store); after != before {
-		t.Errorf("profile after auth update --dry-run = %+v, want unchanged %+v", after, before)
-	}
-	if got, err := store.GetToken("cli_dryrun"); err != nil || got != beforeToken {
-		t.Errorf("token after auth update --dry-run = %q, %v; want unchanged token", got, err)
-	}
-}
-
 func TestAuthLogoutDryRunKeepsProfile(t *testing.T) {
-	store := seedLocalDryRunProfile(t)
-	before := loadLocalDryRunProfile(t, store)
-	beforeToken, err := store.GetToken("cli_dryrun")
+	configPath := writeExternalProfile(t, privateProfileFixtureDir(t), "agent", "https://gateway.example.test")
+	before, err := os.ReadFile(configPath)
 	if err != nil {
-		t.Fatalf("GetToken before dry-run: %v", err)
+		t.Fatal(err)
 	}
-
-	f := newTestFactoryWithReg()
-	_, _, err = execRoot(t, f, "auth", "logout", "--dry-run", "--bot-id", "cli_dryrun")
+	_, _, err = execRoot(t, newAuthTestFactory(), "auth", "logout", "--dry-run", "--profile", "agent")
 	requireDryRunValidation(t, err)
-
-	profiles, err := store.LoadProfiles()
-	if err != nil {
-		t.Fatalf("LoadProfiles after auth logout --dry-run: %v", err)
-	}
-	after, exists := profiles["cli_dryrun"]
-	if !exists || after != before {
-		t.Errorf("profile after auth logout --dry-run = %+v, exists=%v; want unchanged %+v", after, exists, before)
-	}
-	if got, err := store.GetToken("cli_dryrun"); err != nil || got != beforeToken {
-		t.Errorf("token after auth logout --dry-run = %q, %v; want unchanged token", got, err)
+	after, err := os.ReadFile(configPath)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("auth logout changed config during dry run: %v", err)
 	}
 }
 
@@ -109,31 +77,4 @@ func requireDryRunValidation(t *testing.T, err error) {
 	if !strings.Contains(ee.Message, "--dry-run") {
 		t.Errorf("validation message = %q, want dry-run refusal before command work", ee.Message)
 	}
-}
-
-func seedLocalDryRunProfile(t *testing.T) *authstore.Store {
-	t.Helper()
-	t.Setenv(authstore.EnvConfigDir, t.TempDir())
-	loginToken(t, "cli_dryrun", "app_dryrun_token")
-	store, err := authstore.New()
-	if err != nil {
-		t.Fatalf("authstore.New: %v", err)
-	}
-	if err := store.UpdateProfileAPIBaseURL("cli_dryrun", "https://before.example"); err != nil {
-		t.Fatalf("seed API base URL: %v", err)
-	}
-	return store
-}
-
-func loadLocalDryRunProfile(t *testing.T, store *authstore.Store) authstore.ProfileMeta {
-	t.Helper()
-	profiles, err := store.LoadProfiles()
-	if err != nil {
-		t.Fatalf("LoadProfiles: %v", err)
-	}
-	profile, exists := profiles["cli_dryrun"]
-	if !exists {
-		t.Fatal("seed profile is missing")
-	}
-	return profile
 }

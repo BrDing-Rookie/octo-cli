@@ -19,17 +19,17 @@ type TestFactory struct {
 }
 
 // NewTestFactory returns a TestFactory with in-memory streams, a minimal
-// config (BotToken set so Validate passes), and a BotCredential. The Client
+// config (Token set so Validate passes), and a BotCredential. The Client
 // hook returns an error by default — tests that exercise commands must
 // inject a client via SetClient.
 func NewTestFactory() *TestFactory {
 	streams, in, out, errOut := NewTestIOStreams()
 	cfg := &config.Config{
 		APIBaseURL: "http://test.local",
-		BotToken:   "app_test",
+		Token:      "app_test",
 		Format:     "json",
 	}
-	cred := &credential.BotCredential{
+	cred := &credential.Credential{
 		Token:  "app_test",
 		Source: "test",
 	}
@@ -39,7 +39,7 @@ func NewTestFactory() *TestFactory {
 		Globals:   &GlobalOptions{},
 	}
 	f.ConfigFunc = func() (*config.Config, error) { return cfg, nil }
-	f.CredentialFunc = func() (*credential.BotCredential, error) { return cred, nil }
+	f.CredentialFunc = func() (*credential.Credential, error) { return cred, nil }
 	f.ClientFunc = func() (*client.Client, error) {
 		return nil, stringError("test factory: client not set (call SetClient first)")
 	}
@@ -57,8 +57,8 @@ func (t *TestFactory) SetConfig(cfg *config.Config) {
 }
 
 // SetCredential replaces the credential hook.
-func (t *TestFactory) SetCredential(c *credential.BotCredential) {
-	t.CredentialFunc = func() (*credential.BotCredential, error) { return c, nil }
+func (t *TestFactory) SetCredential(c *credential.Credential) {
+	t.CredentialFunc = func() (*credential.Credential, error) { return c, nil }
 }
 
 // stringError is an immutable, allocation-free error type for sentinel

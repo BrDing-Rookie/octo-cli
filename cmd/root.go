@@ -8,7 +8,6 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-cli/cmd/service"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
-	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 )
 
 // NewRootCmd builds the top-level command tree.
@@ -22,27 +21,18 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "Octo CLI — an OpenAPI-driven command-line framework",
 		Long:  "octo-cli provides a generic HTTP client and generates service commands from embedded OpenAPI specs.",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if skipValidation(cmd) {
-				// Help and completion render their own text, not a Factory
-				// success result. Other credential-free and local auth commands
-				// read OCTO_FORMAT without resolving credentials: profiles do
-				// not carry a format setting.
-				if !skipOutputPreflight(cmd, args) {
-					format := config.Load().Format
-					if f.Globals != nil && f.Globals.Format != "" {
-						format = f.Globals.Format
-					}
-					if err := f.PreflightOutput(format); err != nil {
-						return err
-					}
+			f.Globals.ProfileSet = cmd.Flags().Changed("profile")
+			f.Globals.CredentialFileSet = cmd.Flags().Changed("credential-file")
+			if !skipOutputPreflight(cmd, args) {
+				if err := f.PreflightOutput(f.Format()); err != nil {
+					return err
 				}
+			}
+			if skipValidation(cmd) {
 				return nil
 			}
-			cfg, err := f.RequestConfig()
+			cfg, err := f.RequestConfig(cmd.Context())
 			if err != nil {
-				return err
-			}
-			if err := f.PreflightOutput(f.Format()); err != nil {
 				return err
 			}
 			return cfg.Validate()
@@ -59,8 +49,8 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	pf.StringVar(&f.Globals.Timeout, "timeout", "", "per-request timeout (default 30s; invalid values warn and use 30s)")
 	pf.BoolVar(&f.Globals.NoRetry, "no-retry", false, "disable automatic HTTP retries")
 	pf.StringVar(&f.Globals.Space, "space", "", "space context for API requests")
-	pf.StringVar(&f.Globals.BotID, "bot-id", "", "select a local bot profile by robot id (env OCTO_BOT_ID)")
-	pf.StringVar(&f.Globals.Profile, "profile", "", "select a local bot profile by name")
+	pf.StringVar(&f.Globals.Profile, "profile", "", "select a local profile (env OCTO_PROFILE)")
+	pf.StringVar(&f.Globals.CredentialFile, "credential-file", "", "read the Bearer from a file")
 
 	root.AddCommand(newSchemaCmd(f))
 	root.AddCommand(newUpgradeCmd(f))

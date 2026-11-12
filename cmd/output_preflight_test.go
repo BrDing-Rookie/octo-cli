@@ -8,16 +8,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
 
-	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/client"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
+	"github.com/Mininglamp-OSS/octo-cli/internal/testfixture"
 )
 
 const outputPreflightBody = `{"title":"sample"}`
@@ -36,8 +37,8 @@ func newOutputPreflightServer(t *testing.T) (*httptest.Server, *atomic.Int32) {
 
 func newOutputPreflightTestFactory(serverURL string) *cmdutil.TestFactory {
 	f := newTestFactoryWithReg()
-	cfg := &config.Config{APIBaseURL: serverURL, BotToken: "app_preflight", Format: output.FormatJSON}
-	cred := &credential.BotCredential{Token: "app_preflight", Source: "test"}
+	cfg := &config.Config{APIBaseURL: serverURL, Token: "app_preflight", Format: output.FormatJSON}
+	cred := &credential.Credential{Token: "app_preflight", Source: "test"}
 	f.SetConfig(cfg)
 	f.SetCredential(cred)
 	f.SetClient(client.New(cfg, cred, client.Options{}))
@@ -71,27 +72,6 @@ func requireOutputConfigError(t *testing.T, err error) {
 	}
 }
 
-func configureOutputPreflightProfileEnv(t *testing.T, configDir string) {
-	t.Helper()
-	t.Setenv(authstore.EnvConfigDir, configDir)
-	t.Setenv(config.EnvToken, "")
-	t.Setenv(config.EnvBotToken, "")
-	t.Setenv(config.EnvBotID, "")
-	t.Setenv(config.EnvAPIBaseURL, "")
-	t.Setenv(config.EnvSpaceID, "")
-}
-
-func saveOutputPreflightProfile(t *testing.T, store *authstore.Store, name, apiBaseURL string) {
-	t.Helper()
-	if err := store.SaveProfile(name, &authstore.ProfileMeta{
-		APIBaseURL: apiBaseURL,
-		RobotID:    "robot-output-preflight",
-		BotKind:    "app_bot",
-	}, "app_output_preflight"); err != nil {
-		t.Fatalf("save profile: %v", err)
-	}
-}
-
 func TestOutputPreflight_InvalidExplicitFormatDoesNotSendRequest(t *testing.T) {
 	server, calls := newOutputPreflightServer(t)
 	f := newOutputPreflightTestFactory(server.URL)
@@ -108,17 +88,11 @@ func TestOutputPreflight_InvalidExplicitFormatDoesNotSendRequest(t *testing.T) {
 
 func TestOutputPreflight_InvalidEnvironmentFormatWithProfileDoesNotSendRequest(t *testing.T) {
 	server, calls := newOutputPreflightServer(t)
-	configDir := t.TempDir()
-	configureOutputPreflightProfileEnv(t, configDir)
+	writeExternalProfile(t, privateProfileFixtureDir(t), "agent", server.URL)
 	t.Setenv(config.EnvFormat, "unsupported")
-	store, err := authstore.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	saveOutputPreflightProfile(t, store, "agent", server.URL)
 
 	f := cmdutil.NewDefaultFactory()
-	_, err = executeOutputPreflightRoot(t, f, "--profile", "agent",
+	_, err := executeOutputPreflightRoot(t, f, "--profile", "agent",
 		"api", "POST", "/v1/records", "--data", outputPreflightBody,
 	)
 	requireOutputConfigError(t, err)
@@ -184,24 +158,17 @@ func TestOutputPreflight_InvalidOptionsPreventProfileRemoval(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			configDir := t.TempDir()
-			configureOutputPreflightProfileEnv(t, configDir)
-			store, err := authstore.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			saveOutputPreflightProfile(t, store, "agent", "https://gateway.example.test")
-
+			configPath := writeExternalProfile(t, privateProfileFixtureDir(t), "agent", "https://gateway.example.test")
 			f := newTestFactoryWithReg()
-			_, err = executeOutputPreflightRoot(t, f.Factory,
+			_, err := executeOutputPreflightRoot(t, f.Factory,
 				append(tc.flags, "--profile", "agent", "auth", "logout")...,
 			)
 			requireOutputConfigError(t, err)
-			profiles, err := store.LoadProfiles()
-			if err != nil {
+			if _, err := os.Stat(configPath); err != nil {
 				t.Fatal(err)
 			}
-			if _, exists := profiles["agent"]; !exists {
+			raw, err := os.ReadFile(configPath)
+			if err != nil || !strings.Contains(string(raw), `"agent"`) {
 				t.Fatal("auth logout removed the profile before rejecting the output option")
 			}
 		})
@@ -329,7 +296,6 @@ func TestOutputPreflight_ServiceHelpIgnoresInvalidOutputControls(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			configureOutputPreflightProfileEnv(t, t.TempDir())
 			t.Setenv(config.EnvFormat, "")
 			args := make([]string, 0, len(tc.commandPath)+2)
 			switch tc.outputControl {
@@ -342,7 +308,8 @@ func TestOutputPreflight_ServiceHelpIgnoresInvalidOutputControls(t *testing.T) {
 			}
 			args = append(args, tc.commandPath...)
 
-			f := newTestFactoryWithReg()
+			f := newAuthTestFactory()
+			f.RegistryFunc = testfixture.Registry
 			root := NewRootCmd(f.Factory)
 			helpCommand, _, err := root.Find(tc.commandPath)
 			if err != nil {

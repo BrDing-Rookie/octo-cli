@@ -34,18 +34,34 @@ body from a file or stdin. Paths are relative to the configured gateway.
 
 ## Configuration and credentials
 
-Set `OCTO_TOKEN` for `api` and generated commands. `OCTO_API_BASE_URL` sets
-the gateway origin and defaults to the Octo gateway. `--space` or
-`OCTO_SPACE_ID` supplies an optional space context.
+For `api` and generated commands, the CLI reads the Bearer from
+`--credential-file`, then `OCTO_TOKEN` or `OCTO_TOKEN_FILE`, then the selected
+profile. Set only one Token environment variable. Profiles are selected by
+`--profile`, `OCTO_PROFILE`, or the saved `current_profile`. An external
+credential without an explicit profile uses `OCTO_API_BASE_URL` and the runtime
+Space from `--space` or `OCTO_SPACE_ID`.
 
-Use `octo-cli auth login --profile <name>` to store a local bot credential
-read from a hidden prompt, stdin (`--with-token`), or a file (`--token-file`).
-The profile store defaults to `~/.octo-cli` and can be moved with
-`OCTO_CONFIG_DIR`. Tokens are encrypted at rest.
+The CLI stores version 1 profiles in `~/.octo/cli/config.json`. Set
+`OCTO_CONFIG_DIR` to use a dedicated private directory. A managed profile
+binds the credential to its saved gateway origin and Space. Reimport to change
+that binding.
 
-`auth status` and `config show` report local credential settings with the
-token masked. Pass `--api-base-url` during login or use
-`auth update --api-base-url` to set a stored profile's origin.
+Set `OCTO_AUTH_CURRENT_URL` to the full Token verification URL for the target
+environment. Pipe the Token into `auth login --with-token` or import it from
+a file with `--token-file`.
+
+```sh
+octo-cli --profile agent --space "$space_id" auth login \
+  --api-base-url "$api_origin" --with-token < "$token_file"
+octo-cli --profile agent auth status
+```
+
+A successful import selects the profile as `current_profile`. Managed credentials
+use the system credential store when available or a private AES-256-GCM file
+with a random master key. `auth status` checks a managed profile offline and
+returns `ready` or `missing`. `auth list` and `config show` display non-secret
+metadata. `auth logout` removes the profile and cleans its unreferenced
+managed entry.
 
 ## Add an OpenAPI specification
 

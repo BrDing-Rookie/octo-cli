@@ -15,8 +15,8 @@ func TestAPIPreviewRedactsDeclaredSecrets(t *testing.T) {
 	for _, mount := range []string{"/v1", "/v2"} {
 		t.Run(mount, func(t *testing.T) {
 			f := newTestFactoryWithReg()
-			cfg := &config.Config{APIBaseURL: "https://example.invalid", BotToken: "app_fixture", Format: "json"}
-			cred := &credential.BotCredential{Token: cfg.BotToken}
+			cfg := &config.Config{APIBaseURL: "https://example.invalid", Token: "app_fixture", Format: "json"}
+			cred := &credential.Credential{Token: cfg.Token}
 			f.SetConfig(cfg)
 			f.SetCredential(cred)
 			f.SetClient(client.New(cfg, cred, client.Options{DryRun: true}))

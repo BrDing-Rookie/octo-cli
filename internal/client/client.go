@@ -71,6 +71,8 @@ type Request struct {
 	// credential carries a SpaceID. It is set for operations whose spec declares
 	// x-octo-space-header:false.
 	SuppressSpaceHeader bool
+	// ExpectedStatus optionally requires a specific successful HTTP status.
+	ExpectedStatus int
 	// DisableRetry prevents transport-level retries for this individual
 	// request. Use it for operations whose external side effect may already
 	// have succeeded when the response is lost.
@@ -718,7 +720,7 @@ func redactBodyValue(v any, secrets []string) any {
 // clock hook on Client; the retry scheduling is intentionally minimal.
 type Client struct {
 	cfg        *config.Config
-	cred       *credential.BotCredential
+	cred       *credential.Credential
 	httpClient *http.Client
 	options    Options
 }
@@ -726,7 +728,7 @@ type Client struct {
 // New constructs a Client. Timeout is parsed here; invalid values fall back to
 // the default and emit a verbose warning (not a hard error — a bad flag value
 // shouldn't fail commands that wouldn't otherwise need HTTP).
-func New(cfg *config.Config, cred *credential.BotCredential, opts Options) *Client {
+func New(cfg *config.Config, cred *credential.Credential, opts Options) *Client {
 	timeout := defaultTimeout
 	if opts.Timeout != "" {
 		if d, err := time.ParseDuration(opts.Timeout); err == nil {
@@ -837,6 +839,9 @@ func redactSecretBytes(b []byte, secrets []string) []byte {
 // do is Do's body. It returns errors unredacted; Do is the single place that
 // masks them.
 func (c *Client) do(ctx context.Context, req *Request) ([]byte, error) {
+	if err := c.checkProfileSpace(req); err != nil {
+		return nil, err
+	}
 	base := c.cfg.APIBaseURL
 	if base == "" {
 		return nil, output.ErrValidation(
@@ -872,6 +877,19 @@ func (c *Client) do(ctx context.Context, req *Request) ([]byte, error) {
 		return nil, markResultUnknown(err)
 	}
 	return result, err
+}
+
+func (c *Client) checkProfileSpace(req *Request) error {
+	if c.cred == nil || c.cred.Profile == "" {
+		return nil
+	}
+	for name, value := range req.Headers {
+		if strings.EqualFold(name, "X-Space-Id") && value != c.cred.SpaceID {
+			return output.ErrWithHint("validation", "PROFILE_SCOPE_MISMATCH",
+				"request Space header does not match the selected profile", "select a matching profile")
+		}
+	}
+	return nil
 }
 
 // doWithRetry runs the HTTP request, retrying transient errors with backoff.
@@ -1006,6 +1024,9 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if req.ExpectedStatus != 0 && resp.StatusCode != req.ExpectedStatus {
+			return nil, output.ErrAPI("INVALID_RESPONSE", "server returned an unexpected success status", "")
+		}
 		// Binary/redirect opt-in: don't try to parse as JSON, just describe.
 		if req.BinaryResponse {
 			env := map[string]any{
