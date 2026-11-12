@@ -41,6 +41,11 @@ profile. Set only one Token environment variable. Profiles are selected by
 credential without an explicit profile uses `OCTO_API_BASE_URL` and the runtime
 Space from `--space` or `OCTO_SPACE_ID`.
 
+Use `octo-cli auth list` to see the saved profiles and default. Pass `--profile`
+to choose a profile for one command, or export `OCTO_PROFILE` to choose one
+for commands in the current shell. Edit `current_profile` in `config.json`
+to change the saved default.
+
 The CLI stores version 1 profiles in `~/.octo/cli/config.json`. Set
 `OCTO_CONFIG_DIR` to use a dedicated private directory. A managed profile
 binds the credential to its saved gateway origin and Space. Reimport to change

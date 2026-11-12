@@ -9,8 +9,9 @@ Use `octo-cli schema --list` to discover embedded operations. Inspect an operati
 with `octo-cli schema <operation-id>`. This framework build starts with an empty
 service registry.
 
-Select a profile with `--profile` or `OCTO_PROFILE`. For an external Bearer,
-use `--credential-file`, `OCTO_TOKEN`, or `OCTO_TOKEN_FILE`. Set only one Token
+Use `octo-cli auth list` to see saved profiles and the default. Select a profile
+with `--profile` or `OCTO_PROFILE`. For an external Bearer, use
+`--credential-file`, `OCTO_TOKEN`, or `OCTO_TOKEN_FILE`. Set only one Token
 environment variable. Without an explicit profile, external credentials use
 `OCTO_API_BASE_URL` and the runtime Space. Use `octo-cli auth login` to import a
 Token locally and `octo-cli auth logout` to remove a profile. Use

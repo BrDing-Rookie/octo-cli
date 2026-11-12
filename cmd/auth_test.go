@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
+	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
@@ -240,7 +242,7 @@ func TestAuthProfileLifecycleAcrossProcesses(t *testing.T) {
 	}
 }
 
-func TestAuthCommandsOnlyAddAndRemoveProfiles(t *testing.T) {
+func TestAuthCommandsManageLocalProfiles(t *testing.T) {
 	root := NewRootCmd(testProfileFactory())
 	auth, _, err := root.Find([]string{"auth"})
 	if err != nil || auth.Name() != "auth" {
@@ -250,8 +252,43 @@ func TestAuthCommandsOnlyAddAndRemoveProfiles(t *testing.T) {
 	for _, cmd := range auth.Commands() {
 		names = append(names, cmd.Name())
 	}
-	if strings.Join(names, ",") != "login,logout" {
-		t.Fatalf("auth commands = %v, want login and logout", names)
+	if strings.Join(names, ",") != "list,login,logout" {
+		t.Fatalf("auth commands = %v, want list, login, and logout", names)
+	}
+}
+
+func TestAuthListUsesOnlyProfileIndex(t *testing.T) {
+	dir := privateProfileFixtureDir(t)
+	t.Setenv(authstore.EnvConfigDir, dir)
+	t.Setenv(config.EnvProfile, "personal")
+	t.Setenv(config.EnvToken, "unused-token")
+	t.Setenv(config.EnvTokenFile, filepath.Join(dir, "absent-token"))
+	writeProfileIndex(t, dir, authstore.Config{
+		Version: 1, CurrentProfile: "work",
+		Profiles: map[string]authstore.Profile{
+			"work": {
+				APIBaseURL: "https://work.example.test", SpaceID: "work-space",
+				TokenSource: authstore.TokenSource{Type: authstore.ManagedStore, Backend: authstore.Keychain, Entry: "absent-entry"},
+			},
+			"personal": {
+				APIBaseURL: "https://personal.example.test", SpaceID: "personal-space",
+				TokenSource: authstore.TokenSource{Type: authstore.TokenFile, Path: "absent-token"},
+			},
+		},
+	})
+	out, _, err := execRoot(t, newAuthTestFactory(), "auth", "list")
+	if err != nil {
+		t.Fatalf("list should only need profile metadata: %v", err)
+	}
+	want := map[string]any{
+		"current_profile": "work",
+		"profiles": []any{
+			map[string]any{"profile": "personal", "api_base_url": "https://personal.example.test", "space_id": "personal-space", "source": "token_file"},
+			map[string]any{"profile": "work", "api_base_url": "https://work.example.test", "space_id": "work-space", "source": "managed_store", "backend": "keychain"},
+		},
+	}
+	if got := dataOf(t, out); !reflect.DeepEqual(got, want) {
+		t.Fatalf("auth list = %v, want %v", got, want)
 	}
 }
 

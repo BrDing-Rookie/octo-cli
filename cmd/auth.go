@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -15,8 +16,8 @@ import (
 )
 
 func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
-	cmd := &cobra.Command{Use: "auth", Short: "Add and remove local Token profiles"}
-	cmd.AddCommand(newAuthLoginCmd(f), newAuthLogoutCmd(f))
+	cmd := &cobra.Command{Use: "auth", Short: "Manage local Token profiles"}
+	cmd.AddCommand(newAuthLoginCmd(f), newAuthListCmd(f), newAuthLogoutCmd(f))
 	return cmd
 }
 
@@ -95,6 +96,66 @@ func loginTokenInput(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, pat
 func isTerminal(reader any) bool {
 	file, ok := reader.(*os.File)
 	return ok && term.IsTerminal(int(file.Fd()))
+}
+
+func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List local profiles and the saved default",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			store, err := f.AuthStore()
+			if err != nil {
+				return failErr(f, err)
+			}
+			var result profileList
+			err = store.View(cmd.Context(), func(cfg *authstore.Config) error {
+				result, err = listProfiles(cfg)
+				return err
+			})
+			if err != nil {
+				return failErr(f, err)
+			}
+			return emitJSON(f, result)
+		},
+	}
+}
+
+type profileListEntry struct {
+	Profile    string `json:"profile"`
+	APIBaseURL string `json:"api_base_url"`
+	SpaceID    string `json:"space_id"`
+	Source     string `json:"source"`
+	Backend    string `json:"backend,omitempty"`
+}
+
+type profileList struct {
+	CurrentProfile string             `json:"current_profile"`
+	Profiles       []profileListEntry `json:"profiles"`
+}
+
+func listProfiles(cfg *authstore.Config) (profileList, error) {
+	result := profileList{CurrentProfile: cfg.CurrentProfile, Profiles: make([]profileListEntry, 0, len(cfg.Profiles))}
+	for name, profile := range cfg.Profiles {
+		if err := authstore.ValidateName(name); err != nil {
+			return profileList{}, err
+		}
+		p, err := profile.Scope()
+		if err != nil {
+			return profileList{}, err
+		}
+		if err := p.ValidateSource(); err != nil {
+			return profileList{}, err
+		}
+		result.Profiles = append(result.Profiles, profileListEntry{
+			Profile: name, APIBaseURL: p.APIBaseURL, SpaceID: p.SpaceID,
+			Source: p.TokenSource.Type, Backend: p.TokenSource.Backend,
+		})
+	}
+	sort.Slice(result.Profiles, func(i, j int) bool {
+		return result.Profiles[i].Profile < result.Profiles[j].Profile
+	})
+	return result, nil
 }
 
 func newAuthLogoutCmd(f *cmdutil.Factory) *cobra.Command {
