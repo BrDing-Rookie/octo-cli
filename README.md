@@ -46,23 +46,41 @@ The CLI stores version 1 profiles in `~/.octo/cli/config.json`. Set
 binds the credential to its saved gateway origin and Space. Reimport to change
 that binding.
 
-Set `OCTO_AUTH_CURRENT_URL` to the full Token verification URL on the same
-origin as the profile's business gateway. Choose one input for `auth login`.
-Use `--with-token` for stdin or `--token-file` for a file.
+Use `auth login` to save a Token locally. Choose one input, `--with-token` for
+stdin or `--token-file` for a file. The business gateway validates the Token
+when a command sends a request.
 
 ```sh
 octo-cli --profile agent --space "$space_id" auth login \
   --api-base-url "$api_origin" --with-token < "$token_file"
-octo-cli --profile agent auth status
 ```
 
 A successful import selects the profile as `current_profile`. Managed credentials
 use the system credential store when available or a private AES-256-GCM file
 with a random master key. On macOS, managed directories and files use owner-only
-permissions and accept empty or deny-only ACLs. `auth status` checks a managed
-profile offline and returns `ready` or `missing`. `auth list` and `config show`
-display non-secret metadata. `auth logout` removes the profile and cleans its
-unreferenced managed entry.
+permissions and accept empty or deny-only ACLs.
+
+To add a profile that reads from a file you manage, add a `token_file` source
+to `config.json`. Relative token paths are resolved from `OCTO_CONFIG_DIR` or
+the default configuration directory.
+
+```json
+{
+  "version": 1,
+  "current_profile": "agent",
+  "profiles": {
+    "agent": {
+      "api_base_url": "https://api.example.invalid",
+      "space_id": "space-id",
+      "token_source": { "type": "token_file", "path": "agent.token" }
+    }
+  }
+}
+```
+
+Use `octo-cli --profile agent auth logout` to remove the profile and clean up
+its unreferenced managed credential. A caller-owned token file stays in place.
+`config show` displays the resolved target and credential source.
 
 ## Add an OpenAPI specification
 

@@ -19,7 +19,6 @@ const (
 	EnvProfile        = "OCTO_PROFILE"
 	EnvSpaceID        = "OCTO_SPACE_ID"
 	EnvFormat         = "OCTO_FORMAT"
-	EnvAuthCurrentURL = "OCTO_AUTH_CURRENT_URL"
 	DefaultAPIBaseURL = "https://im.deepminer.com.cn"
 )
 

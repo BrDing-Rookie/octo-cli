@@ -30,44 +30,22 @@ This policy covers:
 
 ## Token Handling
 
-A bot token never appears on the command line. `octo-cli auth login` reads it from a
-hidden, asterisk-masked terminal prompt, from stdin (`--with-token`), or from a
-file (`--token-file`) — so it is never written to argv, shell history, or an
-agent transcript.
-
-Wherever a token surfaces in output (`auth status`, `config show`, `--dry-run`
-Authorization header) it is masked. For a recognized kind the masking reveals
-the prefix, two leading body chars, a fixed `***`, and the last four chars (so
-two tokens are distinguishable without exposing the secret, and the middle is
-fixed-width so token length is not leaked):
-
-| Token | Displayed as |
-|---|---|
-| `app_<long body>` | `app_ab***5678` |
-| `bf_<long body>` | `bf_so***hing` |
-| `app_`/`bf_` with a short body | `app_***` / `bf_***` |
-| Unrecognized prefix | `***` (reveal nothing) |
-| Empty | `null` |
+`octo-cli auth login` reads the Bearer from stdin (`--with-token`) or a file
+(`--token-file`). Terminal input is hidden. Login imports the credential locally.
+The business gateway authenticates the Bearer when a command sends a request.
+`auth login` and `config show` report non-secret fields, and the CLI masks the
+Bearer in request previews and diagnostics.
 
 ## Credential Storage
 
-`octo-cli auth login` stores tokens encrypted on disk under `~/.octo-cli` (override
-with `OCTO_CONFIG_DIR`):
+The CLI stores profile metadata in `~/.octo/cli/config.json`, with
+`OCTO_CONFIG_DIR` available as an override. Managed credentials use the system
+credential store. When that backend is unavailable, the CLI stores each Token
+in an AES-256-GCM file with a random nonce and keeps a random master key in the
+same private configuration directory.
 
-- **`credentials.enc`** (0600) — tokens, AES-256-GCM with a random per-message
-  nonce. **`config.json`** (non-secret profile metadata) and **`cred.salt`**
-  (0600) live alongside; the directory is 0700.
-- The encryption key is `SHA256(machineID ‖ salt)`. The machine id is read per
-  OS (`/etc/machine-id` on Linux, `IOPlatformUUID` on macOS, `MachineGuid` on
-  Windows; platforms without one fall back to salt-only). It is **not a secret**
-  — the binding means a copied/synced/backed-up `~/.octo-cli` cannot be
-  decrypted on a *different* machine, not that an attacker who has the file
-  cannot eventually decrypt it given the same host.
-
-**Trust boundary: the OS user account.** Any process running as the same user
-can run `octo-cli` and therefore decrypt the store; the encryption defends against
-off-machine leakage (accidental commit, backup, cloud sync), not a co-resident
-process. Isolate mutually-distrusting bots with separate OS users or separate
-`OCTO_CONFIG_DIR` values. The CLI's anti-misuse guards (ambiguous selection is a
-hard error, `--bot-id` assertion, `identity` echoed on every response) prevent
-*accidental* wrong-identity use, not a malicious same-user process.
+The OS user account controls access to the managed store. A process that can
+read both the master key and the encrypted credential can recover the Token.
+`auth logout` removes the profile and cleans up its managed credential when
+the last reference is removed. A `token_file` source points to a file managed
+by its caller.

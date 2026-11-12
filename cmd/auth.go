@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"sort"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -16,8 +15,8 @@ import (
 )
 
 func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
-	cmd := &cobra.Command{Use: "auth", Short: "Import and manage local Token profiles"}
-	cmd.AddCommand(newAuthLoginCmd(f), newAuthStatusCmd(f), newAuthListCmd(f), newAuthLogoutCmd(f))
+	cmd := &cobra.Command{Use: "auth", Short: "Add and remove local Token profiles"}
+	cmd.AddCommand(newAuthLoginCmd(f), newAuthLogoutCmd(f))
 	return cmd
 }
 
@@ -35,7 +34,7 @@ func newAuthLoginCmd(f *cmdutil.Factory) *cobra.Command {
 	var tokenFile, apiBaseURL string
 	cmd := &cobra.Command{
 		Use:     "login",
-		Short:   "Verify and import a Token into a local profile",
+		Short:   "Import a Token into a local profile",
 		Args:    cobra.NoArgs,
 		PreRunE: authMutationPreRun(f, "remove --dry-run to import a token"),
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -96,137 +95,6 @@ func loginTokenInput(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, pat
 func isTerminal(reader any) bool {
 	file, ok := reader.(*os.File)
 	return ok && term.IsTerminal(int(file.Fd()))
-}
-
-func newAuthStatusCmd(f *cmdutil.Factory) *cobra.Command {
-	return &cobra.Command{
-		Use:   "status",
-		Short: "Probe a managed profile offline",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := authStatus(cmd, f); err != nil {
-				return failErr(f, err)
-			}
-			return nil
-		},
-	}
-}
-
-func authStatus(cmd *cobra.Command, f *cmdutil.Factory) error {
-	selector, err := f.ProfileSelector()
-	if err != nil {
-		return err
-	}
-	store, err := f.AuthStore()
-	if err != nil {
-		return err
-	}
-	var result profileStatus
-	err = store.View(cmd.Context(), func(cfg *authstore.Config) error {
-		name := selector
-		if name == "" {
-			name = cfg.CurrentProfile
-		}
-		p, ok := cfg.Profiles[name]
-		if !ok {
-			result = profileStatus{State: "missing", Profile: name}
-			return nil
-		}
-		p, err := cmdutil.ApplyProfileScope(f.RuntimeConfig(), &p)
-		if err != nil {
-			return err
-		}
-		if p.TokenSource.Type != authstore.ManagedStore {
-			return output.ErrValidation("selected profile is not managed", "select a managed profile for auth status")
-		}
-		if _, err := store.ReadToken(cmd.Context(), &p); err != nil {
-			return err
-		}
-		result = readyProfile(name, &p)
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-	return emitJSON(f, result)
-}
-
-type profileStatus struct {
-	State      string `json:"state"`
-	Profile    string `json:"profile,omitempty"`
-	APIBaseURL string `json:"api_base_url,omitempty"`
-	SpaceID    string `json:"space_id,omitempty"`
-	TokenID    string `json:"token_id,omitempty"`
-	OwnerID    string `json:"owner_id,omitempty"`
-	Source     string `json:"source,omitempty"`
-}
-
-func readyProfile(name string, p *authstore.Profile) profileStatus {
-	return profileStatus{
-		State: "ready", Profile: name, APIBaseURL: p.APIBaseURL, SpaceID: p.SpaceID,
-		TokenID: p.Verified.TokenID, OwnerID: p.Verified.OwnerID, Source: authstore.ManagedStore,
-	}
-}
-
-func newAuthListCmd(f *cmdutil.Factory) *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Short: "List local profiles and their credential sources",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			store, err := f.AuthStore()
-			if err != nil {
-				return failErr(f, err)
-			}
-			var result profileList
-			err = store.View(cmd.Context(), func(cfg *authstore.Config) error {
-				result, err = listProfiles(cfg)
-				return err
-			})
-			if err != nil {
-				return failErr(f, err)
-			}
-			return emitJSON(f, result)
-		},
-	}
-}
-
-type profileListEntry struct {
-	Profile    string              `json:"profile"`
-	APIBaseURL string              `json:"api_base_url"`
-	SpaceID    string              `json:"space_id"`
-	Source     string              `json:"source"`
-	Backend    string              `json:"backend,omitempty"`
-	Verified   *authstore.Verified `json:"verified,omitempty"`
-}
-
-type profileList struct {
-	CurrentProfile string             `json:"current_profile"`
-	Profiles       []profileListEntry `json:"profiles"`
-}
-
-func listProfiles(cfg *authstore.Config) (profileList, error) {
-	result := profileList{CurrentProfile: cfg.CurrentProfile, Profiles: make([]profileListEntry, 0, len(cfg.Profiles))}
-	for name, profile := range cfg.Profiles {
-		if err := authstore.ValidateName(name); err != nil {
-			return profileList{}, err
-		}
-		p, err := profile.Scope()
-		if err != nil {
-			return profileList{}, err
-		}
-		if err := p.ValidateSource(); err != nil {
-			return profileList{}, err
-		}
-		result.Profiles = append(result.Profiles, profileListEntry{
-			Profile: name, APIBaseURL: p.APIBaseURL, SpaceID: p.SpaceID,
-			Source: p.TokenSource.Type, Backend: p.TokenSource.Backend, Verified: p.Verified,
-		})
-	}
-	sort.Slice(result.Profiles, func(i, j int) bool {
-		return result.Profiles[i].Profile < result.Profiles[j].Profile
-	})
-	return result, nil
 }
 
 func newAuthLogoutCmd(f *cmdutil.Factory) *cobra.Command {

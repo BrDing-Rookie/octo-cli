@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
@@ -101,16 +102,13 @@ func snapshot(t *testing.T, store *Store) *Config {
 	return cfg
 }
 
-func testProfile(id string) *Profile {
-	return &Profile{
-		APIBaseURL: "https://gateway.example.test", SpaceID: "space-a",
-		Verified: &Verified{TokenID: id, OwnerID: "owner-a", SpaceID: "space-a"},
-	}
+func testProfile() *Profile {
+	return &Profile{APIBaseURL: "https://gateway.example.test", SpaceID: "space-a"}
 }
 
-func saveTestProfile(t *testing.T, store *Store, name, id, token string) {
+func saveTestProfile(t *testing.T, store *Store, name, token string) {
 	t.Helper()
-	warning, err := store.Import(context.Background(), name, snapshot(t, store), false, testProfile(id), token)
+	warning, err := store.Import(context.Background(), name, snapshot(t, store), false, testProfile(), token)
 	if err != nil || warning != "" {
 		t.Fatalf("import = %v, warning = %q", err, warning)
 	}
@@ -124,10 +122,34 @@ func requireCredential(t *testing.T, store *Store, profile *Profile, token strin
 	}
 }
 
+func TestManagedProfileNeedsOnlyLocalMetadata(t *testing.T) {
+	for _, tc := range []struct {
+		name, metadata string
+	}{
+		{name: "new profile"},
+		{name: "legacy profile", metadata: `,"verified":{"token_id":"old-id","owner_id":"old-owner","space_id":"old-space"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var profile Profile
+			raw := `{"api_base_url":"https://gateway.example.test","space_id":"space-a",` +
+				`"token_source":{"type":"managed_store","backend":"keychain","entry":"test-entry"}` + tc.metadata + `}`
+			if err := json.Unmarshal([]byte(raw), &profile); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := profile.Scope(); err != nil {
+				t.Fatalf("profile rejected by local scope validation: %v", err)
+			}
+			if err := profile.ValidateSource(); err != nil {
+				t.Fatalf("profile rejected by credential reference validation: %v", err)
+			}
+		})
+	}
+}
+
 func TestEncryptedFallbackPrivateFilesAndIntegrity(t *testing.T) {
 	store := testStore(t, &memoryKeychain{putErr: ErrUnavailable})
 	const secret = "opaque-fallback-test-bearer"
-	saveTestProfile(t, store, "agent", "id-1", secret)
+	saveTestProfile(t, store, "agent", secret)
 	cfg := snapshot(t, store)
 	p := cfg.Profiles["agent"]
 	if p.TokenSource.Backend != EncryptedFile {
@@ -177,13 +199,13 @@ func TestEncryptedFallbackPrivateFilesAndIntegrity(t *testing.T) {
 func TestSystemPermissionFailureDoesNotFallBack(t *testing.T) {
 	keychain := &memoryKeychain{entries: make(map[string]string)}
 	store := testStore(t, keychain)
-	saveTestProfile(t, store, "agent", "id-1", "old-token-fixture")
+	saveTestProfile(t, store, "agent", "old-token-fixture")
 	old := snapshot(t, store)
 	if old.Profiles["agent"].TokenSource.Backend != Keychain {
 		t.Fatal("available system storage was bypassed")
 	}
 	keychain.putErr = fs.ErrPermission
-	_, err := store.Import(context.Background(), "agent", old, false, testProfile("id-2"), "new-token-fixture")
+	_, err := store.Import(context.Background(), "agent", old, false, testProfile(), "new-token-fixture")
 	if exit := output.AsExitError(err); exit == nil || exit.Type != "permission" {
 		t.Fatalf("expected a permission error, got %v", err)
 	}
@@ -198,7 +220,7 @@ func TestSystemCredentialDirectoryCaseAlias(t *testing.T) {
 	keychain := &memoryKeychain{entries: make(map[string]string)}
 	store := testStore(t, keychain)
 	const token = "shared-token-fixture"
-	saveTestProfile(t, store, "agent", "id-1", token)
+	saveTestProfile(t, store, "agent", token)
 
 	aliasStore := testStoreCaseAlias(t, store, keychain)
 	ctx := context.Background()
@@ -239,7 +261,7 @@ func TestSystemCredentialLegacyAccount(t *testing.T) {
 			account := fmt.Sprintf("%x", sha256.Sum256([]byte(oldDir+"\x00"+entry)))
 			keychain.entries[account] = token
 			cfg := emptyConfig()
-			p := testProfile("id-1")
+			p := testProfile()
 			p.TokenSource = TokenSource{Type: ManagedStore, Backend: Keychain, Entry: entry}
 			cfg.Profiles["agent"] = *p
 			if warning, err := store.publish(ctx, cfg, TokenSource{}); err != nil || warning != "" {
@@ -263,7 +285,7 @@ func TestSystemCredentialDirectoryIsolation(t *testing.T) {
 	keychain := &memoryKeychain{entries: make(map[string]string)}
 	store := testStore(t, keychain)
 	const token = "directory-token-fixture"
-	saveTestProfile(t, store, "agent", "id-1", token)
+	saveTestProfile(t, store, "agent", token)
 	cfg := snapshot(t, store)
 
 	otherDir := filepath.Join(filepath.Dir(store.dir), "CLI")
@@ -294,7 +316,7 @@ func TestInterruptedImportKeepsOldReference(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			keychain := &memoryKeychain{entries: make(map[string]string)}
 			store := testStore(t, keychain)
-			saveTestProfile(t, store, "agent", "id-1", "old-token-fixture")
+			saveTestProfile(t, store, "agent", "old-token-fixture")
 			old := snapshot(t, store)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -305,13 +327,13 @@ func TestInterruptedImportKeepsOldReference(t *testing.T) {
 				cancel()
 				return keychain.read(account)
 			}
-			_, err := store.Import(ctx, "agent", old, false, testProfile("id-2"), "new-token-fixture")
+			_, err := store.Import(ctx, "agent", old, false, testProfile(), "new-token-fixture")
 			if exit := output.AsExitError(err); exit == nil || exit.Code != "PROFILE_STORAGE_ERROR" {
 				t.Fatalf("interrupted import should fail before commit: %v", err)
 			}
 			keychain.get = nil
 			p := snapshot(t, store).Profiles["agent"]
-			if p.TokenSource != old.Profiles["agent"].TokenSource || p.Verified.TokenID != "id-1" || len(keychain.entries) != 1 {
+			if p != old.Profiles["agent"] || len(keychain.entries) != 1 {
 				t.Fatal("failed import changed the profile reference or left a staged credential")
 			}
 			requireCredential(t, store, &p, "old-token-fixture")
@@ -319,10 +341,49 @@ func TestInterruptedImportKeepsOldReference(t *testing.T) {
 	}
 }
 
+func TestConcurrentImportsFromSameSnapshotKeepOneCredential(t *testing.T) {
+	store := testStore(t, &memoryKeychain{putErr: ErrUnavailable})
+	initial := snapshot(t, store)
+	type result struct {
+		token string
+		err   error
+	}
+	results := make(chan result, 2)
+	for _, token := range []string{"first-fixture-token", "second-fixture-token"} {
+		go func() {
+			warning, err := store.Import(context.Background(), "agent", initial, false, testProfile(), token)
+			if warning != "" {
+				t.Errorf("unexpected import warning: %s", warning)
+			}
+			results <- result{token: token, err: err}
+		}()
+	}
+	var winner string
+	var rejected int
+	for range 2 {
+		r := <-results
+		if r.err == nil {
+			winner = r.token
+		} else if exit := output.AsExitError(r.err); exit != nil && exit.Code == "PROFILE_CHANGED" {
+			rejected++
+		} else {
+			t.Errorf("unexpected import error: %v", r.err)
+		}
+	}
+	if winner == "" || rejected != 1 {
+		t.Fatal("concurrent imports did not publish one credential and reject the stale snapshot")
+	}
+	profile := snapshot(t, store).Profiles["agent"]
+	requireCredential(t, store, &profile, winner)
+	if files, err := filepath.Glob(filepath.Join(store.dir, "credential-*.enc")); err != nil || len(files) != 1 {
+		t.Fatalf("concurrent imports left %d encrypted entries, want one: %v", len(files), err)
+	}
+}
+
 func TestCanceledSystemWriteDiscardsNewEntry(t *testing.T) {
 	keychain := &memoryKeychain{entries: make(map[string]string)}
 	store := testStore(t, keychain)
-	saveTestProfile(t, store, "agent", "id-1", "old-token-fixture")
+	saveTestProfile(t, store, "agent", "old-token-fixture")
 	old := snapshot(t, store)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -331,12 +392,12 @@ func TestCanceledSystemWriteDiscardsNewEntry(t *testing.T) {
 		return ctx.Err()
 	}
 
-	_, err := store.Import(ctx, "agent", old, false, testProfile("id-2"), "new-token-fixture")
+	_, err := store.Import(ctx, "agent", old, false, testProfile(), "new-token-fixture")
 	if exit := output.AsExitError(err); exit == nil || exit.Code != "PROFILE_STORAGE_ERROR" {
 		t.Fatalf("expected a storage error after cancellation, got %v", err)
 	}
 	p := snapshot(t, store).Profiles["agent"]
-	if p.TokenSource != old.Profiles["agent"].TokenSource || p.Verified.TokenID != "id-1" {
+	if p != old.Profiles["agent"] {
 		t.Fatal("canceled write changed the active profile")
 	}
 	requireCredential(t, store, &p, "old-token-fixture")
@@ -348,15 +409,15 @@ func TestCanceledSystemWriteDiscardsNewEntry(t *testing.T) {
 func TestCleanupFailureKeepsPublishedState(t *testing.T) {
 	keychain := &memoryKeychain{entries: make(map[string]string)}
 	store := testStore(t, keychain)
-	saveTestProfile(t, store, "agent", "id-1", "old-token-fixture")
+	saveTestProfile(t, store, "agent", "old-token-fixture")
 	old := snapshot(t, store)
 	keychain.deleteErr = fs.ErrPermission
-	warning, err := store.Import(context.Background(), "agent", old, false, testProfile("id-2"), "new-token-fixture")
+	warning, err := store.Import(context.Background(), "agent", old, false, testProfile(), "new-token-fixture")
 	if err != nil || warning == "" {
 		t.Fatalf("expected a successful publication with a cleanup warning: %v %q", err, warning)
 	}
 	p := snapshot(t, store).Profiles["agent"]
-	if p.Verified.TokenID != "id-2" || p.TokenSource == old.Profiles["agent"].TokenSource {
+	if p.TokenSource == old.Profiles["agent"].TokenSource {
 		t.Fatal("cleanup failure rolled back the new profile")
 	}
 	requireCredential(t, store, &p, "new-token-fixture")
@@ -369,7 +430,7 @@ func TestCleanupFailureKeepsPublishedState(t *testing.T) {
 func TestLogoutRetainsReferencedEntries(t *testing.T) {
 	keychain := &memoryKeychain{entries: make(map[string]string)}
 	store := testStore(t, keychain)
-	saveTestProfile(t, store, "agent", "id-1", "shared-token-fixture")
+	saveTestProfile(t, store, "agent", "shared-token-fixture")
 	cfg := snapshot(t, store)
 	cfg.Profiles["second"] = cfg.Profiles["agent"]
 	if warning, err := store.publish(context.Background(), cfg, TokenSource{}); err != nil || warning != "" {
@@ -404,7 +465,7 @@ func TestLogoutRetainsEncryptedEntryWithMixedCaseReferences(t *testing.T) {
 				t.Fatalf("write test credential: %v", err)
 			}
 			cfg := emptyConfig()
-			p := testProfile("id-1")
+			p := testProfile()
 			p.TokenSource = TokenSource{Type: ManagedStore, Backend: EncryptedFile, Entry: entry}
 			cfg.Profiles["lowercase"] = *p
 			p.TokenSource.Entry = strings.ToUpper(entry)

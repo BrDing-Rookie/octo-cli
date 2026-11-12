@@ -13,8 +13,6 @@ type Credential struct {
 	SpaceID string
 	Source  string
 	Profile string
-	TokenID string
-	OwnerID string
 }
 
 type inputError string

@@ -34,7 +34,7 @@ func (f *Factory) RuntimeConfig() *config.Config {
 	return cfg
 }
 
-// ApplyProfileScope binds a request or a probe to the selected profile.
+// ApplyProfileScope applies and checks the selected profile's origin and Space.
 func ApplyProfileScope(cfg *config.Config, profile *authstore.Profile) (authstore.Profile, error) {
 	p, err := profile.Scope()
 	if err != nil {
@@ -167,9 +167,6 @@ func (f *Factory) resolveProfile(ctx context.Context, cfg *config.Config, select
 			return err
 		}
 		resolved.Source = p.TokenSource.Type
-		if p.Verified != nil {
-			resolved.TokenID, resolved.OwnerID = p.Verified.TokenID, p.Verified.OwnerID
-		}
 		resolved.Token, err = store.ReadToken(ctx, &p)
 		return err
 	})

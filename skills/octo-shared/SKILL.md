@@ -12,9 +12,9 @@ service registry.
 Select a profile with `--profile` or `OCTO_PROFILE`. For an external Bearer,
 use `--credential-file`, `OCTO_TOKEN`, or `OCTO_TOKEN_FILE`. Set only one Token
 environment variable. Without an explicit profile, external credentials use
-`OCTO_API_BASE_URL` and the runtime Space. Use `octo-cli auth status` for an
-offline managed-profile probe and `octo-cli config show` for the resolved target
-and credential source.
+`OCTO_API_BASE_URL` and the runtime Space. Use `octo-cli auth login` to import a
+Token locally and `octo-cli auth logout` to remove a profile. Use
+`octo-cli config show` for the resolved target and credential source.
 
 Use `octo-cli api <METHOD> <PATH>` for a direct request to the configured
 gateway. `--params` accepts a JSON object and `--data` accepts inline JSON,

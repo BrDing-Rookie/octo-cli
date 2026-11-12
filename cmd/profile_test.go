@@ -14,19 +14,16 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-func TestProfileMissingIsOffline(t *testing.T) {
+func TestMissingExplicitProfileDoesNotCreateStore(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "new-cli")
 	t.Setenv("OCTO_CONFIG_DIR", dir)
 	t.Setenv(config.EnvToken, phaseOneToken)
-	out, _, err := runPhaseOneCommand(t, "--profile", "agent", "auth", "status")
-	if err != nil {
-		t.Fatalf("missing profile should be a successful offline probe: %v", err)
-	}
-	if got := dataOf(t, out)["state"]; got != "missing" {
-		t.Fatalf("missing profile state = %v, want missing", got)
+	_, _, err := runPhaseOneCommand(t, "--profile", "agent", "config", "show")
+	if exit := output.AsExitError(err); exit == nil || exit.Code != "UNAUTHORIZED" {
+		t.Fatalf("missing profile did not produce an auth error: %v", err)
 	}
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
-		t.Fatalf("offline probe created the config directory: %v", err)
+		t.Fatalf("profile resolution created the config directory: %v", err)
 	}
 }
 
@@ -152,11 +149,9 @@ func TestProfileAndCredentialPrecedence(t *testing.T) {
 func TestExternalProfileLogoutPreservesCallerFile(t *testing.T) {
 	dir := privateProfileFixtureDir(t)
 	writeExternalProfile(t, dir, "external", "https://gateway.example.test")
-	if _, _, err := runPhaseOneCommand(t, "--profile", "external", "auth", "status"); output.AsExitError(err) == nil {
-		t.Fatalf("external profile status should report a structured error: %v", err)
-	}
-	if _, _, err := runPhaseOneCommand(t, "--profile", "external", "auth", "logout"); err != nil {
-		t.Fatal(err)
+	out, _, err := runPhaseOneCommand(t, "--profile", "external", "auth", "logout")
+	if err != nil || dataOf(t, out)["removed"] != "external" {
+		t.Fatalf("external profile was not removed: %v", err)
 	}
 	if data, err := os.ReadFile(filepath.Join(dir, "external-token")); err != nil || string(data) != "external-file-fixture\n" {
 		t.Fatalf("logout affected the caller file: %v", err)
@@ -176,8 +171,9 @@ func TestExternalCredentialBypassesCorruptImplicitProfile(t *testing.T) {
 	if data := dataOf(t, out); data["source"] != "env:OCTO_TOKEN" || data["api_base_url"] != "https://runtime.example.test" {
 		t.Fatalf("unexpected runtime target: %v", data)
 	}
-	if _, _, err := runPhaseOneCommand(t, "--profile", "legacy", "auth", "status"); output.AsExitError(err) == nil {
-		t.Fatalf("corrupt index produced a missing status: %v", err)
+	_, _, err = runPhaseOneCommand(t, "--profile", "legacy", "config", "show")
+	if exit := output.AsExitError(err); exit == nil || exit.Code != "INVALID_PROFILE" {
+		t.Fatalf("explicit selection did not report the corrupt index: %v", err)
 	}
 }
 
@@ -193,14 +189,14 @@ func TestDefaultProfileStoreIsIsolatedFromLegacy(t *testing.T) {
 	const oldConfig = `{"profiles":{"agent":{"robot_id":"old-bot"}}}`
 	legacyPath := filepath.Join(legacy, "config.json")
 	writeFixtureFile(t, legacyPath, oldConfig)
-	out, _, err := runPhaseOneCommand(t, "--profile", "agent", "auth", "status")
-	if err != nil || dataOf(t, out)["state"] != "missing" {
-		t.Fatalf("legacy-only setup did not yield missing: %v %s", err, out)
+	_, _, err := runPhaseOneCommand(t, "--profile", "agent", "config", "show")
+	if exit := output.AsExitError(err); exit == nil || exit.Code != "UNAUTHORIZED" {
+		t.Fatalf("legacy-only setup did not report a missing profile: %v", err)
 	}
 	if got, err := os.ReadFile(legacyPath); err != nil || string(got) != oldConfig {
 		t.Fatalf("legacy config was modified: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(home, ".octo", "cli")); !os.IsNotExist(err) {
-		t.Fatalf("status created the new profile directory: %v", err)
+		t.Fatalf("profile resolution created the new profile directory: %v", err)
 	}
 }

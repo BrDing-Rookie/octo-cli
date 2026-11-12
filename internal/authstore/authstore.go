@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"reflect"
 	"unicode/utf8"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
@@ -179,8 +178,8 @@ func credentialAccount(dir, entry string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(dir+"\x00"+entry)))
 }
 
-// Import verifies that the target observed before online verification is
-// unchanged, then publishes a new credential and its metadata together.
+// Import publishes a new credential and its profile if the target still
+// matches the snapshot used to resolve the import.
 // The warning describes failures after the configuration became visible.
 func (s *Store) Import(ctx context.Context, name string, snapshot *Config, implicit bool, p *Profile, token string) (warning string, err error) {
 	if err := ValidateName(name); err != nil {
@@ -190,17 +189,14 @@ func (s *Store) Import(ctx context.Context, name string, snapshot *Config, impli
 	if err != nil {
 		return "", err
 	}
-	if target.Verified == nil {
-		return "", invalidProfile("import requires verified metadata")
-	}
 	if err := credential.ValidateBearer(token); err != nil {
 		return "", output.ErrAuth(err.Error(), "")
 	}
 
 	err = s.withConfig(ctx, true, func(cfg *Config) error {
 		previous := snapshot.Profiles[name]
-		if !reflect.DeepEqual(cfg.Profiles[name], previous) || implicit && cfg.CurrentProfile != snapshot.CurrentProfile {
-			return output.ErrWithHint("config", "PROFILE_CHANGED", "profile changed during token verification", "retry the import")
+		if cfg.Profiles[name] != previous || implicit && cfg.CurrentProfile != snapshot.CurrentProfile {
+			return output.ErrWithHint("config", "PROFILE_CHANGED", "profile changed during import", "retry the import")
 		}
 
 		source, err := s.stageCredential(ctx, token)

@@ -105,7 +105,13 @@ func NewDefaultFactory() *Factory {
 		if err != nil {
 			return nil, err
 		}
-		f.cli = f.NewHTTPClient(cfg, f.cred)
+		f.cli = client.New(cfg, f.cred, client.Options{
+			Verbose: f.Globals.Verbose,
+			DryRun:  f.Globals.DryRun,
+			NoRetry: f.Globals.NoRetry,
+			Timeout: f.Globals.Timeout,
+			ErrOut:  f.IOStreams.ErrOut,
+		})
 		return f.cli, nil
 	}
 
@@ -116,17 +122,6 @@ func NewDefaultFactory() *Factory {
 		return f.reg
 	}
 	return f
-}
-
-// NewHTTPClient applies invocation options to the shared transport.
-func (f *Factory) NewHTTPClient(cfg *config.Config, cred *credential.Credential) *client.Client {
-	return client.New(cfg, cred, client.Options{
-		Verbose: f.Globals.Verbose,
-		DryRun:  f.Globals.DryRun,
-		NoRetry: f.Globals.NoRetry,
-		Timeout: f.Globals.Timeout,
-		ErrOut:  f.IOStreams.ErrOut,
-	})
 }
 
 // AuthStore opens the local profile store.

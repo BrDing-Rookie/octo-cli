@@ -71,8 +71,6 @@ type Request struct {
 	// credential carries a SpaceID. It is set for operations whose spec declares
 	// x-octo-space-header:false.
 	SuppressSpaceHeader bool
-	// ExpectedStatus optionally requires a specific successful HTTP status.
-	ExpectedStatus int
 	// DisableRetry prevents transport-level retries for this individual
 	// request. Use it for operations whose external side effect may already
 	// have succeeded when the response is lost.
@@ -1034,9 +1032,6 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 	}
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if req.ExpectedStatus != 0 && resp.StatusCode != req.ExpectedStatus {
-			return nil, output.ErrAPI("INVALID_RESPONSE", "server returned an unexpected success status", "")
-		}
 		// Binary/redirect opt-in: don't try to parse as JSON, just describe.
 		if req.BinaryResponse {
 			env := map[string]any{

@@ -31,9 +31,6 @@ func newConfigCmd(f *cmdutil.Factory) *cobra.Command {
 				if cred.Profile != "" {
 					payload["profile"] = cred.Profile
 				}
-				if cred.TokenID != "" {
-					payload["token_id"], payload["owner_id"] = cred.TokenID, cred.OwnerID
-				}
 			}
 			return emitJSON(f, payload)
 		},
