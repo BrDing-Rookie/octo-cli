@@ -63,6 +63,7 @@ type Factory struct {
 	cli    *client.Client
 	// HTTP commands resolve their config independently of local bot profiles.
 	requestConfig func() *config.Config
+	requestSource string
 	// Compiled output query, paired with its expression for safe Factory reuse.
 	jqExpression string
 	jqProgram    *output.JQProgram
@@ -122,7 +123,7 @@ func NewDefaultFactory() *Factory {
 		if f.Globals.Space != "" {
 			space = f.Globals.Space
 		}
-		cred := &credential.BotCredential{Token: cfg.BotToken, SpaceID: space}
+		cred := &credential.BotCredential{Token: cfg.BotToken, SpaceID: space, Source: "env:" + config.EnvToken}
 		cli := client.New(cfg, cred, client.Options{
 			Verbose: f.Globals.Verbose,
 			DryRun:  f.Globals.DryRun,
@@ -131,6 +132,7 @@ func NewDefaultFactory() *Factory {
 			ErrOut:  f.IOStreams.ErrOut,
 		})
 		f.cli = cli
+		f.requestSource = cred.Source
 		return cli, nil
 	}
 
@@ -318,8 +320,18 @@ func (f *Factory) PreflightOutput(format string) error {
 // EmitSuccess renders a success envelope, applying --jq first (if set) and
 // then the configured output format. Non-nil raw is placed inside the envelope.
 func (f *Factory) EmitSuccess(raw []byte) error {
-	rm := normalizeRaw(raw)
-	return f.emit(rm)
+	return f.emit(normalizeRaw(raw), f.identityValue())
+}
+
+// EmitRequestSuccess includes the source selected for the HTTP request.
+func (f *Factory) EmitRequestSuccess(raw []byte) error {
+	if f.requestSource == "" {
+		return f.EmitSuccess(raw)
+	}
+	return f.emit(normalizeRaw(raw), map[string]any{
+		"type":   output.IdentityType,
+		"source": f.requestSource,
+	})
 }
 
 // identityValue builds the envelope's identity field from the credential
@@ -351,8 +363,8 @@ func (f *Factory) identityValue() any {
 	return id
 }
 
-func (f *Factory) emit(raw []byte) error {
-	meta := output.EnvelopeMeta{Identity: f.identityValue()}
+func (f *Factory) emit(raw []byte, identity any) error {
+	meta := output.EnvelopeMeta{Identity: identity}
 	// Build the success envelope into an in-memory buffer first so --jq can
 	// operate on the canonical envelope shape (not the backend shape).
 	var envBuf bytes.Buffer

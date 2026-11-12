@@ -764,9 +764,11 @@ func New(cfg *config.Config, cred *credential.BotCredential, opts Options) *Clie
 func (c *Client) Do(ctx context.Context, req *Request) ([]byte, error) {
 	var bearer []string
 	if c.cred != nil && c.cred.Token != "" {
-		bearer = []string{c.cred.Token}
 		safeReq := *req
-		safeReq.SecretValues = append(bearer, req.SecretValues...)
+		safeReq.SecretValues = make([]string, len(req.SecretValues)+1)
+		safeReq.SecretValues[0] = c.cred.Token
+		copy(safeReq.SecretValues[1:], req.SecretValues)
+		bearer = safeReq.SecretValues[:1]
 		req = &safeReq
 	}
 
@@ -952,13 +954,11 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		// path parameter (invite / share token) would otherwise reach the default
 		// stderr error envelope — no --verbose needed to leak it.
 		msg := redactSecrets(err.Error(), req.SecretValues)
-		if len(req.ResponseSecretFields) > 0 {
-			// Go parses Location before CheckRedirect runs. A malformed redirect
-			// therefore surfaces here as a *url.Error containing the raw signed
-			// URL, before the response can reach redactRedirectLocation. There is
-			// no structured field to isolate, so fail closed rather than echo an
-			// arbitrary transport error from an operation that can return a
-			// response secret.
+		var urlErr *url.Error
+		if len(req.ResponseSecretFields) > 0 ||
+			(errors.As(err, &urlErr) && strings.HasPrefix(urlErr.Err.Error(), "failed to parse Location header ")) {
+			// net/http parses Location before CheckRedirect and includes the
+			// raw header in the error when parsing fails.
 			msg = "transport error"
 		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -1000,7 +1000,7 @@ func (c *Client) attempt(ctx context.Context, req *Request, urlStr string, body 
 		}
 		return nil, output.ErrAPI(
 			fmt.Sprintf("HTTP_%d", resp.StatusCode),
-			fmt.Sprintf("unexpected redirect to %q", redactRedirectLocation(resp.Header.Get("Location"), req.SecretValues, req.ResponseSecretFields)),
+			"unexpected redirect",
 			"",
 		)
 	}

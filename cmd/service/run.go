@@ -1201,7 +1201,7 @@ func emitOnce(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime, req
 			return unwrapErr
 		}
 	}
-	return f.EmitSuccess(body)
+	return f.EmitRequestSuccess(body)
 }
 
 // annotateIdempotencyKey records the key a failed create was sent with, so a
@@ -1463,7 +1463,7 @@ func runPaginated(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime,
 	if err != nil {
 		return err
 	}
-	return f.EmitSuccess(out)
+	return f.EmitRequestSuccess(out)
 }
 
 func paginationControls(rt *operationRuntime, pag *registry.PaginationInfo) (cursorParam string, limit int) {

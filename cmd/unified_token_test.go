@@ -13,19 +13,18 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
-	"github.com/Mininglamp-OSS/octo-cli/internal/registry"
 	"github.com/Mininglamp-OSS/octo-cli/internal/testfixture"
 )
 
 const phaseOneToken = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno_-"
 const authRequiredFixture = `{"error":{"code":"AUTH_REQUIRED","message":"Authentication required","details":{}}}`
 
-func runPhaseOneCommand(t *testing.T, args ...string) (string, string, error) {
+func runPhaseOneCommand(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	streams, in, out, errOut := cmdutil.NewTestIOStreams()
 	f := cmdutil.NewDefaultFactory()
 	f.IOStreams = streams
-	f.RegistryFunc = func() *registry.Registry { return testfixture.Registry() }
+	f.RegistryFunc = testfixture.Registry
 	return execRoot(t, &cmdutil.TestFactory{Factory: f, In: in, Out: out, ErrOut: errOut}, args...)
 }
 
@@ -138,19 +137,45 @@ func TestPhaseOneBearerSources(t *testing.T) {
 	}
 }
 
+func TestPhaseOneBearerPreviewSource(t *testing.T) {
+	t.Setenv(config.EnvAPIBaseURL, "https://api.example.invalid")
+	t.Setenv(config.EnvToken, phaseOneToken)
+	for _, args := range [][]string{
+		{"api", "GET", "/v1/records"},
+		{"example", "record", "list"},
+	} {
+		t.Run(args[0], func(t *testing.T) {
+			out, _, err := runPhaseOneCommand(t, append([]string{"--dry-run", "--jq", ".identity.source"}, args...)...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var source string
+			if err := json.Unmarshal([]byte(out), &source); err != nil || source != "env:"+config.EnvToken {
+				t.Errorf("identity.source = %q, want env:%s", source, config.EnvToken)
+			}
+		})
+	}
+}
+
 func TestPhaseOneBearerDiagnostics(t *testing.T) {
 	var calls, followed atomic.Int32
 	redirect := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		followed.Add(1)
 	}))
 	defer redirect.Close()
+	encodedBearer := "%41" + phaseOneToken[1:]
+	location := redirect.URL + "/?echo=" + encodedBearer
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
 		if r.URL.Path == "/v1/echo" {
 			io.WriteString(w, `{"echo":"\u0041`+phaseOneToken[1:]+`"}`)
 			return
 		}
-		w.Header().Set("Location", redirect.URL+"/?echo="+phaseOneToken)
+		target := location
+		if r.URL.Path == "/v1/malformed-redirect" {
+			target += "#%"
+		}
+		w.Header().Set("Location", target)
 		w.WriteHeader(http.StatusFound)
 	}))
 	defer server.Close()
@@ -165,12 +190,25 @@ func TestPhaseOneBearerDiagnostics(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatalf("dry run made %d requests", calls.Load())
 	}
-	_, stderr, err = runPhaseOneCommand(t, "--verbose", "api", "GET", "/v1/records", "--params", params)
-	ee := output.AsExitError(err)
-	if ee == nil || ee.Code != "HTTP_302" || strings.Contains(stderr, phaseOneToken) || strings.Contains(ee.Error(), phaseOneToken) {
-		t.Error("expected a redacted redirect error and trace")
+	for _, tc := range []struct{ path, wantCode string }{
+		{"/v1/records", "HTTP_302"},
+		{"/v1/malformed-redirect", "NETWORK_ERROR"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			_, stderr, err := runPhaseOneCommand(t, "--verbose", "--no-retry", "api", "GET", tc.path, "--params", params)
+			ee := output.AsExitError(err)
+			if ee == nil || ee.Code != tc.wantCode {
+				t.Fatalf("redirect error code = %v, want %s", err, tc.wantCode)
+			}
+			diagnostics := stderr + ee.Error()
+			if strings.Contains(diagnostics, phaseOneToken) ||
+				strings.Contains(diagnostics, encodedBearer) ||
+				strings.Contains(diagnostics, redirect.URL) {
+				t.Error("redirect diagnostics exposed the Location or bearer")
+			}
+		})
 	}
-	if calls.Load() != 1 || followed.Load() != 0 {
+	if calls.Load() != 2 || followed.Load() != 0 {
 		t.Errorf("requests = %d, followed redirects = %d", calls.Load(), followed.Load())
 	}
 
