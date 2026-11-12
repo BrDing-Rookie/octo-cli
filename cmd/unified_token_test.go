@@ -20,11 +20,15 @@ const authRequiredFixture = `{"error":{"code":"AUTH_REQUIRED","message":"Authent
 
 func runPhaseOneCommand(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
+	return execRoot(t, newPhaseOneTestFactory(), args...)
+}
+
+func newPhaseOneTestFactory() *cmdutil.TestFactory {
 	streams, in, out, errOut := cmdutil.NewTestIOStreams()
 	f := cmdutil.NewDefaultFactory()
 	f.IOStreams = streams
 	f.RegistryFunc = testfixture.Registry
-	return execRoot(t, &cmdutil.TestFactory{Factory: f, In: in, Out: out, ErrOut: errOut}, args...)
+	return &cmdutil.TestFactory{Factory: f, In: in, Out: out, ErrOut: errOut}
 }
 
 func TestPhaseOneBusinessBearer(t *testing.T) {
@@ -148,6 +152,35 @@ func TestPhaseOneBearerPreviewSource(t *testing.T) {
 	}
 }
 
+func TestPhaseOneInvalidSelectorsLeaveStdinUnread(t *testing.T) {
+	server, calls := newOutputPreflightServer(t)
+	t.Setenv(config.EnvAPIBaseURL, server.URL)
+	t.Setenv(config.EnvToken, phaseOneToken)
+	for _, tc := range []struct {
+		name, wantCode string
+		args           []string
+	}{
+		{"missing API profile", "UNAUTHORIZED", []string{"api", "POST", "/v1/records", "--profile", "missing"}},
+		{"retired generated bot id", "VALIDATION_ERROR", []string{"example", "record", "create", "--bot-id", "stored"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newPhaseOneTestFactory()
+			f.In.WriteString(outputPreflightBody)
+			_, _, err := execRoot(t, f, append(tc.args, "--data", "@-")...)
+			ee := output.AsExitError(cmdutil.WrapCLIError(err))
+			if ee == nil || ee.Code != tc.wantCode {
+				t.Errorf("expected %s for an invalid selector, got %v", tc.wantCode, err)
+			}
+			if f.In.String() != outputPreflightBody {
+				t.Error("command read stdin before rejecting the selector")
+			}
+		})
+	}
+	if got := calls.Load(); got != 0 {
+		t.Errorf("business requests = %d, want none", got)
+	}
+}
+
 func TestPhaseOneBearerDiagnostics(t *testing.T) {
 	var calls, followed atomic.Int32
 	redirect := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -181,12 +214,13 @@ func TestPhaseOneBearerDiagnostics(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatalf("dry run made %d requests", calls.Load())
 	}
-	for _, tc := range []struct{ path, wantCode string }{
-		{"/v1/records", "HTTP_302"},
-		{"/v1/malformed-redirect", "NETWORK_ERROR"},
+	for _, tc := range []struct{ method, path, wantCode string }{
+		{http.MethodGet, "/v1/records", "HTTP_302"},
+		{http.MethodPost, "/v1/malformed-redirect", "NETWORK_ERROR"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
-			_, stderr, err := runPhaseOneCommand(t, "--verbose", "--no-retry", "api", "GET", tc.path, "--params", params)
+			before := calls.Load()
+			_, stderr, err := runPhaseOneCommand(t, "--verbose", "api", tc.method, tc.path, "--params", params)
 			ee := output.AsExitError(err)
 			if ee == nil || ee.Code != tc.wantCode {
 				t.Fatalf("redirect error code = %v, want %s", err, tc.wantCode)
@@ -197,10 +231,13 @@ func TestPhaseOneBearerDiagnostics(t *testing.T) {
 				strings.Contains(diagnostics, redirect.URL) {
 				t.Error("redirect diagnostics exposed the Location or bearer")
 			}
+			if got := calls.Load() - before; got != 1 {
+				t.Errorf("%s %s sent %d requests, want one", tc.method, tc.path, got)
+			}
 		})
 	}
-	if calls.Load() != 2 || followed.Load() != 0 {
-		t.Errorf("requests = %d, followed redirects = %d", calls.Load(), followed.Load())
+	if got := followed.Load(); got != 0 {
+		t.Errorf("followed %d redirects, want none", got)
 	}
 
 	out, _, err = runPhaseOneCommand(t, "api", "GET", "/v1/echo")

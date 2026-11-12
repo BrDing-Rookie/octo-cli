@@ -31,11 +31,8 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 			if skipValidation(cmd) {
 				return nil
 			}
-			cfg, err := f.RequestConfig(cmd.Context())
-			if err != nil {
-				return err
-			}
-			return cfg.Validate()
+			_, err := f.ValidatedRequestConfig(cmd.Context())
+			return err
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,

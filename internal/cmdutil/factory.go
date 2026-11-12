@@ -56,11 +56,12 @@ type Factory struct {
 	ErrorEmitted bool
 
 	// Cached resolutions.
-	config         *config.Config
-	cred           *credential.Credential
-	cli            *client.Client
-	requestContext context.Context
-	defaultFormat  func() string
+	config                 *config.Config
+	cred                   *credential.Credential
+	cli                    *client.Client
+	requestContext         context.Context
+	defaultFormat          func() string
+	validatedRequestConfig *config.Config
 	// Compiled output query, paired with its expression for safe Factory reuse.
 	jqExpression string
 	jqProgram    *output.JQProgram
@@ -99,11 +100,8 @@ func NewDefaultFactory() *Factory {
 		if f.cli != nil {
 			return f.cli, nil
 		}
-		cfg, err := f.Config()
+		cfg, err := f.ValidatedRequestConfig(f.requestContext)
 		if err != nil {
-			return nil, err
-		}
-		if err := cfg.Validate(); err != nil {
 			return nil, err
 		}
 		f.cli = f.NewHTTPClient(cfg, f.cred)
@@ -145,6 +143,22 @@ func (f *Factory) Config() (*config.Config, error) { return f.ConfigFunc() }
 func (f *Factory) RequestConfig(ctx context.Context) (*config.Config, error) {
 	f.requestContext = ctx
 	return f.Config()
+}
+
+// ValidatedRequestConfig resolves the request and shares validation between
+// command preflight and client construction.
+func (f *Factory) ValidatedRequestConfig(ctx context.Context) (*config.Config, error) {
+	cfg, err := f.RequestConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if cfg != f.validatedRequestConfig {
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
+		f.validatedRequestConfig = cfg
+	}
+	return cfg, nil
 }
 
 // Credential returns the resolved credential (cached).
