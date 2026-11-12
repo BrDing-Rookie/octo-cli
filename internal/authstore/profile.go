@@ -52,6 +52,15 @@ type TokenSource struct {
 	Path    string `json:"path,omitempty"`
 }
 
+// entryID returns the storage identity of a validated managed reference.
+// Encrypted files and their associated data use lowercase hexadecimal IDs.
+func (s TokenSource) entryID() string {
+	if s.Backend == EncryptedFile {
+		return strings.ToLower(s.Entry)
+	}
+	return s.Entry
+}
+
 // Verified records the non-secret fields checked during a managed import.
 type Verified struct {
 	TokenID string `json:"token_id"`

@@ -3,10 +3,13 @@ package authstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
@@ -53,18 +56,37 @@ func (k *memoryKeychain) Delete(ctx context.Context, account string) error {
 	if k.deleteErr != nil {
 		return k.deleteErr
 	}
+	if _, ok := k.entries[account]; !ok {
+		return fs.ErrNotExist
+	}
 	delete(k.entries, account)
 	return nil
 }
 
 func testStore(t *testing.T, keychain *memoryKeychain) *Store {
 	t.Helper()
-	t.Setenv(EnvConfigDir, filepath.Join(t.TempDir(), "cli"))
+	return testStoreAt(t, filepath.Join(t.TempDir(), "cli"), keychain)
+}
+
+func testStoreAt(t *testing.T, dir string, keychain *memoryKeychain) *Store {
+	t.Helper()
+	t.Setenv(EnvConfigDir, dir)
 	store, err := New(keychain)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return store
+}
+
+func testStoreCaseAlias(t *testing.T, store *Store, keychain *memoryKeychain) *Store {
+	t.Helper()
+	dir := filepath.Join(filepath.Dir(store.dir), "CLI")
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		t.Skip("configuration volume is case-sensitive")
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	return testStoreAt(t, dir, keychain)
 }
 
 func snapshot(t *testing.T, store *Store) *Config {
@@ -172,6 +194,101 @@ func TestSystemPermissionFailureDoesNotFallBack(t *testing.T) {
 	requireCredential(t, store, &current, "old-token-fixture")
 }
 
+func TestSystemCredentialDirectoryCaseAlias(t *testing.T) {
+	keychain := &memoryKeychain{entries: make(map[string]string)}
+	store := testStore(t, keychain)
+	const token = "shared-token-fixture"
+	saveTestProfile(t, store, "agent", "id-1", token)
+
+	aliasStore := testStoreCaseAlias(t, store, keychain)
+	ctx := context.Background()
+	if err := aliasStore.View(ctx, func(cfg *Config) error {
+		p := cfg.Profiles["agent"]
+		if got, err := aliasStore.ReadToken(ctx, &p); err != nil || got != token {
+			t.Errorf("reading via the directory case alias failed: %v", err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, warning, err := aliasStore.Logout(ctx, "agent", func(*Profile) error { return nil }); err != nil || warning != "" {
+		t.Fatalf("logout via the directory case alias: %v %q", err, warning)
+	}
+	if len(keychain.entries) != 0 || len(snapshot(t, store).Profiles) != 0 {
+		t.Fatal("logout via the directory case alias did not remove both the profile and its credential")
+	}
+}
+
+func TestSystemCredentialLegacyAccount(t *testing.T) {
+	for _, storedName := range []string{"cli", "CLI"} {
+		t.Run(storedName, func(t *testing.T) {
+			ctx := context.Background()
+			keychain := &memoryKeychain{entries: make(map[string]string)}
+			store := testStore(t, keychain)
+			if _, err := store.checkDir(true); err != nil {
+				t.Fatal(err)
+			}
+			aliasStore := testStoreCaseAlias(t, store, keychain)
+
+			const entry = "legacy-entry"
+			const token = "legacy-token-fixture"
+			oldDir, err := filepath.EvalSymlinks(filepath.Join(filepath.Dir(store.dir), storedName))
+			if err != nil {
+				t.Fatal(err)
+			}
+			account := fmt.Sprintf("%x", sha256.Sum256([]byte(oldDir+"\x00"+entry)))
+			keychain.entries[account] = token
+			cfg := emptyConfig()
+			p := testProfile("id-1")
+			p.TokenSource = TokenSource{Type: ManagedStore, Backend: Keychain, Entry: entry}
+			cfg.Profiles["agent"] = *p
+			if warning, err := store.publish(ctx, cfg, TokenSource{}); err != nil || warning != "" {
+				t.Fatalf("publish legacy fixture: %v %q", err, warning)
+			}
+
+			profile := snapshot(t, aliasStore).Profiles["agent"]
+			requireCredential(t, aliasStore, &profile, token)
+			if _, warning, err := aliasStore.Logout(ctx, "agent", func(*Profile) error { return nil }); err != nil || warning != "" {
+				t.Fatalf("logout of legacy profile: %v %q", err, warning)
+			}
+			if len(keychain.entries) != 0 {
+				t.Fatal("logout left the legacy system credential")
+			}
+		})
+	}
+}
+
+func TestSystemCredentialDirectoryIsolation(t *testing.T) {
+	ctx := context.Background()
+	keychain := &memoryKeychain{entries: make(map[string]string)}
+	store := testStore(t, keychain)
+	const token = "directory-token-fixture"
+	saveTestProfile(t, store, "agent", "id-1", token)
+	cfg := snapshot(t, store)
+
+	otherDir := filepath.Join(filepath.Dir(store.dir), "CLI")
+	if _, err := os.Stat(otherDir); err == nil {
+		otherDir += "-other"
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	other := testStoreAt(t, otherDir, keychain)
+	if _, err := other.checkDir(true); err != nil {
+		t.Fatal(err)
+	}
+	if warning, err := other.publish(ctx, cfg, TokenSource{}); err != nil || warning != "" {
+		t.Fatalf("copy profile to another directory: %v %q", err, warning)
+	}
+	profile := snapshot(t, other).Profiles["agent"]
+	if _, err := other.ReadToken(ctx, &profile); err == nil {
+		t.Fatal("a copied profile read a credential from a different configuration directory")
+	}
+	if _, warning, err := other.Logout(ctx, "agent", func(*Profile) error { return nil }); err != nil || warning != "" {
+		t.Fatalf("logout of copied profile: %v %q", err, warning)
+	}
+	requireCredential(t, store, &profile, token)
+}
+
 func TestInterruptedImportKeepsOldReference(t *testing.T) {
 	for _, mode := range []string{"cancel after readback", "readback mismatch"} {
 		t.Run(mode, func(t *testing.T) {
@@ -270,5 +387,52 @@ func TestLogoutRetainsReferencedEntries(t *testing.T) {
 	}
 	if len(keychain.entries) != 0 {
 		t.Fatal("logout left an unreferenced managed entry")
+	}
+}
+
+func TestLogoutRetainsEncryptedEntryWithMixedCaseReferences(t *testing.T) {
+	for _, removed := range []string{"lowercase", "uppercase"} {
+		t.Run("remove "+removed+" first", func(t *testing.T) {
+			ctx := context.Background()
+			store := testStore(t, &memoryKeychain{putErr: ErrUnavailable})
+			if _, err := store.checkDir(true); err != nil {
+				t.Fatal(err)
+			}
+			const token = "shared-token-fixture"
+			entry := strings.Repeat("ab", entryIDSize)
+			if published, err := store.writeEncrypted(ctx, entry, token); err != nil || !published {
+				t.Fatalf("write test credential: %v", err)
+			}
+			cfg := emptyConfig()
+			p := testProfile("id-1")
+			p.TokenSource = TokenSource{Type: ManagedStore, Backend: EncryptedFile, Entry: entry}
+			cfg.Profiles["lowercase"] = *p
+			p.TokenSource.Entry = strings.ToUpper(entry)
+			cfg.Profiles["uppercase"] = *p
+			if warning, err := store.publish(ctx, cfg, TokenSource{}); err != nil || warning != "" {
+				t.Fatalf("publish test fixture: %v %q", err, warning)
+			}
+
+			scope := func(*Profile) error { return nil }
+			if _, warning, err := store.Logout(ctx, removed, scope); err != nil || warning != "" {
+				t.Fatalf("logout of first profile: %v %q", err, warning)
+			}
+			if _, err := os.Stat(store.encryptedPath(entry)); err != nil {
+				t.Errorf("logout removed a referenced encrypted credential: %v", err)
+			}
+			remaining := snapshot(t, store).Profiles
+			if len(remaining) != 1 {
+				t.Fatalf("profiles remaining after logout = %d, want 1", len(remaining))
+			}
+			for name, profile := range remaining {
+				requireCredential(t, store, &profile, token)
+				if _, warning, err := store.Logout(ctx, name, scope); err != nil || warning != "" {
+					t.Fatalf("logout of last profile: %v %q", err, warning)
+				}
+			}
+			if _, err := os.Stat(store.encryptedPath(entry)); !os.IsNotExist(err) {
+				t.Fatalf("logout left an unreferenced encrypted credential: %v", err)
+			}
+		})
 	}
 }

@@ -145,22 +145,38 @@ func (s *Store) ReadToken(ctx context.Context, p *Profile) (string, error) {
 
 func (s *Store) readManaged(ctx context.Context, source TokenSource) (string, error) {
 	if source.Backend == EncryptedFile {
-		return s.readEncrypted(source.Entry)
+		return s.readEncrypted(source.entryID())
 	}
-	account, err := s.account(source.Entry)
+	account, legacy, err := s.accounts(source.Entry)
 	if err != nil {
 		return "", err
 	}
-	return s.system.Get(ctx, account)
+	token, err := s.system.Get(ctx, account)
+	if errors.Is(err, fs.ErrNotExist) && legacy != "" {
+		return s.system.Get(ctx, legacy)
+	}
+	return token, err
 }
 
-func (s *Store) account(entry string) (string, error) {
+func (s *Store) accounts(entry string) (account, legacy string, err error) {
 	dir, err := filepath.EvalSymlinks(s.dir)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
+	canonical, err := credentialDirectory(dir)
+	if err != nil {
+		return "", "", err
+	}
+	if canonical != dir {
+		// Older imports may have hashed the original spelling of the path.
+		legacy = credentialAccount(dir, entry)
+	}
+	return credentialAccount(canonical, entry), legacy, nil
+}
+
+func credentialAccount(dir, entry string) string {
 	// The digest also keeps arbitrary path and entry characters out of helpers.
-	return fmt.Sprintf("%x", sha256.Sum256([]byte(dir+"\x00"+entry))), nil
+	return fmt.Sprintf("%x", sha256.Sum256([]byte(dir+"\x00"+entry)))
 }
 
 // Import verifies that the target observed before online verification is
@@ -252,7 +268,7 @@ func (s *Store) putManaged(ctx context.Context, token string) (TokenSource, erro
 		return TokenSource{}, err
 	}
 	source := TokenSource{Type: ManagedStore, Backend: Keychain, Entry: hex.EncodeToString(id[:])}
-	account, err := s.account(source.Entry)
+	account, _, err := s.accounts(source.Entry)
 	if err != nil {
 		return TokenSource{}, err
 	}
@@ -264,7 +280,7 @@ func (s *Store) putManaged(ctx context.Context, token string) (TokenSource, erro
 		return source, err
 	}
 	source.Backend = EncryptedFile
-	published, err := s.writeEncrypted(ctx, source.Entry, token)
+	published, err := s.writeEncrypted(ctx, source.entryID(), token)
 	if published && err != nil {
 		s.discard(source)
 	}
@@ -292,8 +308,9 @@ func (s *Store) publish(ctx context.Context, cfg *Config, previous TokenSource) 
 }
 
 func referenced(cfg *Config, source TokenSource) bool {
+	entry := source.entryID()
 	for _, p := range cfg.Profiles {
-		if p.TokenSource.Type == ManagedStore && p.TokenSource.Backend == source.Backend && p.TokenSource.Entry == source.Entry {
+		if p.TokenSource.Type == ManagedStore && p.TokenSource.Backend == source.Backend && p.TokenSource.entryID() == entry {
 			return true
 		}
 	}
@@ -309,16 +326,20 @@ func (s *Store) deleteManaged(ctx context.Context, source TokenSource) error {
 		if entry, err := hex.DecodeString(source.Entry); err != nil || len(entry) != entryIDSize {
 			return invalidProfile("profile has an invalid encrypted credential reference")
 		}
-		return os.Remove(s.encryptedPath(source.Entry))
+		return os.Remove(s.encryptedPath(source.entryID()))
 	}
 	if source.Backend != Keychain || !validID(source.Entry) {
 		return invalidProfile("profile has an invalid system credential reference")
 	}
-	account, err := s.account(source.Entry)
+	account, legacy, err := s.accounts(source.Entry)
 	if err != nil {
 		return err
 	}
-	return s.system.Delete(ctx, account)
+	err = s.system.Delete(ctx, account)
+	if errors.Is(err, fs.ErrNotExist) && legacy != "" {
+		return s.system.Delete(ctx, legacy)
+	}
+	return err
 }
 
 func storageError(message string, cause error) error {

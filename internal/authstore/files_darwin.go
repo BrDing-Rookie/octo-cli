@@ -25,6 +25,24 @@ const (
 	darwinACEDeny             = 2
 )
 
+func credentialDirectory(path string) (string, error) {
+	dir, err := os.OpenFile(path, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", err
+	}
+	defer dir.Close() //nolint:errcheck // directory opened for metadata inspection
+
+	// The descriptor's path uses the filesystem's spelling, even when the
+	// path passed to open used a different case.
+	var buf [unix.PathMax]byte
+	_, _, errno := syscall.Syscall(syscall.SYS_FCNTL, dir.Fd(), unix.F_GETPATH, uintptr(unsafe.Pointer(&buf[0])))
+	runtime.KeepAlive(dir)
+	if errno != 0 {
+		return "", errno
+	}
+	return unix.ByteSliceToString(buf[:]), nil
+}
+
 func checkPrivateACL(path string, info os.FileInfo, file *os.File) error {
 	if file != nil {
 		return checkDarwinFileACL(file)
