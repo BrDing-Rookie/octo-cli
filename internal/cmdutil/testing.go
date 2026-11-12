@@ -19,7 +19,7 @@ type TestFactory struct {
 }
 
 // NewTestFactory returns a TestFactory with in-memory streams, a minimal
-// config (Token set so Validate passes), and a BotCredential. The Client
+// config (Token set so Validate passes), and a Credential. The Client
 // hook returns an error by default — tests that exercise commands must
 // inject a client via SetClient.
 func NewTestFactory() *TestFactory {
@@ -51,9 +51,10 @@ func (t *TestFactory) SetClient(c *client.Client) {
 	t.ClientFunc = func() (*client.Client, error) { return c, nil }
 }
 
-// SetConfig replaces the config hook.
+// SetConfig replaces the config hook and clears the cached result.
 func (t *TestFactory) SetConfig(cfg *config.Config) {
 	t.ConfigFunc = func() (*config.Config, error) { return cfg, nil }
+	t.requestConfig = nil
 }
 
 // SetCredential replaces the credential hook.

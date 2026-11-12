@@ -37,6 +37,11 @@ type GlobalOptions struct {
 	CredentialFileSet bool
 }
 
+type requestConfigResult struct {
+	value         *config.Config
+	validationErr error
+}
+
 // Factory is the DI container. All accessors are lazy + cached so a command
 // can ask for only what it needs. The hooks (ConfigFunc, CredentialFunc etc.)
 // are exposed so tests can substitute stubs without touching the environment.
@@ -56,12 +61,11 @@ type Factory struct {
 	ErrorEmitted bool
 
 	// Cached resolutions.
-	config                 *config.Config
-	cred                   *credential.Credential
-	cli                    *client.Client
-	requestContext         context.Context
-	defaultFormat          func() string
-	validatedRequestConfig *config.Config
+	requestConfig  *requestConfigResult
+	cred           *credential.Credential
+	cli            *client.Client
+	requestContext context.Context
+	defaultFormat  func() string
 	// Compiled output query, paired with its expression for safe Factory reuse.
 	jqExpression string
 	jqProgram    *output.JQProgram
@@ -78,9 +82,6 @@ func NewDefaultFactory() *Factory {
 	}
 
 	f.ConfigFunc = func() (*config.Config, error) {
-		if f.config != nil {
-			return f.config, nil
-		}
 		ctx := f.requestContext
 		if ctx == nil {
 			ctx = context.Background()
@@ -89,7 +90,7 @@ func NewDefaultFactory() *Factory {
 		if err != nil {
 			return nil, err
 		}
-		f.config, f.cred = cfg, cred
+		f.cred = cred
 		return cfg, nil
 	}
 	f.CredentialFunc = func() (*credential.Credential, error) {
@@ -136,8 +137,18 @@ func (f *Factory) AuthStore() (*authstore.Store, error) {
 	return authstore.New(nil)
 }
 
-// Config returns the resolved config (cached).
-func (f *Factory) Config() (*config.Config, error) { return f.ConfigFunc() }
+// Config returns the resolved configuration for diagnostics, including when
+// the configuration cannot be used for an authenticated request.
+func (f *Factory) Config() (*config.Config, error) {
+	if f.requestConfig == nil {
+		cfg, err := f.ConfigFunc()
+		if err != nil || cfg == nil {
+			return cfg, err
+		}
+		f.requestConfig = &requestConfigResult{value: cfg, validationErr: cfg.Validate()}
+	}
+	return f.requestConfig.value, nil
+}
 
 // RequestConfig resolves a request with the command's cancellation context.
 func (f *Factory) RequestConfig(ctx context.Context) (*config.Config, error) {
@@ -152,11 +163,11 @@ func (f *Factory) ValidatedRequestConfig(ctx context.Context) (*config.Config, e
 	if err != nil {
 		return nil, err
 	}
-	if cfg != f.validatedRequestConfig {
-		if err := cfg.Validate(); err != nil {
-			return nil, err
-		}
-		f.validatedRequestConfig = cfg
+	if cfg == nil {
+		return nil, output.ErrValidation("request configuration is missing", "")
+	}
+	if err := f.requestConfig.validationErr; err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }

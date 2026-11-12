@@ -1,6 +1,7 @@
 package cmdutil
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -66,6 +67,42 @@ func TestFactory_ConfigCaches(t *testing.T) {
 	}
 	if c1 != c2 {
 		t.Errorf("Config should cache: %p vs %p", c1, c2)
+	}
+}
+
+func TestFactory_RequestConfigSharesLoadWithValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, token string
+		wantAuthErr bool
+	}{
+		{"configured", "fixture-token", false},
+		{"no credential", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := NewTestFactory()
+			loads := 0
+			f.ConfigFunc = func() (*config.Config, error) {
+				loads++
+				return &config.Config{APIBaseURL: "https://gateway.example.test", Token: tc.token}, nil
+			}
+			if _, err := f.RequestConfig(ctx); err != nil {
+				t.Fatalf("diagnostics could not load configuration: %v", err)
+			}
+			for range 2 {
+				_, err := f.ValidatedRequestConfig(ctx)
+				if tc.wantAuthErr {
+					if exit := output.AsExitError(WrapCLIError(err)); exit == nil || exit.Type != "auth_error" {
+						t.Fatalf("request validation = %v, want an authentication error", err)
+					}
+				} else if err != nil {
+					t.Fatalf("request validation failed: %v", err)
+				}
+			}
+			if loads != 1 {
+				t.Fatalf("configuration loaded %d times, want one", loads)
+			}
+		})
 	}
 }
 
