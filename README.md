@@ -46,9 +46,9 @@ The CLI stores version 1 profiles in `~/.octo/cli/config.json`. Set
 binds the credential to its saved gateway origin and Space. Reimport to change
 that binding.
 
-Set `OCTO_AUTH_CURRENT_URL` to the full Token verification URL for the target
-environment. Pipe the Token into `auth login --with-token` or import it from
-a file with `--token-file`.
+Set `OCTO_AUTH_CURRENT_URL` to the full Token verification URL on the same
+origin as the profile's business gateway. Choose one input for `auth login`.
+Use `--with-token` for stdin or `--token-file` for a file.
 
 ```sh
 octo-cli --profile agent --space "$space_id" auth login \
@@ -58,10 +58,11 @@ octo-cli --profile agent auth status
 
 A successful import selects the profile as `current_profile`. Managed credentials
 use the system credential store when available or a private AES-256-GCM file
-with a random master key. `auth status` checks a managed profile offline and
-returns `ready` or `missing`. `auth list` and `config show` display non-secret
-metadata. `auth logout` removes the profile and cleans its unreferenced
-managed entry.
+with a random master key. On macOS, managed directories and files use owner-only
+permissions and accept empty or deny-only ACLs. `auth status` checks a managed
+profile offline and returns `ready` or `missing`. `auth list` and `config show`
+display non-secret metadata. `auth logout` removes the profile and cleans its
+unreferenced managed entry.
 
 ## Add an OpenAPI specification
 

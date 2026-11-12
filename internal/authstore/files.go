@@ -30,7 +30,7 @@ func (s *Store) checkDir(create bool) (bool, error) {
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return false, storeError("configuration path is not a directory")
 	}
-	return true, checkPrivate(s.dir, info)
+	return true, checkPrivate(s.dir, info, nil)
 }
 
 func lockDirectory(ctx context.Context, dir string) (func(), error) {
@@ -79,7 +79,7 @@ func openPrivate(path string, create bool) (*os.File, error) {
 		if !info.Mode().IsRegular() {
 			err = storeError("managed path is not a regular file")
 		} else {
-			err = checkPrivate(path, info)
+			err = checkPrivate(path, info, file)
 		}
 	}
 	if err != nil {
@@ -111,6 +111,13 @@ func writePrivate(ctx context.Context, path string, data []byte) (bool, error) {
 		_ = temp.Close()    //nolint:errcheck // already closed on the publication path
 		_ = os.Remove(name) //nolint:errcheck // no-op after rename
 	}()
+	info, err := temp.Stat()
+	if err != nil {
+		return false, err
+	}
+	if err := checkPrivate(name, info, temp); err != nil {
+		return false, err
+	}
 	if _, err := temp.Write(data); err != nil {
 		return false, err
 	}

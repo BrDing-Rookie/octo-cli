@@ -60,6 +60,10 @@ func loginTokenInput(cmd *cobra.Command, f *cmdutil.Factory, withToken bool, pat
 		}
 		path, fileSet = f.Globals.CredentialFile, true
 	}
+	if withToken && fileSet {
+		return "", output.ErrValidation("--with-token cannot be combined with a token file flag",
+			"use --with-token for stdin or one of --token-file and --credential-file for a file")
+	}
 	if !fileSet && !withToken {
 		return "", output.ErrValidation("a token input is required", "pass --with-token for stdin or --token-file for a file")
 	}

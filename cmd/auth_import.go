@@ -47,7 +47,7 @@ func importProfile(cmd *cobra.Command, f *cmdutil.Factory, originFlag, token str
 	if err != nil {
 		return failErr(f, err)
 	}
-	target.Verified, err = verifyImport(cmd, f, token, target.SpaceID)
+	target.Verified, err = verifyImport(cmd, f, &target, token)
 	if err != nil {
 		return failErr(f, err)
 	}
@@ -81,12 +81,17 @@ func importTarget(cmd *cobra.Command, f *cmdutil.Factory, previous *authstore.Pr
 	return authstore.Profile{APIBaseURL: origin, SpaceID: space}, nil
 }
 
-func verifyImport(cmd *cobra.Command, f *cmdutil.Factory, candidate, space string) (*authstore.Verified, error) {
+func verifyImport(cmd *cobra.Command, f *cmdutil.Factory, target *authstore.Profile, candidate string) (*authstore.Verified, error) {
 	origin, path, err := currentTokenEndpoint(os.Getenv(config.EnvAuthCurrentURL))
 	if err != nil {
 		return nil, err
 	}
-	httpClient := f.NewHTTPClient(&config.Config{APIBaseURL: origin}, &credential.Credential{Token: candidate})
+	if origin != target.APIBaseURL {
+		return nil, output.ErrWithHint("validation", "PROFILE_SCOPE_MISMATCH",
+			"token verification origin does not match the profile API origin",
+			"set "+config.EnvAuthCurrentURL+" to the self-check endpoint on the selected gateway")
+	}
+	httpClient := f.NewHTTPClient(&config.Config{APIBaseURL: target.APIBaseURL}, &credential.Credential{Token: candidate})
 	raw, err := httpClient.Do(cmd.Context(), &client.Request{
 		Method: http.MethodGet, Path: path, ExpectedStatus: http.StatusOK,
 		SuppressSpaceHeader: true,
@@ -94,7 +99,7 @@ func verifyImport(cmd *cobra.Command, f *cmdutil.Factory, candidate, space strin
 	if err != nil {
 		return nil, err
 	}
-	return verifiedImportResponse(raw, space)
+	return verifiedImportResponse(raw, target.SpaceID)
 }
 
 func currentTokenEndpoint(raw string) (origin, path string, err error) {

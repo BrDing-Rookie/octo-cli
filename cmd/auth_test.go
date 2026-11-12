@@ -242,6 +242,54 @@ func TestAuthProfileLifecycleAcrossProcesses(t *testing.T) {
 	}
 }
 
+func TestAuthLoginRejectsVerifierFromAnotherOrigin(t *testing.T) {
+	var calls atomic.Int32
+	verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		io.WriteString(w, tokenSelf("old-environment", "shared-space", "active", false))
+	}))
+	defer verifier.Close()
+	dir := filepath.Join(t.TempDir(), "cli")
+	t.Setenv(authstore.EnvConfigDir, dir)
+	t.Setenv(config.EnvAuthCurrentURL, verifier.URL+"/verify")
+
+	f := newAuthTestFactory()
+	f.In.WriteString("fixture-token\n")
+	_, _, err := execRoot(t, f, "--profile", "agent", "--space", "shared-space", "auth", "login",
+		"--api-base-url", "https://other-gateway.example.test", "--with-token")
+	if exit := output.AsExitError(err); exit == nil || exit.Code != "PROFILE_SCOPE_MISMATCH" {
+		t.Fatalf("expected an origin mismatch before verification, got %v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatal("a mismatched verifier received an authentication request")
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("mismatched verifier created a profile directory: %v", err)
+	}
+}
+
+func TestAuthLoginRejectsStdinAndFile(t *testing.T) {
+	const stdin = "candidate-from-stdin\n"
+	file := filepath.Join(t.TempDir(), "token")
+	writeFixtureFile(t, file, "candidate-from-file\n")
+	for _, flag := range []string{"--token-file", "--credential-file"} {
+		t.Run(flag, func(t *testing.T) {
+			f := newAuthTestFactory()
+			f.In.WriteString(stdin)
+			f.StoreFunc = func() (*authstore.Store, error) {
+				return nil, errors.New("conflicting inputs reached profile storage")
+			}
+			_, _, err := execRoot(t, f, "auth", "login", "--with-token", flag, file)
+			if exit := output.AsExitError(err); exit == nil || exit.Code != "VALIDATION_ERROR" {
+				t.Fatalf("expected token input validation before storage, got %v", err)
+			}
+			if f.In.String() != stdin {
+				t.Fatal("conflicting inputs consumed stdin")
+			}
+		})
+	}
+}
+
 func TestAuthRejectedImportPreservesProfile(t *testing.T) {
 	const candidate = "rejected-fixture-candidate"
 	const incumbent = "existing-fixture-token"
@@ -274,7 +322,7 @@ func TestAuthRejectedImportPreservesProfile(t *testing.T) {
 	writeFixtureFile(t, file, incumbent+"\r\n")
 	login := func() (string, string, error) {
 		return execRoot(t, newAuthTestFactory(), "--profile", "agent", "--space", "space-a", "auth", "login",
-			"--api-base-url", server.URL, "--with-token", "--token-file", file)
+			"--api-base-url", server.URL, "--token-file", file)
 	}
 	if _, _, err := login(); err != nil {
 		t.Fatal(err)

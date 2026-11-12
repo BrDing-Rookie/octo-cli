@@ -257,6 +257,10 @@ func (s *Store) putManaged(ctx context.Context, token string) (TokenSource, erro
 		return TokenSource{}, err
 	}
 	if err := s.system.Put(ctx, account, token); !errors.Is(err, ErrUnavailable) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			// The system store may have committed the new entry before cancellation.
+			s.discard(source)
+		}
 		return source, err
 	}
 	source.Backend = EncryptedFile

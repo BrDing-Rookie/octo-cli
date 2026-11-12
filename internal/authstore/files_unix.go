@@ -13,7 +13,7 @@ func makePrivateDir(path string) error {
 	return os.Mkdir(path, 0o700)
 }
 
-func checkPrivate(_ string, info os.FileInfo) error {
+func checkPrivate(path string, info os.FileInfo, file *os.File) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || stat.Uid != uint32(os.Geteuid()) || info.Mode().Perm()&0o077 != 0 {
 		return fs.ErrPermission
@@ -21,7 +21,7 @@ func checkPrivate(_ string, info os.FileInfo) error {
 	if info.Mode().IsRegular() && stat.Nlink != 1 {
 		return fs.ErrPermission
 	}
-	return nil
+	return checkPrivateACL(path, info, file)
 }
 
 func openManagedFile(path string, create bool) (*os.File, error) {

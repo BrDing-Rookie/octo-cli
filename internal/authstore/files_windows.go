@@ -28,7 +28,7 @@ func makePrivateDir(path string) error {
 	return windows.CreateDirectory(name, attrs)
 }
 
-func checkPrivate(path string, _ os.FileInfo) error {
+func checkPrivate(path string, _ os.FileInfo, _ *os.File) error {
 	descriptor, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION)
 	if err != nil {
 		return err

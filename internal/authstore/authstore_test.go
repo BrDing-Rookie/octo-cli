@@ -15,6 +15,7 @@ import (
 type memoryKeychain struct {
 	entries   map[string]string
 	putErr    error
+	afterPut  func() error
 	get       func(string) (string, error)
 	deleteErr error
 }
@@ -24,6 +25,9 @@ func (k *memoryKeychain) Put(_ context.Context, account, token string) error {
 		return k.putErr
 	}
 	k.entries[account] = token
+	if k.afterPut != nil {
+		return k.afterPut()
+	}
 	return nil
 }
 
@@ -42,7 +46,10 @@ func (k *memoryKeychain) read(account string) (string, error) {
 	return token, nil
 }
 
-func (k *memoryKeychain) Delete(_ context.Context, account string) error {
+func (k *memoryKeychain) Delete(ctx context.Context, account string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if k.deleteErr != nil {
 		return k.deleteErr
 	}
@@ -192,6 +199,32 @@ func TestInterruptedImportKeepsOldReference(t *testing.T) {
 			}
 			requireCredential(t, store, &p, "old-token-fixture")
 		})
+	}
+}
+
+func TestCanceledSystemWriteDiscardsNewEntry(t *testing.T) {
+	keychain := &memoryKeychain{entries: make(map[string]string)}
+	store := testStore(t, keychain)
+	saveTestProfile(t, store, "agent", "id-1", "old-token-fixture")
+	old := snapshot(t, store)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	keychain.afterPut = func() error {
+		cancel()
+		return ctx.Err()
+	}
+
+	_, err := store.Import(ctx, "agent", old, false, testProfile("id-2"), "new-token-fixture")
+	if exit := output.AsExitError(err); exit == nil || exit.Code != "PROFILE_STORAGE_ERROR" {
+		t.Fatalf("expected a storage error after cancellation, got %v", err)
+	}
+	p := snapshot(t, store).Profiles["agent"]
+	if p.TokenSource != old.Profiles["agent"].TokenSource || p.Verified.TokenID != "id-1" {
+		t.Fatal("canceled write changed the active profile")
+	}
+	requireCredential(t, store, &p, "old-token-fixture")
+	if len(keychain.entries) != 1 {
+		t.Fatalf("canceled write left %d entries, want only the original credential", len(keychain.entries))
 	}
 }
 
