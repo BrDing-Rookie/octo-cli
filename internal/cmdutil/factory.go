@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/client"
@@ -60,6 +61,8 @@ type Factory struct {
 	config *config.Config
 	cred   *credential.BotCredential
 	cli    *client.Client
+	// HTTP commands resolve their config independently of local bot profiles.
+	requestConfig func() *config.Config
 	// Compiled output query, paired with its expression for safe Factory reuse.
 	jqExpression string
 	jqProgram    *output.JQProgram
@@ -67,13 +70,13 @@ type Factory struct {
 	store        *authstore.Store
 }
 
-// NewDefaultFactory wires the production providers: config from env, cred from
-// env chain, client built from both. IO defaults to stdio. Callers (root cmd)
-// inject the global options after parsing flags.
+// NewDefaultFactory wires the HTTP client and the local profile commands.
+// IO defaults to stdio. The root command supplies options through its flags.
 func NewDefaultFactory() *Factory {
 	f := &Factory{
-		IOStreams: NewStdIOStreams(),
-		Globals:   &GlobalOptions{},
+		IOStreams:     NewStdIOStreams(),
+		Globals:       &GlobalOptions{},
+		requestConfig: sync.OnceValue(config.LoadRequest),
 	}
 
 	f.ConfigFunc = func() (*config.Config, error) {
@@ -104,14 +107,22 @@ func NewDefaultFactory() *Factory {
 		if f.cli != nil {
 			return f.cli, nil
 		}
-		cfg, err := f.ConfigFunc()
+		cfg, err := f.RequestConfig()
 		if err != nil {
 			return nil, err
 		}
-		cred, err := f.CredentialFunc()
-		if err != nil {
+		if err := cfg.Validate(); err != nil {
 			return nil, err
 		}
+		if f.Globals.Profile != "" || f.Globals.BotID != "" {
+			return nil, output.ErrValidation("--profile and --bot-id cannot select a credential for HTTP commands",
+				"set OCTO_TOKEN and omit the profile or bot selector")
+		}
+		space := strings.TrimSpace(cfg.SpaceID)
+		if f.Globals.Space != "" {
+			space = f.Globals.Space
+		}
+		cred := &credential.BotCredential{Token: cfg.BotToken, SpaceID: space}
 		cli := client.New(cfg, cred, client.Options{
 			Verbose: f.Globals.Verbose,
 			DryRun:  f.Globals.DryRun,
@@ -247,6 +258,14 @@ func (f *Factory) overlayProfileBaseURL(cfg *config.Config, profile string) erro
 // Config returns the resolved config (cached).
 func (f *Factory) Config() (*config.Config, error) { return f.ConfigFunc() }
 
+// RequestConfig returns the configuration used by HTTP commands.
+func (f *Factory) RequestConfig() (*config.Config, error) {
+	if f.requestConfig == nil {
+		return f.Config()
+	}
+	return f.requestConfig(), nil
+}
+
 // Credential returns the resolved credential (cached).
 func (f *Factory) Credential() (*credential.BotCredential, error) { return f.CredentialFunc() }
 
@@ -267,7 +286,7 @@ func (f *Factory) Format() string {
 	if f.Globals != nil && f.Globals.Format != "" {
 		return f.Globals.Format
 	}
-	if cfg, err := f.Config(); err == nil {
+	if cfg, err := f.RequestConfig(); err == nil {
 		return cfg.Format
 	}
 	return output.FormatJSON
@@ -460,8 +479,9 @@ func WrapCLIError(err error) error {
 	msg := err.Error()
 	lower := strings.ToLower(msg)
 	switch {
-	case strings.Contains(lower, "octo_token"),
-		strings.Contains(lower, "octo_bot_token"),
+	case strings.Contains(lower, "octo_token"):
+		return output.ErrAuth(msg, "set OCTO_TOKEN to a valid bearer credential")
+	case strings.Contains(lower, "octo_bot_token"),
 		strings.Contains(lower, "bot token"),
 		strings.Contains(lower, "token is required"):
 		return output.ErrAuth(msg, "set OCTO_TOKEN or OCTO_BOT_TOKEN to a valid bearer credential")

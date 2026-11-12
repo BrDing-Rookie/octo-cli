@@ -13,8 +13,7 @@ import (
 // Environment variable names. Centralised for testability and discoverability.
 const (
 	EnvAPIBaseURL = "OCTO_API_BASE_URL"
-	// EnvToken is the canonical token variable. It accepts every supported
-	// credential kind and takes precedence over the compatible EnvBotToken alias.
+	// EnvToken supplies the bearer for HTTP commands.
 	EnvToken    = "OCTO_TOKEN"
 	EnvBotToken = "OCTO_BOT_TOKEN"
 	EnvSpaceID  = "OCTO_SPACE_ID"
@@ -27,10 +26,7 @@ const (
 	EnvBotID = "OCTO_BOT_ID"
 )
 
-// Config holds CLI configuration loaded from environment variables.
-// BotToken and SpaceID live here so callers wiring a client without a full
-// provider chain still have access; the credential provider remains the
-// authoritative path for command execution.
+// Config holds settings for API requests and local profile inspection.
 type Config struct {
 	// APIBaseURL is the unified base URL for all backend services.
 	// Set via OCTO_API_BASE_URL or the active profile's stored origin.
@@ -54,10 +50,15 @@ type ResolvedEnvToken struct {
 	Source string
 }
 
-// Load reads configuration from the environment. Token aliases are normalized
-// by ResolveEnvToken so the auth gate and credential provider cannot drift.
+// Load reads configuration for local commands that still inspect bot profiles.
 func Load() *Config {
-	token := ResolveEnvToken()
+	cfg := LoadRequest()
+	cfg.BotToken = ResolveEnvToken().Token
+	return cfg
+}
+
+// LoadRequest reads the gateway, output settings, and opaque bearer for HTTP commands.
+func LoadRequest() *Config {
 	apiBaseURL := os.Getenv(EnvAPIBaseURL)
 	apiBaseURLSource := "env"
 	if apiBaseURL == "" {
@@ -67,7 +68,7 @@ func Load() *Config {
 	return &Config{
 		APIBaseURL:       apiBaseURL,
 		APIBaseURLSource: apiBaseURLSource,
-		BotToken:         token.Token,
+		BotToken:         os.Getenv(EnvToken),
 		SpaceID:          os.Getenv(EnvSpaceID),
 		Format:           envOrDefault(EnvFormat, "json"),
 	}
@@ -87,7 +88,12 @@ func ResolveEnvToken() ResolvedEnvToken {
 // Validate checks the bearer credential and normalizes the configured origin.
 func (c *Config) Validate() error {
 	if c.BotToken == "" {
-		return fmt.Errorf("%s or %s is required", EnvToken, EnvBotToken)
+		return fmt.Errorf("%s is required", EnvToken)
+	}
+	for i := 0; i < len(c.BotToken); i++ {
+		if c.BotToken[i] <= ' ' || c.BotToken[i] == 0x7f {
+			return fmt.Errorf("%s contains whitespace or control characters unsafe for a Bearer header", EnvToken)
+		}
 	}
 	if c.APIBaseURL != "" {
 		baseURL, err := NormalizeAPIBaseURL(c.APIBaseURL)
@@ -104,7 +110,7 @@ func (c *Config) Validate() error {
 func NormalizeAPIBaseURL(raw string) (string, error) {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
-		return "", fmt.Errorf("invalid %s: %w", EnvAPIBaseURL, err)
+		return "", fmt.Errorf("invalid %s", EnvAPIBaseURL)
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return "", fmt.Errorf("%s must use http or https", EnvAPIBaseURL)

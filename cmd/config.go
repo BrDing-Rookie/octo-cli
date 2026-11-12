@@ -27,14 +27,13 @@ func newConfigCmd(f *cmdutil.Factory) *cobra.Command {
 // envelope. The bot token is masked (prefix only + "***") so an agent can
 // verify *which* bot is in use without leaking the secret.
 //
-// Resolution goes through the Factory so the values reflect the same path the
-// rest of the CLI takes (ConfigFunc/CredentialFunc may be stubbed by tests).
+// Resolution goes through the Factory's local profile configuration.
 // When the Factory can't produce a config — e.g. ambiguous profiles — fall back
 // to config.Load() so `config show` still emits a diagnostic envelope.
 func newConfigShowCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "show",
-		Short: "Print the resolved configuration (token masked)",
+		Short: "Print local profile configuration (token masked)",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := f.Config()

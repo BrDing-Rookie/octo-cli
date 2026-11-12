@@ -38,7 +38,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 				}
 				return nil
 			}
-			cfg, err := f.Config()
+			cfg, err := f.RequestConfig()
 			if err != nil {
 				return err
 			}
@@ -58,9 +58,9 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	pf.BoolVar(&f.Globals.Verbose, "verbose", false, "write request/response trace to stderr")
 	pf.StringVar(&f.Globals.Timeout, "timeout", "", "per-request timeout (default 30s; invalid values warn and use 30s)")
 	pf.BoolVar(&f.Globals.NoRetry, "no-retry", false, "disable automatic HTTP retries")
-	pf.StringVar(&f.Globals.Space, "space", "", "space id (for platform-scoped bots)")
-	pf.StringVar(&f.Globals.BotID, "bot-id", "", "select/assert the bot credential by robot id (env OCTO_BOT_ID)")
-	pf.StringVar(&f.Globals.Profile, "profile", "", "select the bot credential by profile name")
+	pf.StringVar(&f.Globals.Space, "space", "", "space context for API requests")
+	pf.StringVar(&f.Globals.BotID, "bot-id", "", "select a local bot profile by robot id (env OCTO_BOT_ID)")
+	pf.StringVar(&f.Globals.Profile, "profile", "", "select a local bot profile by name")
 
 	root.AddCommand(newSchemaCmd(f))
 	root.AddCommand(newUpgradeCmd(f))

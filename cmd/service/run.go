@@ -34,14 +34,8 @@ func runOperation(cobraCmd *cobra.Command, f *cmdutil.Factory, rt *operationRunt
 	pathArgs := args[:positionalQueryStart]
 	positionalQueryValues := args[positionalQueryStart:]
 
-	// Path substitution. Cobra's Args function already checked the argument count.
-	// Identity routing: reject an incompatible credential kind and pick the
-	// server mount for the one in use, before any path parameter is filled in.
-	urlPath, err := applyIdentityRouting(f, d, d.Path)
-	if err != nil {
-		_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
-		return err
-	}
+	// Use the registered path for every bearer. Cobra has checked the argument count.
+	urlPath := d.Path
 	// Path values come from the positional args, except for slots a
 	// spec-declared path flag filled in (the escape hatch for ids starting
 	// with "-").

@@ -24,7 +24,7 @@ make build
 a request through the generic HTTP command, use a fixture origin and token:
 
 ```sh
-OCTO_API_BASE_URL=https://api.example.invalid OCTO_TOKEN=app_example \
+OCTO_API_BASE_URL=https://api.example.invalid OCTO_TOKEN=fixture_token \
   ./bin/octo-cli api GET /v1/items --params '{"limit":10}' --dry-run
 ```
 
@@ -34,20 +34,18 @@ body from a file or stdin. Paths are relative to the configured gateway.
 
 ## Configuration and credentials
 
-Set `OCTO_TOKEN` or use `octo-cli auth login --profile <name>` to store a
-credential read from a hidden prompt, stdin (`--with-token`), or a file
-(`--token-file`). The profile store defaults to `~/.octo-cli` and can be moved
-with `OCTO_CONFIG_DIR`. Tokens are encrypted at rest.
+Set `OCTO_TOKEN` for `api` and generated commands. `OCTO_API_BASE_URL` sets
+the gateway origin and defaults to the Octo gateway. `--space` or
+`OCTO_SPACE_ID` supplies an optional space context.
 
-An explicit `--profile` or `--bot-id` selector takes priority, followed by
-`OCTO_TOKEN`, the compatible `OCTO_BOT_TOKEN`, and an implicitly selected
-profile. Use `OCTO_BOT_ID` or a selector when several profiles are available.
-`auth status` and `config show` report the active source with the token masked.
+Use `octo-cli auth login --profile <name>` to store a local bot credential
+read from a hidden prompt, stdin (`--with-token`), or a file (`--token-file`).
+The profile store defaults to `~/.octo-cli` and can be moved with
+`OCTO_CONFIG_DIR`. Tokens are encrypted at rest.
 
-The gateway origin comes from the selected profile's `api_base_url`, then
-`OCTO_API_BASE_URL`, then the Octo default. To bind a profile to an origin,
-pass `--api-base-url` during login or use `auth update --api-base-url`.
-`--space` or `OCTO_SPACE_ID` supplies an optional space context.
+`auth status` and `config show` report local credential settings with the
+token masked. Pass `--api-base-url` during login or use
+`auth update --api-base-url` to set a stored profile's origin.
 
 ## Add an OpenAPI specification
 

@@ -296,7 +296,7 @@ func TestFactory_CredentialCaches(t *testing.T) {
 }
 
 func TestFactory_ClientCaches(t *testing.T) {
-	t.Setenv("OCTO_BOT_TOKEN", "app_yyy")
+	t.Setenv(config.EnvToken, "fixture_token")
 	t.Setenv("OCTO_API_BASE_URL", "http://x")
 	f := NewDefaultFactory()
 

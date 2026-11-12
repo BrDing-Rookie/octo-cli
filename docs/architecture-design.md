@@ -34,8 +34,6 @@ Optional extensions configure shared engine features:
 - `x-octo-cli-hidden` omits individual operations.
 - `x-octo-flag` names a CLI flag. `x-octo-positional` can promote a required
   string query parameter to a positional argument.
-- `x-octo-allowed-token-kinds` and `x-octo-mount-by-token-kind` control
-  credential kinds and mount prefixes.
 - `x-octo-pagination` declares cursor and response field paths.
 - `x-octo-multipart` and `x-octo-binary-response` describe file transport.
 - `x-octo-secret` supplies redaction metadata.
