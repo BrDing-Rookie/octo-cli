@@ -17,6 +17,8 @@ type EnvelopeMeta struct {
 	RateLimit json.RawMessage
 	Notice    json.RawMessage
 	Identity  any
+	// DataEnvelope recognizes the service's data and optional pagination fields.
+	DataEnvelope bool
 }
 
 // IdentityType is the actor type tag. The envelope's identity is always an
@@ -41,14 +43,14 @@ func WriteSuccess(w io.Writer, raw json.RawMessage, meta EnvelopeMeta) error {
 		"identity": identity,
 	}
 
-	dataField, paginationField, ok := splitPagination(raw)
-	if ok {
-		env["data"] = dataField
-		env["_pagination"] = paginationField
-	} else if len(raw) == 0 {
+	dataField, paginationField := backendSuccessPayload(raw, meta.DataEnvelope)
+	if len(dataField) == 0 {
 		env["data"] = nil
 	} else {
-		env["data"] = raw
+		env["data"] = dataField
+	}
+	if len(paginationField) > 0 {
+		env["_pagination"] = paginationField
 	}
 
 	if len(meta.RateLimit) > 0 {
@@ -91,29 +93,25 @@ func WriteError(w io.Writer, err error) error {
 	})
 }
 
-// splitPagination detects the backend's paginated shape and splits it into a
-// data value (RawMessage of the array) and a pagination value. Returns ok=false
-// if raw is not an object with those two keys.
-func splitPagination(raw json.RawMessage) (data, pagination json.RawMessage, ok bool) {
-	if len(raw) == 0 {
-		return nil, nil, false
-	}
+// backendSuccessPayload extracts the data and pagination from known envelopes.
+// The data-envelope opt-in also supports paginated aggregates with object data.
+func backendSuccessPayload(raw json.RawMessage, dataEnvelope bool) (data, pagination json.RawMessage) {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return nil, nil, false
+		return raw, nil
 	}
 	d, hasData := obj["data"]
-	p, hasPag := obj["pagination"]
-	if !hasData || !hasPag {
-		return nil, nil, false
+	if !hasData {
+		return raw, nil
 	}
-	if !isJSONArray(d) {
-		return nil, nil, false
+	p := obj["pagination"]
+	if isJSONObject(p) && (isJSONArray(d) || (dataEnvelope && isJSONObject(d))) {
+		return d, p
 	}
-	if !isJSONObject(p) {
-		return nil, nil, false
+	if dataEnvelope && len(obj) == 1 {
+		return d, nil
 	}
-	return d, p, true
+	return raw, nil
 }
 
 func isJSONArray(raw json.RawMessage) bool {

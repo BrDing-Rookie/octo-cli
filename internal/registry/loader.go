@@ -380,6 +380,8 @@ type OperationDetail struct {
 	SpaceHeaderSet bool `json:"space_header_set,omitempty"`
 	Multipart      bool `json:"multipart,omitempty"`
 	BinaryResponse bool `json:"binary_response,omitempty"`
+	// DataEnvelope identifies success responses with data and optional pagination.
+	DataEnvelope bool `json:"data_envelope,omitempty"`
 	// BinaryBody is true only when the operation delivers a binary body inline
 	// on a 2xx success (declared via a 2xx response with a content body), so
 	// the CLI can write those bytes to disk with --output/-o. It is false for
@@ -528,6 +530,7 @@ func buildDetail(service string, doc map[string]any, pathStr, method string, op 
 			Risk:        stringOf(op["x-octo-risk"]),
 		},
 		SpaceHeader:          boolOf(doc["x-octo-space-header"]),
+		DataEnvelope:         boolOf(doc["x-octo-data-envelope"]),
 		StrictResponseSchema: truthy(op["x-octo-strict-response-schema"]),
 		StrictRequestSchema:  truthy(doc["x-octo-strict-request-schema"]) || truthy(op["x-octo-strict-request-schema"]),
 	}

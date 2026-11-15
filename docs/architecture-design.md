@@ -1,7 +1,7 @@
 # Octo CLI framework architecture
 
 `octo-cli` builds its service command tree from OpenAPI 3.x metadata at startup.
-The default build contains the framework commands and an empty service registry.
+This build registers Octo Server v2 operations under the `server` command.
 
 ```text
 OpenAPI JSON -> Registry -> Cobra commands
@@ -35,6 +35,10 @@ Optional extensions configure shared engine features:
 - `x-octo-flag` names a CLI flag. `x-octo-positional` can promote a required
   string query parameter to a positional argument.
 - `x-octo-pagination` declares cursor and response field paths.
+- `x-octo-space-header: false` omits the Space header for a service that
+  resolves its Space from the Bearer.
+- `x-octo-data-envelope: true` puts the payload of a backend data envelope
+  directly in the CLI's `data` field.
 - `x-octo-multipart` and `x-octo-binary-response` describe file transport.
 - `x-octo-secret` supplies redaction metadata.
 - `x-octo-response-fields`, `x-octo-lossless-id-fields`, and
@@ -46,8 +50,9 @@ Optional extensions configure shared engine features:
 
 The generated commands validate their arguments before sending requests.
 Optional `--data` inputs merge with explicit body flags. The raw `api`
-command accepts a method and path directly and uses matching specifications
-to identify sensitive values in diagnostics.
+command accepts a method and path directly. Matching specifications supply
+the Space header policy, retry behavior, redirect handling, response envelope
+and diagnostic redaction.
 
 ## Verification
 

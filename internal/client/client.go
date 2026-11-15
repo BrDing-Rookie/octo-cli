@@ -1295,6 +1295,9 @@ func redactJSONBody(body []byte, sensitiveFields []string) []byte {
 }
 
 func redactDiagnosticBody(req *Request, body []byte) string {
+	if len(req.RawBody) > 0 {
+		return fmt.Sprintf("[%d bytes]", len(body))
+	}
 	redacted := []byte(redactBodyForLog(req, body))
 	return string(redactJSONBody(redacted, req.SensitiveJSONFields))
 }

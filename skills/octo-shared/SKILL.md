@@ -6,8 +6,9 @@ description: Inspect the Octo CLI framework, select credentials, preview HTTP re
 # octo-shared
 
 Use `octo-cli schema --list` to discover embedded operations. Inspect an operation
-with `octo-cli schema <operation-id>`. This framework build starts with an empty
-service registry.
+with `octo-cli schema <operation-id>`. Octo Server v2 commands are grouped under
+`octo-cli server`. Use `server identity get` to read the verified Token owner,
+bound Space and optional User Bot binding.
 
 Use `octo-cli auth list` to see saved profiles and the default. Select a profile
 with `--profile` or `OCTO_PROFILE`. For an external Bearer, use

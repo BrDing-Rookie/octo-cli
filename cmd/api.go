@@ -27,7 +27,7 @@ func newAPICmd(f *cmdutil.Factory) *cobra.Command {
 		Short: "Send a request to the configured API gateway",
 		Long: `Generic REST passthrough that reuses credentials, retry, and envelope output.
 The request path is relative to the configured gateway origin.
-Matching OpenAPI specs supply redaction metadata for diagnostics.
+Matching OpenAPI specs supply transport, output, and redaction metadata.
 
 Examples:
   octo-cli api GET /v1/items --params '{"limit":10}'
@@ -71,33 +71,31 @@ Examples:
 				}
 			}
 
-			secrets, serr := apiSecretsForRequest(f.Registry(), method, path, body)
-			if serr != nil {
+			reg := f.Registry()
+			op := matchOperation(reg, method, path)
+			req := &client.Request{
+				Method:       method,
+				Path:         path,
+				Query:        q,
+				Body:         body,
+				SecretValues: apiSecretsForPath(reg, method, path),
+			}
+			if serr := applyAPIOperationMetadata(req, op); serr != nil {
 				_ = f.EmitError(serr) //nolint:errcheck // best-effort emit before returning err
 				return serr
 			}
-			responseSecretFields := apiResponseSecretFieldsForRequest(f.Registry(), method, path)
 
 			cli, err := f.Client()
 			if err != nil {
 				_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 				return err
 			}
-			respBody, err := cli.Do(cobraCmd.Context(), &client.Request{
-				Method: method,
-				Path:   path,
-				Query:  q,
-				Body:   body,
-				// Recovered from the registry rather than from a command definition,
-				// because this command's path is whatever the caller typed.
-				SecretValues:         secrets,
-				ResponseSecretFields: responseSecretFields,
-			})
+			respBody, err := cli.Do(cobraCmd.Context(), req)
 			if err != nil {
 				_ = f.EmitError(err) //nolint:errcheck // best-effort emit before returning err
 				return err
 			}
-			return f.EmitRequestSuccess(respBody)
+			return f.EmitOperationSuccess(respBody, op)
 		},
 	}
 
@@ -128,22 +126,24 @@ func decodeStrict(dec *json.Decoder, into any) error {
 	return nil
 }
 
-// apiSecretsForRequest recovers every value this request carries that the spec marks
-// secret — path parameters and request-body leaves alike.
-func apiSecretsForRequest(reg *registry.Registry, method, path string, body any) ([]string, *output.ExitError) {
-	secrets := apiSecretsForPath(reg, method, path)
-	if body == nil || reg == nil {
-		return secrets, nil
+func applyAPIOperationMetadata(req *client.Request, op *registry.OperationDetail) *output.ExitError {
+	if op == nil {
+		return nil
 	}
-	if d := matchOperation(reg, method, path); d != nil && d.RequestBody != nil {
-		found, err := service.CollectBodySecrets(d.RequestBody, body)
+	req.BinaryResponse = op.BinaryResponse
+	req.SuppressSpaceHeader = op.SpaceHeaderSet && !op.SpaceHeader
+	req.DisableRetry = op.RetryMode == "never"
+	req.UnknownOutcomeOnNetworkFailure = req.DisableRetry
+	req.ResponseSecretFields = op.ResponseSecretFields
+	if req.Body != nil && op.RequestBody != nil {
+		found, err := service.CollectBodySecrets(op.RequestBody, req.Body)
 		if err != nil {
-			return nil, output.ErrValidation(fmt.Sprintf("--data: %v", err),
+			return output.ErrValidation(fmt.Sprintf("--data: %v", err),
 				"quote the value — a declared secret is masked by string rules, and an unquoted one would print in full")
 		}
-		secrets = append(secrets, found...)
+		req.SecretValues = append(req.SecretValues, found...)
 	}
-	return secrets, nil
+	return nil
 }
 
 // matchOperation returns the operation whose path template matches, or nil.
@@ -163,17 +163,6 @@ func matchOperation(reg *registry.Registry, method, path string) *registry.Opera
 		}
 	}
 	return nil
-}
-
-func apiResponseSecretFieldsForRequest(reg *registry.Registry, method, path string) []string {
-	if reg == nil {
-		return nil
-	}
-	d := matchOperation(reg, method, path)
-	if d == nil {
-		return nil
-	}
-	return d.ResponseSecretFields
 }
 
 func pathSegments(path string) []string {
