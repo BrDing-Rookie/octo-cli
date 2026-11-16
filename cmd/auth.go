@@ -16,7 +16,18 @@ import (
 )
 
 func newAuthCmd(f *cmdutil.Factory) *cobra.Command {
-	cmd := &cobra.Command{Use: "auth", Short: "Manage local Token profiles"}
+	cmd := &cobra.Command{
+		Use:         "auth",
+		Short:       "Manage local Token profiles",
+		Annotations: map[string]string{"skipValidation": "true"},
+		Args: func(_ *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return output.ErrValidation("unknown subcommand for octo-cli auth", "run `octo-cli auth --help` for the available commands")
+			}
+			return nil
+		},
+		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+	}
 	cmd.AddCommand(newAuthLoginCmd(f), newAuthListCmd(f), newAuthLogoutCmd(f))
 	return cmd
 }

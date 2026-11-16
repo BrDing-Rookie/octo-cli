@@ -64,7 +64,7 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 // skipValidation allows local framework commands and service help to run
 // before a credential has been configured.
 func skipValidation(cmd *cobra.Command) bool {
-	// Service groups opt out for their own help and unknown-command paths.
+	// Annotated groups opt out for their own help and unknown-command paths.
 	if cmd.Annotations["skipValidation"] == "true" {
 		return true
 	}
@@ -79,8 +79,8 @@ func skipValidation(cmd *cobra.Command) bool {
 }
 
 // skipOutputPreflight identifies commands whose output does not use the Factory
-// formatter: built-in help/completion commands and annotated service parents
-// or groups when they have no arguments and render help.
+// formatter: built-in help/completion commands and annotated command groups
+// when they have no arguments and render help.
 func skipOutputPreflight(cmd *cobra.Command, args []string) bool {
 	if len(args) == 0 && cmd.HasSubCommands() && cmd.Annotations["skipValidation"] == "true" {
 		return true
