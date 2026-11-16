@@ -199,9 +199,10 @@ func TestSplitPagination_Detection(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, _, ok := splitPagination(json.RawMessage(tt.raw))
+			_, pagination := backendSuccessPayload(json.RawMessage(tt.raw), false)
+			ok := pagination != nil
 			if ok != tt.want {
-				t.Errorf("splitPagination(%q) ok=%v, want %v", tt.raw, ok, tt.want)
+				t.Errorf("backendSuccessPayload(%q) exposes pagination=%v, want %v", tt.raw, ok, tt.want)
 			}
 		})
 	}

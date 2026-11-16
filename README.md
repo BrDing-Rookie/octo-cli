@@ -8,25 +8,35 @@
 builds a single Go binary with an extensible Cobra command tree, credential
 profiles, request previews and structured output for scripts and agents.
 
-This checkout ships with an empty service registry. The framework commands are
-`api`, `schema`, `auth`, `config`, `skills`, `upgrade`, `version`, `help` and
-`completion`.
+This checkout embeds the Octo Server v2 registry under `octo-cli server`.
+The framework commands are `api`, `schema`, `auth`, `config`, `skills`,
+`upgrade`, `version`, `help` and `completion`.
 
-## Build and try the framework
+## Build and try Octo Server v2
 
 ```sh
 make build
-./bin/octo-cli --help
-./bin/octo-cli schema --list
+./bin/octo-cli server --help
+./bin/octo-cli schema --list server
 ```
 
-`schema --list` starts with empty `services` and `operations` arrays. To preview
-a request through the generic HTTP command, use a fixture origin and token:
+Use a test-environment unified Token from the target Space. The test gateway
+origin is `https://im-test.deepminer.com.cn` and the command paths include
+`/api/v2/cli`. Server v2 derives the Space from the Bearer. The identity and
+group list calls require `im.identity:read` and `im.groups:read`, respectively.
+Set `token_file` to the path of your Token file.
 
 ```sh
-OCTO_API_BASE_URL=https://api.example.invalid OCTO_TOKEN=fixture_token \
-  ./bin/octo-cli api GET /v1/items --params '{"limit":10}' --dry-run
+export OCTO_API_BASE_URL=https://im-test.deepminer.com.cn
+./bin/octo-cli --credential-file "$token_file" server identity get
+./bin/octo-cli --credential-file "$token_file" api GET /api/v2/cli/identity
+./bin/octo-cli --credential-file "$token_file" server group list --page-size 10
 ```
+
+Use `--dry-run` to preview the request. Successful results carry the Server
+payload in `data` and any pagination metadata in `_pagination`.
+Use `server file upload --file <path>` for multipart uploads.
+`server file download --path <object-key>` returns the storage URL in `data.url`.
 
 `api <METHOD> <PATH>` accepts JSON query parameters through `--params` and a
 JSON body through `--data`. Use `--data @file.json` or `--data @-` to read a

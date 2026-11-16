@@ -1201,7 +1201,7 @@ func emitOnce(ctx context.Context, f *cmdutil.Factory, rt *operationRuntime, req
 			return unwrapErr
 		}
 	}
-	return f.EmitRequestSuccess(body)
+	return f.EmitOperationSuccess(body, rt.detail)
 }
 
 // annotateIdempotencyKey records the key a failed create was sent with, so a

@@ -224,12 +224,21 @@ func (f *Factory) PreflightOutput(format string) error {
 // EmitSuccess renders a success envelope, applying --jq first (if set) and
 // then the configured output format. Non-nil raw is placed inside the envelope.
 func (f *Factory) EmitSuccess(raw []byte) error {
-	return f.emit(normalizeRaw(raw), nil)
+	return f.emit(normalizeRaw(raw), output.EnvelopeMeta{})
 }
 
 // EmitRequestSuccess includes the profile and source selected for the request.
 func (f *Factory) EmitRequestSuccess(raw []byte) error {
-	return f.emit(normalizeRaw(raw), f.identityValue())
+	return f.EmitOperationSuccess(raw, nil)
+}
+
+// EmitOperationSuccess applies the registered response envelope on live requests.
+func (f *Factory) EmitOperationSuccess(raw []byte, op *registry.OperationDetail) error {
+	dataEnvelope := op != nil && op.DataEnvelope && (f.Globals == nil || !f.Globals.DryRun)
+	return f.emit(normalizeRaw(raw), output.EnvelopeMeta{
+		Identity:     f.identityValue(),
+		DataEnvelope: dataEnvelope,
+	})
 }
 
 // identityValue reports the request's already-resolved profile and source.
@@ -247,8 +256,7 @@ func (f *Factory) identityValue() any {
 	return id
 }
 
-func (f *Factory) emit(raw []byte, identity any) error {
-	meta := output.EnvelopeMeta{Identity: identity}
+func (f *Factory) emit(raw []byte, meta output.EnvelopeMeta) error {
 	// Build the success envelope into an in-memory buffer first so --jq can
 	// operate on the canonical envelope shape (not the backend shape).
 	var envBuf bytes.Buffer
