@@ -1,39 +1,19 @@
 package cmdutil
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-
 	"os"
 	"strings"
 	"testing"
 
-	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-// TestMain isolates the whole package from the developer's own OCTO_
-// environment. NewDefaultFactory resolves credentials through the on-disk store
-// and then the env chain, so an ambient variable can outrank or redirect the
-// fixtures these tests pin with t.Setenv: OCTO_TOKEN outranks the OCTO_BOT_TOKEN
-// they set (internal/credential/env_provider.go), OCTO_BOT_ID selects a stored
-// profile that does not exist here, OCTO_FORMAT reshapes the resolved config.
-//
-// The sweep is by prefix rather than by name on purpose. Naming variables is
-// what kept breaking: the clear list has been out of date three times
-// (OCTO_TOKEN, then OCTO_FORMAT, then OCTO_BOT_ID), each time because a new
-// variable was added without updating the tests. OCTO_MARKETPLACE_API_PREFIX
-// (cmd/service/run.go) is read straight from the environment with no config
-// constant behind it, so it is exactly the kind a by-name list misses.
-//
-// OCTO_CONFIG_DIR is re-set *after* the sweep: it must point at an empty temp
-// dir rather than be absent, or authstore falls back to the real user config dir
-// and a developer's stored profiles leak back in. An empty dir yields zero
-// profiles, so resolution falls through to the env chain as these tests expect.
-// Individual tests may still override any of this with t.Setenv.
+// TestMain isolates fixture config and credentials from the user environment.
 func TestMain(m *testing.M) {
 	dir, err := os.MkdirTemp("", "octo-cmdutil-test")
 	if err != nil {
@@ -73,7 +53,7 @@ func TestNewDefaultFactory_InitializesFields(t *testing.T) {
 }
 
 func TestFactory_ConfigCaches(t *testing.T) {
-	t.Setenv("OCTO_BOT_TOKEN", "app_xxx")
+	t.Setenv(config.EnvToken, "app_xxx")
 	t.Setenv("OCTO_API_BASE_URL", "http://x")
 
 	f := NewDefaultFactory()
@@ -90,8 +70,44 @@ func TestFactory_ConfigCaches(t *testing.T) {
 	}
 }
 
+func TestFactory_RequestConfigSharesLoadWithValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, token string
+		wantAuthErr bool
+	}{
+		{"configured", "fixture-token", false},
+		{"no credential", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			f := NewTestFactory()
+			loads := 0
+			f.ConfigFunc = func() (*config.Config, error) {
+				loads++
+				return &config.Config{APIBaseURL: "https://gateway.example.test", Token: tc.token}, nil
+			}
+			if _, err := f.RequestConfig(ctx); err != nil {
+				t.Fatalf("diagnostics could not load configuration: %v", err)
+			}
+			for range 2 {
+				_, err := f.ValidatedRequestConfig(ctx)
+				if tc.wantAuthErr {
+					if exit := output.AsExitError(WrapCLIError(err)); exit == nil || exit.Type != "auth_error" {
+						t.Fatalf("request validation = %v, want an authentication error", err)
+					}
+				} else if err != nil {
+					t.Fatalf("request validation failed: %v", err)
+				}
+			}
+			if loads != 1 {
+				t.Fatalf("configuration loaded %d times, want one", loads)
+			}
+		})
+	}
+}
+
 func TestFactory_ConfigFormatOverride(t *testing.T) {
-	t.Setenv("OCTO_BOT_TOKEN", "app_xxx")
+	t.Setenv(config.EnvToken, "app_xxx")
 	t.Setenv("OCTO_FORMAT", "json")
 
 	f := NewDefaultFactory()
@@ -107,7 +123,7 @@ func TestFactory_ConfigFormatOverride(t *testing.T) {
 }
 
 func TestFactory_CredentialFromEnv(t *testing.T) {
-	t.Setenv("OCTO_BOT_TOKEN", "app_yyy")
+	t.Setenv(config.EnvToken, "app_yyy")
 	t.Setenv("OCTO_SPACE_ID", "space-A")
 
 	f := NewDefaultFactory()
@@ -123,120 +139,8 @@ func TestFactory_CredentialFromEnv(t *testing.T) {
 	}
 }
 
-func TestFactory_ProfileBaseURLErrorNamesProfile(t *testing.T) {
-	t.Setenv(authstore.EnvConfigDir, t.TempDir())
-	t.Setenv(config.EnvAPIBaseURL, "")
-	t.Setenv(config.EnvBotToken, "")
-	store, err := authstore.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveProfile("legacy", &authstore.ProfileMeta{
-		APIBaseURL: "https://api.example.com/v1/records",
-		RobotID:    "bot-legacy",
-	}, "app_legacy"); err != nil {
-		t.Fatal(err)
-	}
-	f := NewDefaultFactory()
-	f.Globals.Profile = "legacy"
-	_, err = f.Config()
-	ee := output.AsExitError(err)
-	if ee == nil || ee.Type != "validation" ||
-		!strings.Contains(ee.Message, `profile "legacy" has an invalid API base URL`) ||
-		!strings.Contains(ee.Hint, "octo-cli --profile legacy auth update --api-base-url <origin>") ||
-		!strings.Contains(ee.Hint, "octo-cli --profile legacy auth update --clear-api-base-url") {
-		t.Fatalf("Config error = %v (%+v), want structured profile recovery guidance", err, ee)
-	}
-}
-
-func TestFactory_ProfileBaseURLPrecedence(t *testing.T) {
-	const (
-		profileOrigin = "https://profile.example.com"
-		envOrigin     = "https://env.example.com"
-	)
-	cases := []struct {
-		name       string
-		profileURL string
-		envURL     string
-		envToken   bool
-		want       string
-		wantSource string
-	}{
-		{"profile outranks env", profileOrigin, envOrigin, false, profileOrigin, "profile"},
-		{"profile wins without env", profileOrigin, "", false, profileOrigin, "profile"},
-		{"profile without URL falls back to env", "", envOrigin, false, envOrigin, "env"},
-		{"profile without URL falls back to default", "", "", false, config.DefaultAPIBaseURL, "default"},
-		{"environment credential uses env", profileOrigin, envOrigin, true, envOrigin, "env"},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(authstore.EnvConfigDir, t.TempDir())
-			t.Setenv(config.EnvAPIBaseURL, tc.envURL)
-			t.Setenv(config.EnvToken, "")
-			t.Setenv(config.EnvBotToken, "")
-			t.Setenv(config.EnvBotID, "")
-
-			store, err := authstore.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := store.SaveProfile("target", &authstore.ProfileMeta{
-				APIBaseURL: tc.profileURL,
-				RobotID:    "bot-target",
-			}, "app_target"); err != nil {
-				t.Fatal(err)
-			}
-
-			f := NewDefaultFactory()
-			if tc.envToken {
-				t.Setenv(config.EnvToken, "app_env")
-			} else {
-				f.Globals.Profile = "target"
-			}
-			cfg, err := f.Config()
-			if err != nil {
-				t.Fatalf("Config: %v", err)
-			}
-			if cfg.APIBaseURL != tc.want {
-				t.Fatalf("APIBaseURL = %q, want %q", cfg.APIBaseURL, tc.want)
-			}
-			if cfg.APIBaseURLSource != tc.wantSource {
-				t.Fatalf("APIBaseURLSource = %q, want %q", cfg.APIBaseURLSource, tc.wantSource)
-			}
-		})
-	}
-}
-
-// TestFactory_InvalidProfileBaseURLFailsClosedWithEnv pins the policy choice
-// that an invalid stored origin is refused even when OCTO_API_BASE_URL names a
-// valid gateway: the profile's own metadata is authoritative, so silently
-// falling back would route the profile token somewhere it was not issued for.
-func TestFactory_InvalidProfileBaseURLFailsClosedWithEnv(t *testing.T) {
-	t.Setenv(authstore.EnvConfigDir, t.TempDir())
-	t.Setenv(config.EnvAPIBaseURL, "https://env.example")
-	t.Setenv(config.EnvToken, "")
-	t.Setenv(config.EnvBotToken, "")
-	store, err := authstore.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveProfile("bad", &authstore.ProfileMeta{
-		APIBaseURL: "https://bad.example/v1/records",
-		RobotID:    "bot-bad",
-	}, "app_bad"); err != nil {
-		t.Fatal(err)
-	}
-
-	f := NewDefaultFactory()
-	f.Globals.Profile = "bad"
-	_, err = f.Config()
-	if err == nil || !strings.Contains(err.Error(), `profile "bad" has an invalid API base URL`) {
-		t.Fatalf("Config error = %v, want refusal of the invalid profile URL", err)
-	}
-}
-
 func TestFactory_CredentialSpaceOverride(t *testing.T) {
-	t.Setenv("OCTO_BOT_TOKEN", "app_yyy")
+	t.Setenv(config.EnvToken, "app_yyy")
 	t.Setenv("OCTO_SPACE_ID", "space-env")
 
 	f := NewDefaultFactory()
@@ -251,39 +155,8 @@ func TestFactory_CredentialSpaceOverride(t *testing.T) {
 	}
 }
 
-func TestFactory_ExplicitBotIDAndEnvironmentClaimHaveDistinctEmptyStoreSemantics(t *testing.T) {
-	t.Setenv(authstore.EnvConfigDir, t.TempDir())
-	t.Setenv(config.EnvBotToken, "app_env_bot")
-
-	f := NewDefaultFactory()
-	f.Globals.BotID = "claimed-bot"
-	if _, err := f.Credential(); err == nil || !strings.Contains(err.Error(), "no profile found") {
-		t.Fatalf("explicit --bot-id fell through to environment token: %v", err)
-	}
-
-	t.Setenv(config.EnvBotID, "claimed-bot")
-	f = NewDefaultFactory()
-	cred, err := f.Credential()
-	if err != nil {
-		t.Fatalf("environment Bot claim did not fall through: %v", err)
-	}
-	if cred.Token != "app_env_bot" || cred.RobotID != "claimed-bot" || cred.Profile != "" {
-		t.Fatalf("environment credential = %+v", cred)
-	}
-}
-
-func TestFactory_CredentialMissing(t *testing.T) {
-	t.Setenv("OCTO_BOT_TOKEN", "")
-
-	f := NewDefaultFactory()
-	_, err := f.Credential()
-	if err == nil {
-		t.Error("expected error when token is absent")
-	}
-}
-
 func TestFactory_CredentialCaches(t *testing.T) {
-	t.Setenv("OCTO_BOT_TOKEN", "app_yyy")
+	t.Setenv(config.EnvToken, "app_yyy")
 	f := NewDefaultFactory()
 	c1, err := f.Credential()
 	if err != nil {
@@ -542,7 +415,7 @@ func TestFactory_OutErrOutAccessors(t *testing.T) {
 // Ensure we don't regress the "Credential SpaceID zero-override" path: when
 // Globals.Space is empty, the env-sourced SpaceID must remain intact.
 func TestFactory_CredentialEmptySpaceDoesNotOverride(t *testing.T) {
-	t.Setenv("OCTO_BOT_TOKEN", "app_yyy")
+	t.Setenv(config.EnvToken, "app_yyy")
 	t.Setenv("OCTO_SPACE_ID", "space-env")
 	f := NewDefaultFactory()
 	// Globals.Space left empty intentionally.
@@ -555,11 +428,11 @@ func TestFactory_CredentialEmptySpaceDoesNotOverride(t *testing.T) {
 	}
 }
 
-// Sanity check: the Factory's injected hooks surface BotCredential/Config
+// Sanity check: the Factory's injected hooks surface Credential/Config
 // without touching the env when replaced.
 func TestFactory_InjectedHooksUsed(t *testing.T) {
 	f := NewTestFactory()
-	f.SetCredential(&credential.BotCredential{Token: "stub_tok"})
+	f.SetCredential(&credential.Credential{Token: "stub_tok"})
 	cred, err := f.Credential()
 	if err != nil {
 		t.Fatalf("Credential: %v", err)
@@ -569,15 +442,14 @@ func TestFactory_InjectedHooksUsed(t *testing.T) {
 	}
 }
 
-// TestFactory_IdentityEcho verifies mechanism B: when a credential is resolved,
-// the success envelope's identity becomes an object describing the active bot.
+// TestFactory_IdentityEcho verifies the request profile and source in the envelope.
 func TestFactory_IdentityEcho(t *testing.T) {
 	tf := NewTestFactory()
-	tf.cred = &credential.BotCredential{
-		Token: "app_x", Profile: "prod", RobotID: "cli_x", Source: "profile:prod",
+	tf.cred = &credential.Credential{
+		Token: "app_x", Profile: "prod", Source: "managed_store",
 	}
-	if err := tf.EmitSuccess([]byte(`{"k":"v"}`)); err != nil {
-		t.Fatalf("EmitSuccess: %v", err)
+	if err := tf.EmitRequestSuccess([]byte(`{"k":"v"}`)); err != nil {
+		t.Fatalf("EmitRequestSuccess: %v", err)
 	}
 	var env map[string]any
 	if err := json.Unmarshal(tf.Out.Bytes(), &env); err != nil {
@@ -587,33 +459,8 @@ func TestFactory_IdentityEcho(t *testing.T) {
 	if !ok {
 		t.Fatalf("identity is not an object: %v", env["identity"])
 	}
-	if id["profile"] != "prod" || id["robot_id"] != "cli_x" ||
-		id["bot_kind"] != "app_bot" || id["source"] != "profile:prod" {
+	if id["profile"] != "prod" || id["source"] != "managed_store" {
 		t.Errorf("identity = %v", id)
-	}
-}
-
-func TestFactory_IdentityEchoLabelsUnverifiedEnvironmentBotID(t *testing.T) {
-	tf := NewTestFactory()
-	tf.cred = &credential.BotCredential{
-		Token: "app_x", RobotID: "caller-claimed", Source: "env:OCTO_BOT_TOKEN",
-	}
-	if err := tf.EmitSuccess([]byte(`{"k":"v"}`)); err != nil {
-		t.Fatalf("EmitSuccess: %v", err)
-	}
-	var env map[string]any
-	if err := json.Unmarshal(tf.Out.Bytes(), &env); err != nil {
-		t.Fatalf("unmarshal: %v\n%s", err, tf.Out.String())
-	}
-	id, ok := env["identity"].(map[string]any)
-	if !ok {
-		t.Fatalf("identity is not an object: %v", env["identity"])
-	}
-	if _, exists := id["robot_id"]; exists {
-		t.Fatalf("unverified environment Bot id was echoed as identity: %v", id)
-	}
-	if id["robot_id_claimed"] != "caller-claimed" {
-		t.Fatalf("unverified environment Bot id claim is not observable: %v", id)
 	}
 }
 
@@ -632,69 +479,5 @@ func TestFactory_IdentityDefaultsToBot(t *testing.T) {
 	id, ok := env["identity"].(map[string]any)
 	if !ok || id["type"] != "bot" {
 		t.Errorf("identity = %v, want {type:bot}", env["identity"])
-	}
-}
-
-func TestFactory_EnvironmentCredentialOverridesImplicitProfiles(t *testing.T) {
-	tests := []struct {
-		name       string
-		variable   string
-		token      string
-		profileNum int
-	}{
-		{name: "preferred alias over sole profile", variable: config.EnvToken, token: "app_preferred", profileNum: 1},
-		{name: "legacy alias over sole profile", variable: config.EnvBotToken, token: "app_legacy_env", profileNum: 1},
-		{name: "preferred alias bypasses profile ambiguity", variable: config.EnvToken, token: "app_preferred", profileNum: 2},
-		{name: "legacy alias bypasses profile ambiguity", variable: config.EnvBotToken, token: "app_legacy_env", profileNum: 2},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv(config.EnvToken, "")
-			t.Setenv(config.EnvBotToken, "")
-			t.Setenv(authstore.EnvConfigDir, t.TempDir())
-			store, err := authstore.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			for i := 0; i < tt.profileNum; i++ {
-				name := fmt.Sprintf("profile-%d", i)
-				if err := store.SaveProfile(name, &authstore.ProfileMeta{RobotID: "bot-" + name}, "app_"+name); err != nil {
-					t.Fatalf("SaveProfile(%s): %v", name, err)
-				}
-			}
-			t.Setenv(tt.variable, tt.token)
-
-			cred, err := NewDefaultFactory().Credential()
-			if err != nil {
-				t.Fatalf("Credential: %v", err)
-			}
-			if cred.Token != tt.token || cred.Profile != "" || cred.Source != "env:"+tt.variable {
-				t.Fatalf("credential = %+v", cred)
-			}
-		})
-	}
-}
-
-func TestFactory_ExplicitProfileOverridesEnvironmentCredential(t *testing.T) {
-	t.Setenv(config.EnvToken, "app_environment")
-	t.Setenv(config.EnvBotToken, "app_legacy_environment")
-	t.Setenv(authstore.EnvConfigDir, t.TempDir())
-	store, err := authstore.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveProfile("selected", &authstore.ProfileMeta{RobotID: "bot-selected"}, "app_profile"); err != nil {
-		t.Fatal(err)
-	}
-
-	f := NewDefaultFactory()
-	f.Globals.Profile = "selected"
-	cred, err := f.Credential()
-	if err != nil {
-		t.Fatalf("Credential: %v", err)
-	}
-	if cred.Token != "app_profile" || cred.Profile != "selected" || cred.Source != "profile:selected" {
-		t.Fatalf("credential = %+v", cred)
 	}
 }

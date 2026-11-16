@@ -132,7 +132,7 @@ func TestUpgrade_HandoffWritesRequestWithoutCredentialsOrPublicOutput(t *testing
 	t.Setenv(upgradeReportEnv, "")
 	f := newUpgradeTestFactory()
 	credentialLookups := 0
-	f.CredentialFunc = func() (*credential.BotCredential, error) {
+	f.CredentialFunc = func() (*credential.Credential, error) {
 		credentialLookups++
 		return nil, errors.New("upgrade must not resolve an Octo credential")
 	}

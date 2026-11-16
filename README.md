@@ -34,18 +34,58 @@ body from a file or stdin. Paths are relative to the configured gateway.
 
 ## Configuration and credentials
 
-Set `OCTO_TOKEN` for `api` and generated commands. `OCTO_API_BASE_URL` sets
-the gateway origin and defaults to the Octo gateway. `--space` or
-`OCTO_SPACE_ID` supplies an optional space context.
+For `api` and generated commands, the CLI reads the Bearer from
+`--credential-file`, then `OCTO_TOKEN` or `OCTO_TOKEN_FILE`, then the selected
+profile. Set only one Token environment variable. Profiles are selected by
+`--profile`, `OCTO_PROFILE`, or the saved `current_profile`. An external
+credential without an explicit profile uses `OCTO_API_BASE_URL` and the runtime
+Space from `--space` or `OCTO_SPACE_ID`.
 
-Use `octo-cli auth login --profile <name>` to store a local bot credential
-read from a hidden prompt, stdin (`--with-token`), or a file (`--token-file`).
-The profile store defaults to `~/.octo-cli` and can be moved with
-`OCTO_CONFIG_DIR`. Tokens are encrypted at rest.
+Use `octo-cli auth list` to see the saved profiles and default. Pass `--profile`
+to choose a profile for one command, or export `OCTO_PROFILE` to choose one
+for commands in the current shell. Edit `current_profile` in `config.json`
+to change the saved default.
 
-`auth status` and `config show` report local credential settings with the
-token masked. Pass `--api-base-url` during login or use
-`auth update --api-base-url` to set a stored profile's origin.
+The CLI stores version 1 profiles in `~/.octo/cli/config.json`. Set
+`OCTO_CONFIG_DIR` to use a dedicated private directory. A managed profile
+binds the credential to its saved gateway origin and Space. Reimport to change
+that binding.
+
+Use `auth login` to save a Token locally. Choose one input, `--with-token` for
+stdin or `--token-file` for a file. The business gateway validates the Token
+when a command sends a request.
+
+```sh
+octo-cli --profile agent --space "$space_id" auth login \
+  --api-base-url "$api_origin" --with-token < "$token_file"
+```
+
+A successful import selects the profile as `current_profile`. Managed credentials
+use the system credential store when available or a private AES-256-GCM file
+with a random master key. On macOS, managed directories and files use owner-only
+permissions and accept empty or deny-only ACLs.
+
+To add a profile that reads from a file you manage, add a `token_file` source
+to `config.json`. Relative token paths are resolved from `OCTO_CONFIG_DIR` or
+the default configuration directory.
+
+```json
+{
+  "version": 1,
+  "current_profile": "agent",
+  "profiles": {
+    "agent": {
+      "api_base_url": "https://api.example.invalid",
+      "space_id": "space-id",
+      "token_source": { "type": "token_file", "path": "agent.token" }
+    }
+  }
+}
+```
+
+Use `octo-cli --profile agent auth logout` to remove the profile and clean up
+its unreferenced managed credential. A caller-owned token file stays in place.
+`config show` displays the resolved target and credential source.
 
 ## Add an OpenAPI specification
 

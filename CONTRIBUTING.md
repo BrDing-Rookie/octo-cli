@@ -61,8 +61,8 @@ and metadata extensions. The built-in service registry starts empty.
 - `golangci-lint run` — CI uses `.golangci.yml`; keep it green.
 - Errors wrap with `fmt.Errorf("context: %w", err)`. User-facing errors
   should be `*output.ExitError` so envelopes stay structured.
-- External dependencies are limited to `cobra`, `gojq`, and the standard
-  library.
+- External dependencies are limited to `cobra`, `gojq`, `golang.org/x/term`,
+  `golang.org/x/sys`, and the standard library.
 - Only add comments for non-obvious *why* — avoid narrating *what* the code
   does when the names already carry that.
 

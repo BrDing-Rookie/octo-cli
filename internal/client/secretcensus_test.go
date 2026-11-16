@@ -175,7 +175,7 @@ func TestSecretCensus_EveryPrintingSurfaceIsCovered(t *testing.T) {
 				srv := echo("application/json", `{"error":"permission_denied","message":"no"}`)
 				defer srv.Close()
 				var errOut bytes.Buffer
-				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.BotCredential{Token: "uk_t"},
+				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.Credential{Token: "uk_t"},
 					Options{Verbose: true, NoRetry: true, ErrOut: &errOut})
 				_, _ = c.Do(context.Background(), censusRequest(token, password))
 				return errOut.String()
@@ -186,7 +186,7 @@ func TestSecretCensus_EveryPrintingSurfaceIsCovered(t *testing.T) {
 			name: "the dry-run description",
 			run: func(t *testing.T) string {
 				c := New(&config.Config{APIBaseURL: "https://octo.test"},
-					&credential.BotCredential{Token: "uk_t"},
+					&credential.Credential{Token: "uk_t"},
 					Options{DryRun: true, ErrOut: io.Discard})
 				body, err := c.Do(context.Background(), censusRequest(token, password))
 				if err != nil {
@@ -203,7 +203,7 @@ func TestSecretCensus_EveryPrintingSurfaceIsCovered(t *testing.T) {
 					`{"error":"permission_denied","message":"bad password `+password+`x","detail":{"`+token+`x":1}}`)
 				defer srv.Close()
 				var errOut bytes.Buffer
-				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.BotCredential{Token: "uk_t"},
+				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.Credential{Token: "uk_t"},
 					Options{NoRetry: true, ErrOut: &errOut})
 				_, err := c.Do(context.Background(), censusRequest(token, password))
 				return censusErrorText(t, err) + errOut.String()
@@ -216,7 +216,7 @@ func TestSecretCensus_EveryPrintingSurfaceIsCovered(t *testing.T) {
 					`<html>blocked by WAF: password=`+password+`x token=`+token+`x</html>`)
 				defer srv.Close()
 				var errOut bytes.Buffer
-				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.BotCredential{Token: "uk_t"},
+				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.Credential{Token: "uk_t"},
 					Options{NoRetry: true, ErrOut: &errOut})
 				_, err := c.Do(context.Background(), censusRequest(token, password))
 				return censusErrorText(t, err) + errOut.String()
@@ -231,7 +231,7 @@ func TestSecretCensus_EveryPrintingSurfaceIsCovered(t *testing.T) {
 				}))
 				defer srv.Close()
 				var errOut bytes.Buffer
-				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.BotCredential{Token: "uk_t"},
+				c := New(&config.Config{APIBaseURL: srv.URL}, &credential.Credential{Token: "uk_t"},
 					Options{Verbose: true, ErrOut: &errOut, Timeout: "5s"})
 				_, err := c.Do(context.Background(), censusRequest(token, password))
 				return censusErrorText(t, err) + errOut.String()

@@ -23,7 +23,7 @@ import (
 
 func newTestClient(srv *httptest.Server) *Client {
 	cfg := &config.Config{APIBaseURL: srv.URL}
-	cred := &credential.BotCredential{Token: "app_test", SpaceID: "space-1"}
+	cred := &credential.Credential{Token: "app_test", SpaceID: "space-1"}
 	c := New(cfg, cred, Options{})
 	c.httpClient = srv.Client()
 	return c
@@ -445,7 +445,7 @@ func TestDo_GatewayPathRouting(t *testing.T) {
 	defer srv.Close()
 
 	cfg := &config.Config{APIBaseURL: srv.URL}
-	cred := &credential.BotCredential{Token: "app_test"}
+	cred := &credential.Credential{Token: "app_test"}
 	c := New(cfg, cred, Options{})
 	c.httpClient = srv.Client()
 
@@ -483,7 +483,7 @@ func TestParseRetryAfter_Empty(t *testing.T) {
 // surface to Do for the binary envelope path.
 func newBinaryClient(srv *httptest.Server) *Client {
 	cfg := &config.Config{APIBaseURL: srv.URL}
-	cred := &credential.BotCredential{Token: "app_test"}
+	cred := &credential.Credential{Token: "app_test"}
 	c := New(cfg, cred, Options{})
 	// srv.Client() follows redirects by default; keep our no-follow policy.
 	sc := srv.Client()
@@ -932,7 +932,7 @@ func TestBuildURL_Invalid(t *testing.T) {
 
 func TestDo_DryRunReturnsSyntheticBody(t *testing.T) {
 	cfg := &config.Config{APIBaseURL: "http://ignored"}
-	cred := &credential.BotCredential{Token: "app_drytok"}
+	cred := &credential.Credential{Token: "app_drytok"}
 	c := New(cfg, cred, Options{DryRun: true})
 
 	body, err := c.Do(context.Background(), &Request{
@@ -1026,7 +1026,7 @@ func TestDo_VerboseLogsRequestBody(t *testing.T) {
 
 func TestDo_MissingBaseURL(t *testing.T) {
 	cfg := &config.Config{} // no URLs set
-	cred := &credential.BotCredential{Token: "t"}
+	cred := &credential.Credential{Token: "t"}
 	c := New(cfg, cred, Options{})
 
 	_, err := c.Do(context.Background(), &Request{
@@ -1046,7 +1046,7 @@ func TestDo_MissingBaseURL(t *testing.T) {
 func TestNew_InvalidTimeoutWarns(t *testing.T) {
 	var buf bytes.Buffer
 	cfg := &config.Config{APIBaseURL: "http://x"}
-	c := New(cfg, &credential.BotCredential{Token: "t"}, Options{
+	c := New(cfg, &credential.Credential{Token: "t"}, Options{
 		Timeout: "not-a-duration",
 		ErrOut:  &buf,
 	})
@@ -1107,7 +1107,7 @@ func TestSecretValues_RedactedInVerboseButSentOnTheWire(t *testing.T) {
 	var trace bytes.Buffer
 	c := New(
 		&config.Config{APIBaseURL: srv.URL},
-		&credential.BotCredential{Token: "bf_secret_token"},
+		&credential.Credential{Token: "bf_secret_token"},
 		Options{Verbose: true, ErrOut: &trace},
 	)
 	if _, err := c.Do(context.Background(), &Request{
@@ -1145,7 +1145,7 @@ func TestSecretValues_RedactedInDryRun(t *testing.T) {
 
 	c := New(
 		&config.Config{APIBaseURL: "https://octo.test"},
-		&credential.BotCredential{Token: "bf_secret_token"},
+		&credential.Credential{Token: "bf_secret_token"},
 		Options{DryRun: true, ErrOut: io.Discard},
 	)
 	body, err := c.Do(context.Background(), &Request{
@@ -1175,7 +1175,7 @@ func TestSecretValues_RedactedInDryRun(t *testing.T) {
 func TestDryRun_PreservesUint64Precision(t *testing.T) {
 	c := New(
 		&config.Config{APIBaseURL: "https://octo.test"},
-		&credential.BotCredential{Token: "bf_t"},
+		&credential.Credential{Token: "bf_t"},
 		Options{DryRun: true, ErrOut: io.Discard},
 	)
 	body, err := c.Do(context.Background(), &Request{
@@ -1212,5 +1212,23 @@ func TestDo_UnstructuredNotFound(t *testing.T) {
 	}
 	if ee.Code != "NOT_FOUND" {
 		t.Fatalf("code = %q, want NOT_FOUND", ee.Code)
+	}
+}
+
+func TestProfileSpaceCannotBeOverriddenByRequestHeaders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		io.WriteString(w, `{}`)
+	}))
+	defer server.Close()
+	c := New(&config.Config{APIBaseURL: server.URL},
+		&credential.Credential{Token: "fixture-profile-bearer", SpaceID: "profile-space", Profile: "agent"}, Options{})
+	request := &Request{Method: http.MethodGet, Path: "/fixture", Headers: map[string]string{"x-space-id": "other-space"}}
+	_, err := c.Do(context.Background(), request)
+	if exit := output.AsExitError(err); exit == nil || exit.Code != "PROFILE_SCOPE_MISMATCH" {
+		t.Fatalf("profile Space override should fail before sending the request: %v", err)
+	}
+	request.Headers["x-space-id"] = "profile-space"
+	if _, err := c.Do(context.Background(), request); err != nil {
+		t.Fatalf("matching Space should work: %v", err)
 	}
 }

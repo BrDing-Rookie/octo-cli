@@ -1,126 +1,39 @@
 package cmd
 
 import (
-	"encoding/json"
-
 	"github.com/spf13/cobra"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
-	"github.com/Mininglamp-OSS/octo-cli/internal/config"
-	"github.com/Mininglamp-OSS/octo-cli/internal/credential"
-	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-// newConfigCmd returns `octo-cli config` and its subcommands. The group is
-// diagnostic-only — commands under it must tolerate an unconfigured env so an
-// agent can run `octo-cli config show` to find out what's missing.
+// newConfigCmd exposes diagnostic settings without publishing secrets.
 func newConfigCmd(f *cmdutil.Factory) *cobra.Command {
-	cmd := &cobra.Command{
-		Use:   "config",
-		Short: "Inspect CLI configuration",
-	}
-	cmd.AddCommand(newConfigShowCmd(f))
-	return cmd
-}
-
-// newConfigShowCmd prints the currently resolved configuration as a success
-// envelope. The bot token is masked (prefix only + "***") so an agent can
-// verify *which* bot is in use without leaking the secret.
-//
-// Resolution goes through the Factory's local profile configuration.
-// When the Factory can't produce a config — e.g. ambiguous profiles — fall back
-// to config.Load() so `config show` still emits a diagnostic envelope.
-func newConfigShowCmd(f *cmdutil.Factory) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{Use: "config", Short: "Inspect CLI configuration"}
+	cmd.AddCommand(&cobra.Command{
 		Use:   "show",
-		Short: "Print local profile configuration (token masked)",
+		Short: "Print the resolved target and credential source",
 		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			cfg, err := f.Config()
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := f.RequestConfig(cmd.Context())
 			if err != nil {
-				// Surface structured resolution errors (e.g. a --bot-id that
-				// matches no profile, or ambiguous profiles) instead of hiding
-				// them behind a misleading env fallback. Only the unconfigured
-				// case (a plain error / nil cfg) falls back to a diagnostic view.
-				if ee := output.AsExitError(err); ee != nil {
-					_ = f.EmitError(ee) //nolint:errcheck // best-effort envelope write
-					return ee
-				}
-				cfg = config.Load()
+				return failErr(f, err)
 			}
-			if cfg == nil {
-				cfg = config.Load()
-			}
-			space := cfg.SpaceID
-			if f.Globals != nil && f.Globals.Space != "" {
-				space = f.Globals.Space
-			}
-
-			// Prefer the resolved credential so the displayed token/source/
-			// identity reflect the active profile (not just the env var).
-			token := cfg.BotToken
-			source := defaultTokenSource(cfg.BotToken)
-			var profileName, robotID string
-			if cred, cerr := f.Credential(); cerr == nil && cred != nil {
-				token = cred.Token
-				if cred.Source != "" {
-					source = cred.Source
-				}
-				profileName = cred.Profile
-				robotID = cred.RobotID
-			}
-
-			payload := map[string]any{
-				"api_base_url":        cfg.APIBaseURL,
-				"api_base_url_source": nullableString(cfg.APIBaseURLSource),
-				"space_id":            nullableString(space),
-				"format":              cfg.Format,
-				"bot_token":           maskToken(token),
-				"bot_token_source":    nullableString(source),
-				"bot_kind":            botKind(token),
-				"profile":             nullableString(profileName),
-				"robot_id":            nullableString(robotID),
-			}
-			raw, err := json.Marshal(payload)
+			cred, err := f.Credential()
 			if err != nil {
-				return f.EmitError(err)
+				return failErr(f, err)
 			}
-			return f.EmitSuccess(raw)
+			payload := map[string]string{
+				"api_base_url": cfg.APIBaseURL, "api_base_url_source": cfg.APIBaseURLSource,
+				"space_id": cfg.SpaceID, "format": f.Format(),
+			}
+			if cred != nil && cred.Token != "" {
+				payload["source"] = cred.Source
+				if cred.Profile != "" {
+					payload["profile"] = cred.Profile
+				}
+			}
+			return emitJSON(f, payload)
 		},
-	}
-}
-
-// maskToken masks a token to its kind prefix + "***", returning nil for empty
-// so envelope consumers can detect the unconfigured case cleanly.
-func maskToken(tok string) any {
-	if tok == "" {
-		return nil
-	}
-	return credential.MaskToken(tok)
-}
-
-// defaultTokenSource is the source tag used when no resolved credential is
-// available — ResolveEnvToken is the single source of alias precedence.
-func defaultTokenSource(tok string) string {
-	if tok == "" {
-		return ""
-	}
-	if resolved := config.ResolveEnvToken(); resolved.Token != "" {
-		return resolved.Source
-	}
-	return ""
-}
-
-func botKind(tok string) any {
-	if tok == "" {
-		return nil
-	}
-	return credential.TokenKind(tok)
-}
-
-func nullableString(s string) any {
-	if s == "" {
-		return nil
-	}
-	return s
+	})
+	return cmd
 }

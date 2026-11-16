@@ -5,13 +5,11 @@ package cmdutil
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strings"
-	"sync"
 
 	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/client"
@@ -33,11 +31,15 @@ type GlobalOptions struct {
 	NoRetry bool
 	Space   string
 
-	// Profile and BotID are explicit stored-profile selectors. When BotID is
-	// empty, OCTO_BOT_ID may instead label an environment credential if the
-	// profile store is empty.
-	Profile string
-	BotID   string
+	Profile           string
+	ProfileSet        bool
+	CredentialFile    string
+	CredentialFileSet bool
+}
+
+type requestConfigResult struct {
+	value         *config.Config
+	validationErr error
 }
 
 // Factory is the DI container. All accessors are lazy + cached so a command
@@ -48,9 +50,10 @@ type Factory struct {
 	Globals   *GlobalOptions
 
 	ConfigFunc     func() (*config.Config, error)
-	CredentialFunc func() (*credential.BotCredential, error)
+	CredentialFunc func() (*credential.Credential, error)
 	ClientFunc     func() (*client.Client, error)
 	RegistryFunc   func() *registry.Registry
+	StoreFunc      func() (*authstore.Store, error)
 
 	// ErrorEmitted is set to true after EmitError writes an envelope to
 	// stderr. The top-level main func checks this to avoid double-emitting
@@ -58,232 +61,114 @@ type Factory struct {
 	ErrorEmitted bool
 
 	// Cached resolutions.
-	config *config.Config
-	cred   *credential.BotCredential
-	cli    *client.Client
-	// HTTP commands resolve their config independently of local bot profiles.
-	requestConfig          func() *config.Config
-	validatedRequestConfig *config.Config
-	requestSource          string
+	requestConfig  *requestConfigResult
+	cred           *credential.Credential
+	cli            *client.Client
+	requestContext context.Context
+	defaultFormat  func() string
 	// Compiled output query, paired with its expression for safe Factory reuse.
 	jqExpression string
 	jqProgram    *output.JQProgram
 	reg          *registry.Registry
-	store        *authstore.Store
 }
 
 // NewDefaultFactory wires the HTTP client and the local profile commands.
-// IO defaults to stdio. The root command supplies options through its flags.
 func NewDefaultFactory() *Factory {
 	f := &Factory{
 		IOStreams:     NewStdIOStreams(),
 		Globals:       &GlobalOptions{},
-		requestConfig: sync.OnceValue(config.LoadRequest),
+		defaultFormat: config.DefaultFormat,
+		StoreFunc:     func() (*authstore.Store, error) { return authstore.New(nil) },
 	}
 
 	f.ConfigFunc = func() (*config.Config, error) {
-		if f.config != nil {
-			return f.config, nil
+		ctx := f.requestContext
+		if ctx == nil {
+			ctx = context.Background()
 		}
-		cfg, err := f.buildConfig()
-		if err != nil {
-			return nil, err
-		}
-		f.config = cfg
-		return cfg, nil
-	}
-
-	f.CredentialFunc = func() (*credential.BotCredential, error) {
-		if f.cred != nil {
-			return f.cred, nil
-		}
-		cred, err := f.buildCredential()
+		cfg, cred, err := f.resolveRequest(ctx)
 		if err != nil {
 			return nil, err
 		}
 		f.cred = cred
-		return cred, nil
+		return cfg, nil
 	}
-
+	f.CredentialFunc = func() (*credential.Credential, error) {
+		_, err := f.Config()
+		return f.cred, err
+	}
 	f.ClientFunc = func() (*client.Client, error) {
 		if f.cli != nil {
 			return f.cli, nil
 		}
-		cfg, err := f.ValidatedRequestConfig()
+		cfg, err := f.ValidatedRequestConfig(f.requestContext)
 		if err != nil {
 			return nil, err
 		}
-		space := strings.TrimSpace(cfg.SpaceID)
-		if f.Globals.Space != "" {
-			space = f.Globals.Space
-		}
-		cred := &credential.BotCredential{Token: cfg.BotToken, SpaceID: space, Source: "env:" + config.EnvToken}
-		cli := client.New(cfg, cred, client.Options{
+		f.cli = client.New(cfg, f.cred, client.Options{
 			Verbose: f.Globals.Verbose,
 			DryRun:  f.Globals.DryRun,
 			NoRetry: f.Globals.NoRetry,
 			Timeout: f.Globals.Timeout,
 			ErrOut:  f.IOStreams.ErrOut,
 		})
-		f.cli = cli
-		f.requestSource = cred.Source
-		return cli, nil
+		return f.cli, nil
 	}
 
 	f.RegistryFunc = func() *registry.Registry {
-		if f.reg != nil {
-			return f.reg
+		if f.reg == nil {
+			f.reg = registry.MustNew()
 		}
-		// Specs are embedded; parse failure is a build-time bug.
-		f.reg = registry.MustNew()
 		return f.reg
 	}
-
 	return f
 }
 
-// buildConfig combines environment configuration with the selected profile.
-func (f *Factory) buildConfig() (*config.Config, error) {
-	cfg := config.Load()
-	if f.Globals.Format != "" {
-		cfg.Format = f.Globals.Format
-	}
-	cred, err := f.CredentialFunc()
-	if err != nil {
-		if errors.Is(err, credential.ErrNoCredential) {
-			return cfg, nil
-		}
-		return nil, err
-	}
-	if cred != nil {
-		if cred.Token != "" {
-			cfg.BotToken = cred.Token
-		}
-		if cred.SpaceID != "" {
-			cfg.SpaceID = cred.SpaceID
-		}
-		if err := f.overlayProfileBaseURL(cfg, cred.Profile); err != nil {
-			return nil, err
-		}
-	}
-	return cfg, nil
-}
-
-// buildCredential selects explicit profiles first, then normalized environment
-// credentials, then implicit stored profiles.
-func (f *Factory) buildCredential() (*credential.BotCredential, error) {
-	hasExplicitSelector := f.Globals.Profile != "" || f.Globals.BotID != ""
-	if !hasExplicitSelector {
-		cred, err := credential.NewEnvProvider().Resolve()
-		if err != nil {
-			return nil, err
-		}
-		if cred != nil {
-			return f.finalizeCredential(cred), nil
-		}
-	}
-
-	store, err := f.AuthStore()
-	if err != nil {
-		return nil, err
-	}
-	botID := f.Globals.BotID
-	if botID == "" {
-		botID = strings.TrimSpace(os.Getenv(config.EnvBotID))
-	}
-	chain := credential.NewChain(credential.NewFileProvider(store, f.Globals.Profile, botID))
-	cred, err := chain.Resolve()
-	if err != nil {
-		return nil, err
-	}
-	return f.finalizeCredential(cred), nil
-}
-
-func (f *Factory) finalizeCredential(cred *credential.BotCredential) *credential.BotCredential {
-	if f.Globals.Space != "" {
-		cred.SpaceID = f.Globals.Space
-	}
-	if cred.BotKind == "" {
-		cred.BotKind = credential.TokenKind(cred.Token)
-	}
-	return cred
-}
-
-// AuthStore lazily constructs and caches the credential store.
+// AuthStore opens the local profile store.
 func (f *Factory) AuthStore() (*authstore.Store, error) {
-	if f.store != nil {
-		return f.store, nil
+	if f.StoreFunc != nil {
+		return f.StoreFunc()
 	}
-	s, err := authstore.New()
-	if err != nil {
-		return nil, err
-	}
-	f.store = s
-	return s, nil
+	return authstore.New(nil)
 }
 
-// overlayProfileBaseURL applies the active profile's stored API base URL.
-// Precedence is profile > OCTO_API_BASE_URL > default: a profile that records
-// an origin routes there even when the environment variable names another one.
-func (f *Factory) overlayProfileBaseURL(cfg *config.Config, profile string) error {
-	if profile == "" {
-		return nil
-	}
-	store, err := f.AuthStore()
-	if err != nil {
-		return err
-	}
-	profiles, err := store.LoadProfiles()
-	if err != nil {
-		return err
-	}
-	if m, ok := profiles[profile]; ok && m.APIBaseURL != "" {
-		normalized, err := config.NormalizeAPIBaseURL(m.APIBaseURL)
-		if err != nil {
-			return output.ErrValidation(
-				fmt.Sprintf("profile %q has an invalid API base URL: %v", profile, err),
-				fmt.Sprintf("repair it with `octo-cli --profile %s auth update --api-base-url <origin>` or remove it with `octo-cli --profile %s auth update --clear-api-base-url`", profile, profile),
-			)
-		}
-		cfg.APIBaseURL = normalized
-		cfg.APIBaseURLSource = "profile"
-	}
-	return nil
-}
-
-// Config returns the resolved config (cached).
-func (f *Factory) Config() (*config.Config, error) { return f.ConfigFunc() }
-
-// RequestConfig returns the configuration used by HTTP commands.
-func (f *Factory) RequestConfig() (*config.Config, error) {
+// Config returns the resolved configuration for diagnostics, including when
+// the configuration cannot be used for an authenticated request.
+func (f *Factory) Config() (*config.Config, error) {
 	if f.requestConfig == nil {
-		return f.Config()
+		cfg, err := f.ConfigFunc()
+		if err != nil || cfg == nil {
+			return cfg, err
+		}
+		f.requestConfig = &requestConfigResult{value: cfg, validationErr: cfg.Validate()}
 	}
-	return f.requestConfig(), nil
+	return f.requestConfig.value, nil
 }
 
-// ValidatedRequestConfig checks HTTP options and shares config validation
-// between command preflight and client construction.
-func (f *Factory) ValidatedRequestConfig() (*config.Config, error) {
-	if f.Globals.Profile != "" || f.Globals.BotID != "" {
-		return nil, output.ErrValidation("--profile and --bot-id cannot select a credential for HTTP commands",
-			"set OCTO_TOKEN and omit the profile or bot selector")
-	}
-	cfg, err := f.RequestConfig()
+// RequestConfig resolves a request with the command's cancellation context.
+func (f *Factory) RequestConfig(ctx context.Context) (*config.Config, error) {
+	f.requestContext = ctx
+	return f.Config()
+}
+
+// ValidatedRequestConfig resolves the request and shares validation between
+// command preflight and client construction.
+func (f *Factory) ValidatedRequestConfig(ctx context.Context) (*config.Config, error) {
+	cfg, err := f.RequestConfig(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if cfg != f.validatedRequestConfig {
-		if err := cfg.Validate(); err != nil {
-			return nil, err
-		}
-		f.validatedRequestConfig = cfg
+	if cfg == nil {
+		return nil, output.ErrValidation("request configuration is missing", "")
+	}
+	if err := f.requestConfig.validationErr; err != nil {
+		return nil, err
 	}
 	return cfg, nil
 }
 
 // Credential returns the resolved credential (cached).
-func (f *Factory) Credential() (*credential.BotCredential, error) { return f.CredentialFunc() }
+func (f *Factory) Credential() (*credential.Credential, error) { return f.CredentialFunc() }
 
 // Client returns the resolved HTTP client (cached).
 func (f *Factory) Client() (*client.Client, error) { return f.ClientFunc() }
@@ -302,8 +187,13 @@ func (f *Factory) Format() string {
 	if f.Globals != nil && f.Globals.Format != "" {
 		return f.Globals.Format
 	}
-	if cfg, err := f.RequestConfig(); err == nil {
-		return cfg.Format
+	if f.defaultFormat != nil {
+		return f.defaultFormat()
+	}
+	if f.ConfigFunc != nil {
+		if cfg, err := f.Config(); err == nil && cfg != nil {
+			return cfg.Format
+		}
 	}
 	return output.FormatJSON
 }
@@ -334,24 +224,15 @@ func (f *Factory) PreflightOutput(format string) error {
 // EmitSuccess renders a success envelope, applying --jq first (if set) and
 // then the configured output format. Non-nil raw is placed inside the envelope.
 func (f *Factory) EmitSuccess(raw []byte) error {
+	return f.emit(normalizeRaw(raw), nil)
+}
+
+// EmitRequestSuccess includes the profile and source selected for the request.
+func (f *Factory) EmitRequestSuccess(raw []byte) error {
 	return f.emit(normalizeRaw(raw), f.identityValue())
 }
 
-// EmitRequestSuccess includes the source selected for the HTTP request.
-func (f *Factory) EmitRequestSuccess(raw []byte) error {
-	if f.requestSource == "" {
-		return f.EmitSuccess(raw)
-	}
-	return f.emit(normalizeRaw(raw), map[string]any{
-		"type":   output.IdentityType,
-		"source": f.requestSource,
-	})
-}
-
-// identityValue builds the envelope's identity field from the credential
-// resolved during the command. It only inspects the already-cached credential
-// (never forces resolution), so commands that don't authenticate keep the plain
-// "bot" tag. Returns nil to mean "use the default".
+// identityValue reports the request's already-resolved profile and source.
 func (f *Factory) identityValue() any {
 	if f.cred == nil {
 		return nil
@@ -359,17 +240,6 @@ func (f *Factory) identityValue() any {
 	id := map[string]any{"type": output.IdentityType}
 	if f.cred.Profile != "" {
 		id["profile"] = f.cred.Profile
-	}
-	if f.cred.RobotID != "" {
-		// An environment-supplied ID is a caller claim.
-		if f.cred.Profile != "" {
-			id["robot_id"] = f.cred.RobotID
-		} else {
-			id["robot_id_claimed"] = f.cred.RobotID
-		}
-	}
-	if kind := credential.TokenKind(f.cred.Token); kind != "" {
-		id["bot_kind"] = kind
 	}
 	if f.cred.Source != "" {
 		id["source"] = f.cred.Source
@@ -506,11 +376,11 @@ func WrapCLIError(err error) error {
 	lower := strings.ToLower(msg)
 	switch {
 	case strings.Contains(lower, "octo_token"):
-		return output.ErrAuth(msg, "set OCTO_TOKEN to a valid bearer credential")
+		return output.ErrAuth(msg, "provide a bearer via OCTO_TOKEN, a credential file, or a profile")
 	case strings.Contains(lower, "octo_bot_token"),
 		strings.Contains(lower, "bot token"),
 		strings.Contains(lower, "token is required"):
-		return output.ErrAuth(msg, "set OCTO_TOKEN or OCTO_BOT_TOKEN to a valid bearer credential")
+		return output.ErrAuth(msg, "provide a valid bearer credential")
 	// --- allowlist first: shapes proven to carry no caller value keep their text ---
 	//
 	// Order matters. These are checked before the family catch-all below, because

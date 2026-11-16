@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/Mininglamp-OSS/octo-cli/internal/authstore"
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 	"github.com/Mininglamp-OSS/octo-cli/internal/config"
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
@@ -60,7 +59,7 @@ func TestPhaseOneBusinessBearer(t *testing.T) {
 	defer server.Close()
 	t.Setenv(config.EnvAPIBaseURL, server.URL)
 	t.Setenv(config.EnvSpaceID, "fixture-space")
-	t.Setenv(config.EnvBotToken, "app_ignored")
+	t.Setenv("OCTO_BOT_TOKEN", "app_ignored")
 
 	for _, tc := range []struct {
 		name, token, wantCode, wantDetails string
@@ -112,22 +111,14 @@ func TestPhaseOneBearerSources(t *testing.T) {
 	}))
 	defer server.Close()
 	t.Setenv(config.EnvAPIBaseURL, server.URL)
-	t.Setenv(authstore.EnvConfigDir, t.TempDir())
-	store, err := authstore.New()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := store.SaveProfile("stored", &authstore.ProfileMeta{APIBaseURL: server.URL}, "app_stored"); err != nil {
-		t.Fatal(err)
-	}
 	for _, tc := range []struct{ name, token, alias string }{
-		{"stored profile", "", ""},
+		{"no credential", "", ""},
 		{"legacy environment", "", "app_old_env"},
 		{"unsafe bearer", "opaque\n", "app_old_env"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv(config.EnvToken, tc.token)
-			t.Setenv(config.EnvBotToken, tc.alias)
+			t.Setenv("OCTO_BOT_TOKEN", tc.alias)
 			before := calls.Load()
 			_, _, err := runPhaseOneCommand(t, "api", "GET", "/v1/records")
 			ee := output.AsExitError(cmdutil.WrapCLIError(err))
@@ -161,25 +152,24 @@ func TestPhaseOneBearerPreviewSource(t *testing.T) {
 	}
 }
 
-func TestPhaseOneUnsupportedSelectorsLeaveStdinUnread(t *testing.T) {
+func TestPhaseOneInvalidSelectorsLeaveStdinUnread(t *testing.T) {
 	server, calls := newOutputPreflightServer(t)
 	t.Setenv(config.EnvAPIBaseURL, server.URL)
 	t.Setenv(config.EnvToken, phaseOneToken)
 	for _, tc := range []struct {
-		name string
-		args []string
+		name, wantCode string
+		args           []string
 	}{
-		{"api profile", []string{"api", "POST", "/v1/records", "--profile", "stored"}},
-		{"generated bot id", []string{"example", "record", "create", "--bot-id", "stored"}},
+		{"missing API profile", "UNAUTHORIZED", []string{"api", "POST", "/v1/records", "--profile", "missing"}},
+		{"retired generated bot id", "VALIDATION_ERROR", []string{"example", "record", "create", "--bot-id", "stored"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newPhaseOneTestFactory()
 			f.In.WriteString(outputPreflightBody)
 			_, _, err := execRoot(t, f, append(tc.args, "--data", "@-")...)
-			ee := output.AsExitError(err)
-			if ee == nil || ee.Type != "validation" ||
-				!strings.Contains(ee.Message, "cannot select a credential for HTTP commands") {
-				t.Errorf("expected a selector validation error, got %v", err)
+			ee := output.AsExitError(cmdutil.WrapCLIError(err))
+			if ee == nil || ee.Code != tc.wantCode {
+				t.Errorf("expected %s for an invalid selector, got %v", tc.wantCode, err)
 			}
 			if f.In.String() != outputPreflightBody {
 				t.Error("command read stdin before rejecting the selector")
