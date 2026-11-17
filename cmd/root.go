@@ -15,14 +15,27 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	if f == nil {
 		f = cmdutil.NewDefaultFactory()
 	}
+	return newRootCmd(f, false)
+}
 
+func newRootCmd(f *cmdutil.Factory, mcpTool bool) *cobra.Command {
+	var defaults cmdutil.GlobalOptions
+	if mcpTool {
+		defaults = *f.Globals
+	}
 	root := &cobra.Command{
 		Use:   "octo-cli",
 		Short: "Octo CLI — an OpenAPI-driven command-line framework",
 		Long:  "octo-cli provides a generic HTTP client and generates service commands from embedded OpenAPI specs.",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			f.Globals.ProfileSet = cmd.Flags().Changed("profile")
-			f.Globals.CredentialFileSet = cmd.Flags().Changed("credential-file")
+			if mcpTool {
+				if err := validateMCPFlags(cmd); err != nil {
+					return err
+				}
+			} else {
+				f.Globals.ProfileSet = cmd.Flags().Changed("profile")
+				f.Globals.CredentialFileSet = cmd.Flags().Changed("credential-file")
+			}
 			if !skipOutputPreflight(cmd, args) {
 				if err := f.PreflightOutput(f.Format()); err != nil {
 					return err
@@ -39,23 +52,21 @@ func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	}
 
 	pf := root.PersistentFlags()
-	pf.StringVar(&f.Globals.Format, "format", "", "output format: json (default) | table | csv | ndjson")
-	pf.StringVarP(&f.Globals.JQ, "jq", "q", "", "filter output with a jq expression")
-	pf.BoolVar(&f.Globals.DryRun, "dry-run", false, "print request without executing")
-	pf.BoolVar(&f.Globals.Verbose, "verbose", false, "write request/response trace to stderr")
-	pf.StringVar(&f.Globals.Timeout, "timeout", "", "per-request timeout (default 30s; invalid values warn and use 30s)")
-	pf.BoolVar(&f.Globals.NoRetry, "no-retry", false, "disable automatic HTTP retries")
-	pf.StringVar(&f.Globals.Space, "space", "", "space context for API requests")
-	pf.StringVar(&f.Globals.Profile, "profile", "", "select a local profile (env OCTO_PROFILE)")
-	pf.StringVar(&f.Globals.CredentialFile, "credential-file", "", "read the Bearer from a file")
-
-	root.AddCommand(newSchemaCmd(f))
-	root.AddCommand(newUpgradeCmd(f))
-	root.AddCommand(newVersionCmd(f))
-	root.AddCommand(newAPICmd(f))
-	root.AddCommand(newConfigCmd(f))
-	root.AddCommand(newSkillsCmd(f))
-	root.AddCommand(newAuthCmd(f))
+	pf.StringVar(&f.Globals.Format, "format", defaults.Format, "output format: json (default) | table | csv | ndjson")
+	pf.StringVarP(&f.Globals.JQ, "jq", "q", defaults.JQ, "filter output with a jq expression")
+	pf.BoolVar(&f.Globals.DryRun, "dry-run", defaults.DryRun, "print request without executing")
+	pf.BoolVar(&f.Globals.Verbose, "verbose", defaults.Verbose, "write request/response trace to stderr")
+	pf.StringVar(&f.Globals.Timeout, "timeout", defaults.Timeout, "per-request timeout (default 30s; invalid values warn and use 30s)")
+	pf.BoolVar(&f.Globals.NoRetry, "no-retry", defaults.NoRetry, "disable automatic HTTP retries")
+	pf.StringVar(&f.Globals.Space, "space", defaults.Space, "space context for API requests")
+	root.AddCommand(newSchemaCmd(f), newVersionCmd(f), newAPICmd(f), newConfigCmd(f), newSkillsCmd(f))
+	if mcpTool {
+		root.CompletionOptions.DisableDefaultCmd = true
+	} else {
+		pf.StringVar(&f.Globals.Profile, "profile", "", "select a local profile (env OCTO_PROFILE)")
+		pf.StringVar(&f.Globals.CredentialFile, "credential-file", "", "read the Bearer from a file")
+		root.AddCommand(newAuthCmd(f), newUpgradeCmd(f), newMCPCmd(f))
+	}
 	service.RegisterServiceCommands(root, f)
 
 	return root
@@ -79,9 +90,12 @@ func skipValidation(cmd *cobra.Command) bool {
 }
 
 // skipOutputPreflight identifies commands whose output does not use the Factory
-// formatter: built-in help/completion commands and annotated command groups
-// when they have no arguments and render help.
+// formatter: stdio transports, help/completion and command groups
+// rendering their own help.
 func skipOutputPreflight(cmd *cobra.Command, args []string) bool {
+	if cmd.Annotations["skipOutputPreflight"] == "true" {
+		return true
+	}
 	if len(args) == 0 && cmd.HasSubCommands() && cmd.Annotations["skipValidation"] == "true" {
 		return true
 	}

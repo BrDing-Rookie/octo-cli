@@ -15,7 +15,7 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/output"
 )
 
-func runServerV2Command(t *testing.T, args ...string) (string, string, error) {
+func runServerV2Command(t *testing.T, args ...string) (stdout, stderr string, err error) {
 	t.Helper()
 	streams, in, out, errOut := cmdutil.NewTestIOStreams()
 	f := cmdutil.NewDefaultFactory()

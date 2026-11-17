@@ -307,6 +307,22 @@ func (f *Factory) EmitError(err error) error {
 	return output.WriteError(f.IOStreams.ErrOut, WrapCLIError(err))
 }
 
+// ExitCode reports the command's status and writes any missing error envelope.
+func (f *Factory) ExitCode(err error) int {
+	if err == nil {
+		return 0
+	}
+	wrapped := WrapCLIError(err)
+	if !f.ErrorEmitted {
+		_ = f.EmitError(wrapped) //nolint:errcheck // best-effort write before returning
+	}
+	ee := output.AsExitError(wrapped)
+	if ee == nil {
+		ee = output.ErrWithHint("internal", "INTERNAL", err.Error(), "")
+	}
+	return ee.ExitCode()
+}
+
 // --- helpers ---
 
 // WrapCLIError classifies a plain error into an *output.ExitError using narrow

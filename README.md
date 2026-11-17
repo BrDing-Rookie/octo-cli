@@ -9,7 +9,7 @@ builds a single Go binary with an extensible Cobra command tree, credential
 profiles, request previews and structured output for scripts and agents.
 
 This checkout embeds the Octo Server v2 registry under `octo-cli server`.
-The framework commands are `api`, `schema`, `auth`, `config`, `skills`,
+The framework commands are `api`, `schema`, `auth`, `config`, `skills`, `mcp`,
 `upgrade`, `version`, `help` and `completion`.
 
 ## Build and try Octo Server v2
@@ -115,6 +115,41 @@ structured envelope on stderr and a nonzero exit code. `--jq` filters the
 success envelope and `--format` selects `json`, `table`, `csv`, or `ndjson`.
 Use `--dry-run` to preview a request, `--verbose` for diagnostics, and
 `--timeout` or `--no-retry` to control transport.
+
+## Run as an MCP server
+
+Start `octo-cli mcp serve` from an MCP client's stdio configuration using the
+installed CLI binary:
+
+```json
+{
+  "command": "/absolute/path/to/octo-cli",
+  "args": ["mcp", "serve"],
+  "env": {
+    "OCTO_TOKEN_FILE": "/absolute/path/to/octo.token",
+    "OCTO_API_BASE_URL": "https://api.example.invalid"
+  }
+}
+```
+
+`octo-cli mcp` displays help. In serve mode, stdin and stdout carry MCP
+messages. Closing stdin cancels active calls and shuts down the server.
+
+The launcher can also provide `OCTO_TOKEN` or select a saved profile with
+`["--profile", "agent", "mcp", "serve"]`. The normal CLI credential precedence
+applies. The server can initialize and list tools before a credential is
+available. Authenticated commands resolve their credentials on invocation.
+
+The single tool, `exec`, accepts `{"args":["schema","--list"]}`. Pass each
+CLI argument as its own string. For example, to preview a POST request:
+
+```json
+{"args":["api","POST","/v1/items","--data","{\"name\":\"example\"}","--dry-run"]}
+```
+
+Results contain `stdout`, `stderr` and `exitCode`. A nonzero exit code also
+sets MCP's `isError`. Use inline JSON for request bodies and run local file
+operations, credential management and upgrades directly in the CLI.
 
 ## Distribution
 
