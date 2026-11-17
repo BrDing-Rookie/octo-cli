@@ -396,22 +396,21 @@ func addQueryFlagValue(
 	flagName string,
 	qf *queryFlag,
 ) *output.ExitError {
-	enum := queryEnum(rt.detail, qf.apiName)
 	label := "--" + flagName
 	required := paramRequired(rt.detail, qf.apiName, "query")
 	switch qf.kind {
 	case kindInt:
-		if err := checkEnum(label, *qf.intVal, enum); err != nil {
+		if err := checkNumericQuery(rt.detail, qf.apiName, label, *qf.intVal); err != nil {
 			return err
 		}
 		q.Set(qf.apiName, strconv.Itoa(*qf.intVal))
 	case kindFloat64:
-		if err := checkEnum(label, *qf.floatVal, enum); err != nil {
+		if err := checkNumericQuery(rt.detail, qf.apiName, label, *qf.floatVal); err != nil {
 			return err
 		}
 		q.Set(qf.apiName, strconv.FormatFloat(*qf.floatVal, 'f', -1, 64))
 	case kindBool:
-		if err := checkEnum(label, *qf.boolVal, enum); err != nil {
+		if err := checkEnum(label, *qf.boolVal, queryEnum(rt.detail, qf.apiName)); err != nil {
 			return err
 		}
 		q.Set(qf.apiName, strconv.FormatBool(*qf.boolVal))
@@ -424,7 +423,7 @@ func addQueryFlagValue(
 		if err != nil {
 			return err
 		}
-		if err := checkEnum(label, n, enum); err != nil {
+		if err := checkNumericQuery(rt.detail, qf.apiName, label, n); err != nil {
 			return err
 		}
 		q.Set(qf.apiName, *qf.strVal)
@@ -432,12 +431,23 @@ func addQueryFlagValue(
 		if err := rejectEmptyRequiredValue(label, *qf.strVal, required); err != nil {
 			return err
 		}
-		if err := checkEnum(label, *qf.strVal, enum); err != nil {
+		if err := checkEnum(label, *qf.strVal, queryEnum(rt.detail, qf.apiName)); err != nil {
 			return err
 		}
 		q.Set(qf.apiName, *qf.strVal)
 	}
 	return nil
+}
+
+func checkNumericQuery(d *registry.OperationDetail, name, label string, value any) *output.ExitError {
+	parameter := findParam(d, name, "query")
+	if parameter == nil {
+		return nil
+	}
+	if issue := numericIssue(value, parameter.Type, parameter.Minimum, parameter.Maximum); issue != "" {
+		return output.ErrValidation(label+" "+issue, "see schema for the query parameter's allowed values")
+	}
+	return checkEnum(label, value, parameter.Enum)
 }
 
 func addPositionalQueryValues(q url.Values, rt *operationRuntime, values []string) *output.ExitError {
@@ -880,25 +890,32 @@ func validateBoolean(value any, path string) *output.ExitError {
 	return nil
 }
 
-// Compare exact JSON decimals, preserving integers above the float64 precision limit.
 func validateNumber(schema *registry.SchemaInfo, value any, path string) *output.ExitError {
+	if issue := numericIssue(value, schema.Type, schema.Minimum, schema.Maximum); issue != "" {
+		return schemaError(fmt.Sprintf("field %s %s", bodyPath(path), issue))
+	}
+	return nil
+}
+
+// Compare exact JSON decimals, preserving integers above the float64 precision limit.
+func numericIssue(value any, kind string, minimum, maximum *float64) string {
 	switch value.(type) {
 	case json.Number, int, int64, uint64, float64:
 	default:
-		return schemaError(fmt.Sprintf("field %s must have type %s", bodyPath(path), schema.Type))
+		return "must have type " + kind
 	}
 	raw, err := json.Marshal(value)
 	if err != nil {
-		return schemaError(fmt.Sprintf("field %s must be a finite number", bodyPath(path)))
+		return "must be a finite number"
 	}
 	n, ok := new(big.Rat).SetString(string(raw))
-	if !ok || (schema.Type == "integer" && !n.IsInt()) {
-		return schemaError(fmt.Sprintf("field %s must have type %s", bodyPath(path), schema.Type))
+	if !ok || kind == "integer" && !n.IsInt() {
+		return "must have type " + kind
 	}
 	for _, bound := range []struct {
 		value   *float64
 		minimum bool
-	}{{schema.Minimum, true}, {schema.Maximum, false}} {
+	}{{minimum, true}, {maximum, false}} {
 		if bound.value == nil {
 			continue
 		}
@@ -908,10 +925,10 @@ func validateNumber(schema *registry.SchemaInfo, value any, path string) *output
 		}
 		comparison := n.Cmp(b)
 		if (bound.minimum && comparison < 0) || (!bound.minimum && comparison > 0) {
-			return schemaError(fmt.Sprintf("field %s is outside its allowed numeric range", bodyPath(path)))
+			return "is outside its allowed numeric range"
 		}
 	}
-	return nil
+	return ""
 }
 
 func (v bodySchemaValidator) validateComposition(

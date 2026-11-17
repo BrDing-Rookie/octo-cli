@@ -13,6 +13,7 @@ func newVersionCmd(f *cmdutil.Factory) *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print octo-cli version",
+		Args:  cobra.ExactArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			payload := map[string]any{
 				"version":    Version,

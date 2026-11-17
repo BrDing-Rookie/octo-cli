@@ -1,6 +1,7 @@
 package output
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -46,12 +47,23 @@ func ApplyJQ(v any, expr string) ([]any, error) {
 
 // Apply runs the compiled expression against v and returns its resulting values.
 func (program *JQProgram) Apply(v any) ([]any, error) {
+	return program.ApplyContext(context.Background(), v)
+}
+
+// ApplyContext evaluates the query with the command invocation's cancellation.
+func (program *JQProgram) ApplyContext(ctx context.Context, v any) ([]any, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	input, err := normalizeForJQ(v)
 	if err != nil {
 		return nil, fmt.Errorf("normalize input: %w", err)
 	}
 
-	iter := program.code.Run(input)
+	iter := program.code.RunWithContext(ctx, input)
 	var results []any
 	for {
 		r, ok := iter.Next()
@@ -59,6 +71,9 @@ func (program *JQProgram) Apply(v any) ([]any, error) {
 			break
 		}
 		if e, ok := r.(error); ok {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			// gojq's runtime errors quote the value they choked on, and that value is
 			// *response data* — which on a share command is the share token itself. So
 			// `--jq '.data.share_token|tonumber'` printed the token on stderr while

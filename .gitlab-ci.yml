@@ -1,0 +1,68 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_TAG'
+      variables:
+        MCP_RELEASE_CHANNEL: prod
+        MCP_DEPLOY_ENV: prod
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "test"'
+      variables:
+        MCP_RELEASE_CHANNEL: test
+        MCP_DEPLOY_ENV: develop
+    - if: '$CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == "develop"'
+      variables:
+        MCP_RELEASE_CHANNEL: dev
+    - when: never
+
+stages:
+  - build
+  - package
+  - deploy
+
+variables:
+  GOPROXY: "https://goproxy.cn,direct"
+
+default:
+  tags: [tke-deepmining-runner]
+
+build:
+  stage: build
+  image: "${MCP_CI_IMAGE_ROOT}/golang:1.25"
+  script:
+    - go vet ./...
+    - go test -race -shuffle=on -count=1 ./...
+    - go build ./...
+    - for script in ci/mcp/*.sh; do sh -n "$script" || exit 1; done
+
+package_image:
+  stage: package
+  image: "${MCP_CI_IMAGE_ROOT}/docker:20.10.17"
+  variables:
+    DOCKER_HOST: tcp://docker:2375
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_BUILDKIT: "1"
+  rules:
+    - if: '$MCP_RELEASE_CHANNEL'
+  script:
+    - sh ci/mcp/package.sh
+  artifacts:
+    reports:
+      dotenv: mcp-image.env
+    # Keep the immutable image reference available for the production job.
+    expire_in: 90 days
+
+deploy_mcp:
+  stage: deploy
+  # The Go runner image provides git and curl for GitOps and Argo CD.
+  image: "${MCP_CI_IMAGE_ROOT}/golang:1.25"
+  needs: [package_image]
+  resource_group: "octo-cli-mcp-$MCP_DEPLOY_ENV"
+  environment:
+    name: $MCP_DEPLOY_ENV
+  rules:
+    - if: '$MCP_DEPLOY_ENV == "develop"'
+    - if: '$MCP_DEPLOY_ENV == "prod"'
+      when: manual
+      allow_failure: false
+  script:
+    - sh ci/mcp/deploy.sh
