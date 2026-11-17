@@ -67,6 +67,9 @@ type externalSource struct {
 }
 
 func (f *Factory) externalSource() (externalSource, error) {
+	if f.requestBearer != "" {
+		return externalSource{tag: "mcp:authorization", value: f.requestBearer}, nil
+	}
 	envToken, hasToken := os.LookupEnv(config.EnvToken)
 	envFile, hasFile := os.LookupEnv(config.EnvTokenFile)
 	switch {

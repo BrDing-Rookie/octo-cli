@@ -1,11 +1,17 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 )
 
-const execTool = "exec"
+const (
+	execTool    = "exec"
+	maxExecArgs = 256
+)
 
 // ExecResult preserves the underlying command's output streams and status.
 type ExecResult struct {
@@ -17,18 +23,21 @@ type ExecResult struct {
 func listTools() map[string]any {
 	return map[string]any{"tools": []map[string]any{{
 		"name":        execTool,
-		"description": "Run an Octo CLI command with the server's configured credentials. Use schema --list or --help to discover commands. Returns stdout, stderr, and exitCode.",
-		"inputSchema": json.RawMessage(`{
-			"type": "object",
-			"properties": {
-				"args": {
-					"type": "array", "items": {"type": "string"}, "minItems": 1,
-					"description": "CLI arguments after octo-cli. Pass each argument or flag value as a separate array item."
-				}
+		"description": "Run a supported Octo CLI command. HTTP uses the request Bearer and exposes registered service operations. Use schema --list or --help to discover commands. Returns stdout, stderr, and exitCode.",
+		"inputSchema": map[string]any{
+			"type":                 "object",
+			"required":             []string{"args"},
+			"additionalProperties": false,
+			"properties": map[string]any{
+				"args": map[string]any{
+					"type":        "array",
+					"items":       map[string]string{"type": "string", "pattern": `^[^\u0000]*$`},
+					"minItems":    1,
+					"maxItems":    maxExecArgs,
+					"description": "CLI arguments after octo-cli. Pass each argument or flag value as a separate array item.",
+				},
 			},
-			"required": ["args"],
-			"additionalProperties": false
-		}`),
+		},
 	}}}
 }
 
@@ -43,21 +52,31 @@ type completedCall struct {
 	output ExecResult
 }
 
-func (s *session) startCall(ctx context.Context, msg *request, key string) *response {
-	var params struct {
-		Name      string                     `json:"name"`
-		Arguments map[string]json.RawMessage `json:"arguments"`
+func parseToolCall(msg *request) (args []string, reply *response) {
+	params, ok := decodeObject(msg.Params, "name", "arguments", "_meta")
+	var name string
+	if !ok || json.Unmarshal(params["name"], &name) != nil || name == "" {
+		return nil, failure(msg.ID, -32602, "Tool parameters require a name and arguments")
 	}
-	if json.Unmarshal(msg.Params, &params) != nil || params.Name == "" {
-		return failure(msg.ID, -32602, "A tool name and arguments are required")
+	if meta := params["_meta"]; len(meta) != 0 && meta[0] != '{' {
+		return nil, failure(msg.ID, -32602, "Tool metadata must be an object")
 	}
-	if params.Name != execTool {
-		return failure(msg.ID, -32602, "Unknown tool")
+	if name != execTool {
+		return nil, failure(msg.ID, -32602, "Unknown tool")
 	}
-	args, ok := execArgs(params.Arguments)
+	args, ok = execArgs(params["arguments"])
 	if !ok {
-		return failure(msg.ID, -32602, "exec requires args as a nonempty array of strings")
+		return nil, failure(msg.ID, -32602, fmt.Sprintf("exec requires 1 to %d strings in args without NUL characters", maxExecArgs))
 	}
+	return args, nil
+}
+
+func (s *session) startCall(ctx context.Context, msg *request) *response {
+	args, reply := parseToolCall(msg)
+	if reply != nil {
+		return reply
+	}
+	key := msg.key
 	if _, exists := s.active[key]; exists {
 		return failure(msg.ID, -32600, "Request ID is already in use")
 	}
@@ -76,17 +95,29 @@ func (s *session) startCall(ctx context.Context, msg *request, key string) *resp
 	return nil
 }
 
-func execArgs(arguments map[string]json.RawMessage) ([]string, bool) {
-	var values []*string
-	if len(arguments) != 1 || json.Unmarshal(arguments["args"], &values) != nil || len(values) == 0 {
+func execArgs(raw json.RawMessage) ([]string, bool) {
+	arguments, ok := decodeObject(raw, "args")
+	if !ok {
 		return nil, false
 	}
-	args := make([]string, len(values))
-	for i, value := range values {
-		if value == nil {
+	decoder := json.NewDecoder(bytes.NewReader(arguments["args"]))
+	if !consumeJSONToken(decoder, json.Delim('[')) {
+		return nil, false
+	}
+	var args []string
+	for decoder.More() {
+		if len(args) == maxExecArgs {
 			return nil, false
 		}
-		args[i] = *value
+		token, err := decoder.Token()
+		arg, isString := token.(string)
+		if err != nil || !isString || strings.ContainsRune(arg, 0) {
+			return nil, false
+		}
+		args = append(args, arg)
+	}
+	if !consumeJSONToken(decoder, json.Delim(']')) || len(args) == 0 {
+		return nil, false
 	}
 	return args, true
 }
@@ -109,16 +140,20 @@ func (s *session) finishCall(done completedCall) *response {
 	if call.cancelled {
 		return nil
 	}
-	text, err := json.Marshal(done.output)
+	return execResponse(call.id, s.protocol, done.output)
+}
+
+func execResponse(id json.RawMessage, version string, exec ExecResult) *response {
+	text, err := json.Marshal(exec)
 	if err != nil {
-		return failure(call.id, -32603, "Could not encode tool output")
+		return failure(id, -32603, "Could not encode tool output")
 	}
 	output := toolResult{
 		Content: []textContent{{Type: "text", Text: string(text)}},
-		IsError: done.output.ExitCode != 0,
+		IsError: exec.ExitCode != 0,
 	}
-	if s.protocol >= "2025-06-18" {
-		output.StructuredContent = &done.output
+	if version >= "2025-06-18" {
+		output.StructuredContent = &exec
 	}
-	return result(call.id, output)
+	return result(id, output)
 }

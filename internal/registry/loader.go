@@ -255,9 +255,9 @@ type ParamInfo struct {
 	Description string      `json:"description,omitempty"`
 	Default     any         `json:"default,omitempty"`
 	Enum        []any       `json:"enum,omitempty"`
-	// String constraints are exposed as schema metadata for callers; enforcing
-	// them remains the service backend's job. Enum is the exception: the CLI
-	// checks a query parameter's enum before sending (see buildQuery).
+	Minimum     *float64    `json:"minimum,omitempty"`
+	Maximum     *float64    `json:"maximum,omitempty"`
+	// String constraints are exposed for schema inspection.
 	MinLength int    `json:"min_length,omitempty"`
 	MaxLength int    `json:"max_length,omitempty"`
 	Pattern   string `json:"pattern,omitempty"`
@@ -686,6 +686,8 @@ func operationParameters(doc map[string]any, pathStr string, op map[string]any) 
 				if enum, ok := schema["enum"].([]any); ok {
 					parameter.Enum = enum
 				}
+				parameter.Minimum = numericBound(schema["minimum"])
+				parameter.Maximum = numericBound(schema["maximum"])
 				parameter.MinLength = intOf(schema["minLength"])
 				parameter.MaxLength = intOf(schema["maxLength"])
 				parameter.Pattern = stringOf(schema["pattern"])
@@ -936,12 +938,8 @@ func schemaInfoFromNode(schema map[string]any) SchemaInfo {
 		Pattern:       stringOf(schema["pattern"]),
 	}
 
-	if bound, ok := schema["minimum"].(float64); ok {
-		info.Minimum = &bound
-	}
-	if bound, ok := schema["maximum"].(float64); ok {
-		info.Maximum = &bound
-	}
+	info.Minimum = numericBound(schema["minimum"])
+	info.Maximum = numericBound(schema["maximum"])
 	if allowed, ok := schema["additionalProperties"].(bool); ok {
 		info.AdditionalProperties = &allowed
 	}
@@ -955,6 +953,13 @@ func schemaInfoFromNode(schema map[string]any) SchemaInfo {
 		info.Enum = enum
 	}
 	return info
+}
+
+func numericBound(value any) *float64 {
+	if bound, ok := value.(float64); ok {
+		return &bound
+	}
+	return nil
 }
 
 func schemaIncludesNullType(value any) bool {

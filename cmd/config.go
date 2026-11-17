@@ -8,7 +8,13 @@ import (
 
 // newConfigCmd exposes diagnostic settings without publishing secrets.
 func newConfigCmd(f *cmdutil.Factory) *cobra.Command {
-	cmd := &cobra.Command{Use: "config", Short: "Inspect CLI configuration"}
+	cmd := &cobra.Command{
+		Use:         "config",
+		Short:       "Inspect CLI configuration",
+		Args:        cobra.NoArgs,
+		Annotations: map[string]string{"skipValidation": "true"},
+		RunE:        func(c *cobra.Command, _ []string) error { return c.Help() },
+	}
 	cmd.AddCommand(&cobra.Command{
 		Use:   "show",
 		Short: "Print the resolved target and credential source",

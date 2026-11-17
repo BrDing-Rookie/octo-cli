@@ -118,6 +118,24 @@ Use `--dry-run` to preview a request, `--verbose` for diagnostics, and
 
 ## Run as an MCP server
 
+### Remote Streamable HTTP
+
+Use the [CI deployment guide](ci/mcp/README.md) to publish the enterprise
+service. For local testing, start a listener and point it at an Octo gateway.
+
+```sh
+OCTO_API_BASE_URL=https://octo-gateway.example.com \
+  ./bin/octo-cli mcp serve --listen 127.0.0.1:8765
+```
+
+Publish `/mcp` through your HTTPS ingress. Each client sends its existing Octo
+Token in the `Authorization` header. The server uses that Bearer for the call
+to the configured Octo gateway. HTTP business calls use registered CLI service
+commands. [MCP integration guide](docs/mcp-integration.md)
+and [Chinese guide](docs/mcp-integration.zh-CN.md).
+
+### Local stdio
+
 Start `octo-cli mcp serve` from an MCP client's stdio configuration using the
 installed CLI binary:
 
@@ -132,7 +150,7 @@ installed CLI binary:
 }
 ```
 
-`octo-cli mcp` displays help. In serve mode, stdin and stdout carry MCP
+`octo-cli mcp` displays help. In stdio mode, stdin and stdout carry MCP
 messages. Closing stdin cancels active calls and shuts down the server.
 
 The launcher can also provide `OCTO_TOKEN` or select a saved profile with

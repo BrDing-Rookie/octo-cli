@@ -10,15 +10,24 @@ import (
 	"github.com/Mininglamp-OSS/octo-cli/internal/cmdutil"
 )
 
+type commandMode uint8
+
+const (
+	cliMode commandMode = iota
+	mcpStdioMode
+	mcpHTTPMode
+)
+
 // NewRootCmd builds the top-level command tree.
 func NewRootCmd(f *cmdutil.Factory) *cobra.Command {
 	if f == nil {
 		f = cmdutil.NewDefaultFactory()
 	}
-	return newRootCmd(f, false)
+	return newRootCmd(f, cliMode)
 }
 
-func newRootCmd(f *cmdutil.Factory, mcpTool bool) *cobra.Command {
+func newRootCmd(f *cmdutil.Factory, mode commandMode) *cobra.Command {
+	mcpTool := mode != cliMode
 	var defaults cmdutil.GlobalOptions
 	if mcpTool {
 		defaults = *f.Globals
@@ -29,7 +38,7 @@ func newRootCmd(f *cmdutil.Factory, mcpTool bool) *cobra.Command {
 		Long:  "octo-cli provides a generic HTTP client and generates service commands from embedded OpenAPI specs.",
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if mcpTool {
-				if err := validateMCPFlags(cmd); err != nil {
+				if err := validateMCPCommand(cmd, args, mode); err != nil {
 					return err
 				}
 			} else {
@@ -59,7 +68,10 @@ func newRootCmd(f *cmdutil.Factory, mcpTool bool) *cobra.Command {
 	pf.StringVar(&f.Globals.Timeout, "timeout", defaults.Timeout, "per-request timeout (default 30s; invalid values warn and use 30s)")
 	pf.BoolVar(&f.Globals.NoRetry, "no-retry", defaults.NoRetry, "disable automatic HTTP retries")
 	pf.StringVar(&f.Globals.Space, "space", defaults.Space, "space context for API requests")
-	root.AddCommand(newSchemaCmd(f), newVersionCmd(f), newAPICmd(f), newConfigCmd(f), newSkillsCmd(f))
+	root.AddCommand(newSchemaCmd(f), newVersionCmd(f), newConfigCmd(f), newSkillsCmd(f))
+	if mode != mcpHTTPMode {
+		root.AddCommand(newAPICmd(f))
+	}
 	if mcpTool {
 		root.CompletionOptions.DisableDefaultCmd = true
 	} else {

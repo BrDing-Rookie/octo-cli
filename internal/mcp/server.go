@@ -1,4 +1,4 @@
-// Package mcp implements the local stdio transport for Octo CLI's MCP tool.
+// Package mcp serves the Octo CLI MCP tool over stdio and Streamable HTTP.
 package mcp
 
 import (
@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -20,10 +21,10 @@ const (
 )
 
 type request struct {
-	JSONRPC string          `json:"jsonrpc"`
-	ID      json.RawMessage `json:"id"`
-	Method  string          `json:"method"`
-	Params  json.RawMessage `json:"params"`
+	ID     json.RawMessage
+	Method string
+	Params json.RawMessage
+	key    string
 }
 
 type response struct {
@@ -123,32 +124,74 @@ func readFrames(ctx context.Context, in io.Reader, frames chan<- inputFrame) {
 }
 
 func (s *session) handle(ctx context.Context, line string) *response {
-	if !utf8.ValidString(line) {
-		return failure(nil, -32700, "Parse error")
-	}
-	var msg request
-	if err := json.Unmarshal([]byte(line), &msg); err != nil {
-		var syntax *json.SyntaxError
-		if errors.As(err, &syntax) {
-			return failure(nil, -32700, "Parse error")
-		}
-		return failure(nil, -32600, "Invalid request")
-	}
-	if msg.JSONRPC != "2.0" || msg.Method == "" {
-		return failure(nil, -32600, "Invalid request")
+	msg, reply := parseRequest([]byte(line))
+	if reply != nil {
+		return reply
 	}
 	if msg.ID == nil {
-		s.notify(&msg)
+		s.notify(msg)
 		return nil
 	}
-	key, ok := requestKey(msg.ID)
+	return s.request(ctx, msg)
+}
+
+func parseRequest(frame []byte) (msg *request, reply *response) {
+	if !utf8.Valid(frame) || !json.Valid(frame) {
+		return nil, failure(nil, -32700, "Parse error")
+	}
+	fields, ok := decodeObject(frame, "jsonrpc", "id", "method", "params")
+	var protocol, method string
+	if !ok || json.Unmarshal(fields["jsonrpc"], &protocol) != nil || protocol != "2.0" ||
+		json.Unmarshal(fields["method"], &method) != nil || method == "" {
+		return nil, failure(nil, -32600, "Invalid request")
+	}
+	decoded := request{ID: fields["id"], Method: method, Params: fields["params"]}
+	if decoded.ID == nil {
+		return &decoded, nil
+	}
+	key, ok := requestKey(decoded.ID)
 	if !ok {
-		return failure(nil, -32600, "Request ID must be a string or integer")
+		return nil, failure(nil, -32600, "Request ID must be a string or integer")
 	}
-	if len(msg.Params) != 0 && msg.Params[0] != '{' {
-		return failure(msg.ID, -32602, "Parameters must be an object")
+	if len(decoded.Params) != 0 && decoded.Params[0] != '{' {
+		return nil, failure(decoded.ID, -32602, "Parameters must be an object")
 	}
-	return s.request(ctx, &msg, key)
+	decoded.key = key
+	return &decoded, nil
+}
+
+// decodeObject keeps field names case-sensitive and rejects duplicates before
+// dispatch. Values remain raw so each method can validate its own schema.
+func decodeObject(raw []byte, allowed ...string) (map[string]json.RawMessage, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if !consumeJSONToken(decoder, json.Delim('{')) {
+		return nil, false
+	}
+	fields := make(map[string]json.RawMessage, len(allowed))
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, isString := token.(string)
+		if err != nil || !isString || !slices.Contains(allowed, name) || fields[name] != nil {
+			return nil, false
+		}
+		var value json.RawMessage
+		if decoder.Decode(&value) != nil {
+			return nil, false
+		}
+		fields[name] = value
+	}
+	if !consumeJSONToken(decoder, json.Delim('}')) {
+		return nil, false
+	}
+	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
+		return nil, false
+	}
+	return fields, true
+}
+
+func consumeJSONToken(decoder *json.Decoder, want json.Token) bool {
+	token, err := decoder.Token()
+	return err == nil && token == want
 }
 
 // requestKey keeps string and integer IDs distinct without rounding integers.
@@ -173,10 +216,15 @@ func requestKey(id json.RawMessage) (string, bool) {
 	return "", false
 }
 
-func (s *session) request(ctx context.Context, msg *request, key string) *response {
+func (s *session) request(ctx context.Context, msg *request) *response {
 	switch msg.Method {
 	case "initialize":
-		return s.initialize(msg)
+		if s.protocol != "" {
+			return failure(msg.ID, -32600, "Session already initialized")
+		}
+		var reply *response
+		s.protocol, reply = initialize(msg, s.buildVersion, true)
+		return reply
 	case "ping":
 		return result(msg.ID, struct{}{})
 	}
@@ -187,33 +235,39 @@ func (s *session) request(ctx context.Context, msg *request, key string) *respon
 	case "tools/list":
 		return result(msg.ID, listTools())
 	case "tools/call":
-		return s.startCall(ctx, msg, key)
+		return s.startCall(ctx, msg)
 	default:
 		return failure(msg.ID, -32601, "Method not found")
 	}
 }
 
-func (s *session) initialize(msg *request) *response {
-	if s.protocol != "" {
-		return failure(msg.ID, -32600, "Session already initialized")
-	}
+func initialize(msg *request, buildVersion string, allowLegacy bool) (version string, reply *response) {
 	var params struct {
 		ProtocolVersion string `json:"protocolVersion"`
 	}
 	if json.Unmarshal(msg.Params, &params) != nil || params.ProtocolVersion == "" {
-		return failure(msg.ID, -32602, "A protocol version is required")
+		return "", failure(msg.ID, -32602, "A protocol version is required")
 	}
-	switch params.ProtocolVersion {
-	case "2024-11-05", "2025-03-26", "2025-06-18", protocolVersion:
-		s.protocol = params.ProtocolVersion
-	default:
-		s.protocol = protocolVersion
+	version = params.ProtocolVersion
+	if !supportsProtocol(version, allowLegacy) {
+		version = protocolVersion
 	}
-	return result(msg.ID, map[string]any{
-		"protocolVersion": s.protocol,
-		"serverInfo":      map[string]string{"name": "octo-cli", "version": s.buildVersion},
+	return version, result(msg.ID, map[string]any{
+		"protocolVersion": version,
+		"serverInfo":      map[string]string{"name": "octo-cli", "version": buildVersion},
 		"capabilities":    map[string]any{"tools": struct{}{}},
 	})
+}
+
+func supportsProtocol(version string, allowLegacy bool) bool {
+	switch version {
+	case "2024-11-05":
+		return allowLegacy
+	case "2025-03-26", "2025-06-18", protocolVersion:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *session) notify(msg *request) {

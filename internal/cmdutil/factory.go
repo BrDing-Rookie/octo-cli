@@ -65,6 +65,7 @@ type Factory struct {
 	cred           *credential.Credential
 	cli            *client.Client
 	requestContext context.Context
+	requestBearer  string
 	defaultFormat  func() string
 	// Compiled output query, paired with its expression for safe Factory reuse.
 	jqExpression string
@@ -74,11 +75,19 @@ type Factory struct {
 
 // NewDefaultFactory wires the HTTP client and the local profile commands.
 func NewDefaultFactory() *Factory {
+	return NewRequestFactory(context.Background(), "")
+}
+
+// NewRequestFactory binds a command invocation to a context and optional
+// request Bearer. An empty Bearer uses the normal CLI credential configuration.
+func NewRequestFactory(ctx context.Context, bearer string) *Factory {
 	f := &Factory{
-		IOStreams:     NewStdIOStreams(),
-		Globals:       &GlobalOptions{},
-		defaultFormat: config.DefaultFormat,
-		StoreFunc:     func() (*authstore.Store, error) { return authstore.New(nil) },
+		IOStreams:      NewStdIOStreams(),
+		Globals:        &GlobalOptions{},
+		defaultFormat:  config.DefaultFormat,
+		requestContext: ctx,
+		requestBearer:  bearer,
+		StoreFunc:      func() (*authstore.Store, error) { return authstore.New(nil) },
 	}
 
 	f.ConfigFunc = func() (*config.Config, error) {
@@ -277,13 +286,15 @@ func (f *Factory) emit(raw []byte, meta output.EnvelopeMeta) error {
 	}
 
 	if f.Globals != nil && f.Globals.JQ != "" {
-		var results []any
-		var err error
-		if f.jqProgram != nil && f.jqExpression == f.Globals.JQ {
-			results, err = f.jqProgram.Apply(envelope)
-		} else {
-			results, err = output.ApplyJQ(envelope, f.Globals.JQ)
+		program := f.jqProgram
+		if program == nil || f.jqExpression != f.Globals.JQ {
+			var err error
+			program, err = output.CompileJQ(f.Globals.JQ)
+			if err != nil {
+				return err
+			}
 		}
+		results, err := program.ApplyContext(f.requestContext, envelope)
 		if err != nil {
 			return err
 		}
